@@ -1395,14 +1395,30 @@ class NewDriftTest(NewBase):
         o = power.state(self.ctx)["state"]["overridden"]
         self.assertEqual((o["what"], o["ours"], o["now"], o["suspects"]), ("cpu/max_pct", "70 %", "60 %", ["other"]))
 
-    def test_an_ignored_lpmd_is_the_suspect(self):
+    def test_an_ignored_lpmd_gets_the_slider_and_nothing_else_stops(self):
         self.units = units("cachyos-lpmd")
         power.options(self.ctx, {"ignore": ["intel_lpmd"]})
         self.tick(power.CONFLICT_RECHECK_S)
         pf.put(pf.soc_param(self.ctx), "02")
         self.tick()
+        self.assertEqual(self.tick(), "nothing")
+        st = power.state(self.ctx)["state"]
+        self.assertIsNone(st["overridden"])
+        self.assertEqual(st["yielded"], ["soc"])
+        ours = power._get(self.ctx).run["ours"]
+        self.assertFalse([k for k in ours if k.startswith("soc/")], ours)
+        self.assertIn("cpu/max_pct", ours)
+        self.set(soc_balance=5)                       # a change writes it again
+        self.assertEqual(power.state(self.ctx)["state"]["yielded"], [])
+
+    def test_an_ignored_lpmd_is_the_suspect_of_a_field_it_does_not_set(self):
+        self.units = units("cachyos-lpmd")
+        power.options(self.ctx, {"ignore": ["intel_lpmd"]})
+        self.tick(power.CONFLICT_RECHECK_S)
+        pf.gpu_profile(self.ctx, "base")
         self.tick()
-        self.assertEqual(power.state(self.ctx)["state"]["overridden"]["suspects"], ["intel_lpmd"])
+        self.tick()
+        self.assertEqual(power.state(self.ctx)["state"]["overridden"]["what"], "gpu/profile")
 
     def test_a_platform_profile_switch_is_not_drift(self):
         for word in ("performance", "low-power", "balanced"):
@@ -1427,6 +1443,82 @@ class NewDriftTest(NewBase):
         self.assertIn("gpu/profile", ours)
         self.assertIsNone(power.state(self.ctx)["state"]["overridden"])
         self.assertEqual(self.pct(), 60)                            # left to it
+
+
+class TurboClampTest(NewBase):
+    """intel_pstate clamps scaling_max_freq to base_frequency while no_turbo=1 (powerfake.Writer models it): CPU
+    boost off must not make the per-core caps fail (the owner's report "CPU settings do nothing")."""
+
+    def setUp(self):
+        super().setUp()
+        self.units = units("none")
+        self.on()
+
+    def test_boost_off_keeps_the_caps_ok(self):
+        res = self.set(turbo=False)
+        self.assertEqual(res["applied"]["failed"], [])
+        self.assertEqual((self.cap("policy0"), self.cap("policy4"), self.cap("policy10")), (2000000, 1800000, 1200000))
+        for _ in range(4):
+            self.assertIn(self.tick(), ("nothing", None, ""))
+        st = power.state(self.ctx)["state"]
+        self.assertIsNone(st["overridden"])
+        self.assertEqual(st["last"]["failed"], [])
+
+    def test_boost_off_then_a_change_that_writes_nothing_is_ok(self):
+        self.set(turbo=False)
+        self.set(pl1_w=25)
+        res = self.set(pl1_w=25)
+        self.assertTrue(res["ok"], res)
+        self.assertEqual(res["applied"]["failed"] if res["applied"] else [], [])
+
+    def test_per_core_caps_with_boost_off_stop_at_base(self):
+        res = self.set(turbo=False, cpu_cap_p_mhz=3000)
+        self.assertEqual(res["applied"]["failed"], [])
+        self.assertEqual(self.cap("policy0"), 2000000)
+        res = self.set(turbo=True)
+        self.assertEqual(res["applied"]["failed"], [])
+        self.assertEqual(self.cap("policy0"), 3000000)
+
+    def test_turning_control_off_brings_the_boot_caps_back(self):
+        self.set(turbo=False)
+        res = power.enable(self.ctx, False)
+        self.assertTrue(res["ok"], res)
+        self.assertEqual(pf.get(pf.no_turbo_path(self.ctx)), "0")
+        self.assertEqual((self.cap("policy0"), self.cap("policy4"), self.cap("policy10")), (5100000, 3800000, 2500000))
+
+
+class IgnoredCpuDaemonTest(NewBase):
+    """power-profiles-daemon ignored: when it rewrites energy preference or boost, OXP3 Deck leaves that field to
+    it instead of stopping every write (power limits included)."""
+
+    def setUp(self):
+        super().setUp()
+        self.units = units("ppd")
+        self.on()
+        self.assertTrue(power.options(self.ctx, {"ignore": ["ppd"]})["ok"])
+        self.set(pl1_w=15, epp="power", turbo=False)
+        self.assertEqual(pf.get(pf.epp_path(self.ctx)), "power")
+
+    def test_epp_rewritten_by_it_is_left_and_the_rest_keeps_working(self):
+        for i in range(14):
+            pf.put(pf.epp_path(self.ctx, f"policy{i}"), "balance_performance")
+        dids = [self.tick() for _ in range(3)]
+        self.assertNotIn("overridden", dids)
+        st = power.state(self.ctx)["state"]
+        self.assertIsNone(st["overridden"])
+        ours = power._get(self.ctx).run["ours"]
+        self.assertFalse([k for k in ours if k == "epp" or k.startswith("epp/")], ours)
+        self.assertIn("turbo", ours)
+        self.assertEqual(st["yielded"], ["epp"])
+        res = self.set(pl1_w=18)               # power limits still apply
+        self.assertEqual(round(self.watts(MSR)), 18)
+        self.assertTrue(res["ok"], res)
+
+    def test_a_speed_cap_change_is_still_an_override(self):
+        self.set(cpu_max_pct=70)
+        pf.put(pf.perf_path(self.ctx), 60)     # ppd never writes it: someone else did
+        self.tick()
+        self.assertEqual(self.tick(), "overridden")
 
 
 class BlockersTest(NewBase):

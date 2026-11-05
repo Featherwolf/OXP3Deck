@@ -139,3 +139,10 @@ test("GameControls shows the copy row; it has the effect tag and the text field 
   assert.match(c, /<TextField [^>]*value=\{manual\}/);
   assert.doesNotMatch(c, /setLaunchOptions/, "copying never writes");
 });
+
+test("copyLine never adds frame generation keys (they can crash a game)", () => {
+  const fg = { key: "XESS_FG", value: "3", why: "x" };
+  const r = copyLine({ ...base, text: "%command%", suggest: [fg, XESS, { key: "FSR_FG", value: "xess", why: "x" }] });
+  assert.equal(r.line, "XESS=latest %command%");
+  assert.doesNotMatch(r.line, /XESS_FG|FSR_FG/);
+});

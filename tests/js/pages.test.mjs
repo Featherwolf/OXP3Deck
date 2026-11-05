@@ -317,3 +317,57 @@ test("review fixes: greyed-out reasons, pending rows after success, one error, o
   // no "Saved" next to the pending row while the game runs
   assert.match(src("components/GameControls.tsx"), /setSaved\(r\.ok && !\(running && what\)\);/);
 });
+
+test("the scheduler mode warns up front and asks first while a game runs and the profile is active", () => {
+  const s = src("components/ExtrasControls.tsx");
+  assert.match(s, /full: "Changing it while a game runs can freeze the game; change it before starting the game\."/);
+  assert.match(s, /description=\{explainWhen\(SCX_WARN\.line, EFFECTS\["extras\.scx"\]/);
+  assert.match(s, /if \(await scxGoAhead\(app, active\)\) write\(\{ scx_mode: m \}\);/);
+  assert.match(s, /!running \|\| !applies \|\| await confirm\(/);
+  assert.match(s, /if \(what === "scx" && !\(await scxGoAhead\(app, true\)\)\) return null;/);
+  const line = /line: "([^"]+)"/.exec(s.slice(s.indexOf("export const SCX_WARN")))[1];
+  assert.ok(line.length <= 80, line);
+  // the Power tab passes whether the edited profile runs now
+  assert.match(src("pages/Power.tsx"), /<ExtrasRows [^\n]*active=\{active\} \/>/);
+});
+
+test("frame generation: a known crash asks first, the general warning is in the Details", () => {
+  const s = src("components/GameControls.tsx");
+  assert.match(s, /export const FG_CRASH_LINE = "Frame generation can crash some games; if a game crashes, turn it off\.";/);
+  assert.match(s, /if \(o\.data && !\(await risky\(fgIssue, /);
+  assert.match(s, /if \(m\.data && !\(await risky\(fsrIssue, m\.label\)\)\) return;/);
+  assert.match(s, /fgIssue \? "Crashes this game: leave it on Game default\."/);
+  assert.match(s, /\(game\?\.known_issues \?\? \[\]\)\.map\(/);
+  assert.match(s, /\(game\?\.checks \?\? \[\]\)\.map\(/);
+});
+
+test("the CPU status line shows the values in effect, and the quick panel shows it under the CPU controls", async () => {
+  const { cpuNowLine } = await import("../../src/power.ts");
+  const n = { cpu_max_pct: 60, cpu_min_pct: 9, epp: "balance_power", turbo: false, soc: { balance: 4, offset: 0, profile: "balanced", choices: [] } };
+  assert.equal(cpuNowLine(n), "Cap 60 % · Min 9 % · Energy: Balance power · Boost: off · Balance 4 (balanced)");
+  assert.equal(cpuNowLine({ epp: null, turbo: null, soc: null }), "Cap ? % · Min ? % · Energy: ? · Boost: ?");
+  assert.match(src("pages/Power.tsx"), /label="CPU" detail=\{cpuNowLine\(n\)\}/);
+  assert.match(src("components/PowerControls.tsx"), /label="CPU now" detail=\{cpuNowLine\(state\.now\)\}/);
+  assert.match(src("components/PowerControls.tsx"), /\{state\.blocked && \(\s*<PanelSectionRow>\s*<Status ok=\{false\} label="Paused" detail="Changes are saved and apply once the other program stops\."/);
+  assert.match(src("components/PowerControls.tsx"), /state\.now\.governor === "performance" && \(/);
+  const cpu = src("components/CpuControls.tsx");
+  assert.match(cpu, /On battery: the device's own floor \(\$\{minR\.lo\} %\) runs now\./);
+  assert.match(cpu, /With CPU boost off the cores stop at their base speed, so a high cap changes nothing\./);
+});
+
+test("yieldedText names what an ignored program got back", async () => {
+  const { yieldedText, GOVERNOR_PERFORMANCE } = await import("../../src/power.ts");
+  assert.equal(yieldedText([], "x"), null);
+  assert.equal(yieldedText(["epp"], "Power Profiles"), "Energy preference left to Power Profiles.");
+  assert.equal(yieldedText(["epp", "turbo", "soc"], "it"), "Energy preference, CPU boost and the CPU vs GPU balance left to it.");
+  assert.ok(GOVERNOR_PERFORMANCE.line.length <= 80);
+  assert.match(GOVERNOR_PERFORMANCE.detail, /A reboot or the desktop's power settings reset it\./);
+  assert.match(src("components/PowerControls.tsx"), /const yielded = yieldedText\(state\.yielded, ignoredOwner\);/);
+});
+
+test("no libxess_fg.dll counts only without an FSR route (FSR=xess / FSR_FG bring XeSS frame generation in)", () => {
+  const s = src("components/GameControls.tsx");
+  assert.match(s, /const noFgLib = game\?\.has_fg === false && !cur\.FSR && !cur\.FSR_FG;/);
+  assert.doesNotMatch(s, /game\?\.has_fg === false \?/);
+  assert.match(s, /\{steam && cur\.XESS_FG && noFgLib && \(/);
+});

@@ -17,7 +17,7 @@ import { invalidate, notePending, useCurrentJob, useResource } from "../store";
 import { firstSentence, fitsOneLine } from "../text";
 import type { Overview, XessDriver, XessStateRes, XessUpdateCheck } from "../types";
 import { listText, toast } from "../util";
-import { checkText, offerLabel, pieceText, repairText, xessOffer } from "../xessoffer";
+import { checkText, offerLabel, pieceText, releaseRows, repairText, xessOffer } from "../xessoffer";
 import { xessLine } from "./Quick";
 
 /** What switch-driver.sh is given: the major.minor prefix when it names one driver, else the full version. */
@@ -90,6 +90,9 @@ export const XessTab: FC = () => {
               x?.installed ? (x.managed ? "Installed by OXP3 Deck." : "Installed by hand; Update moves it to a folder OXP3 Deck manages.") : null]),
             lines: x ? [...(x.package_dir ? [`package: ${x.package_dir}`] : []), `driver check at log-in: ${x.units.check ?? "not set up"}`, `prefix watcher: ${x.units.watcher ?? "not set up"}`] : undefined,
           }} />
+          {x?.installed && releaseRows(version, (x.system_protons ?? []).map((p) => p.name)).map((r) => (
+            <Status key={r.id} ok={false} label={r.label} detail={r.line} details={{ title: r.label, body: r.detail }} />
+          ))}
           {x?.script_running && (
             <Status ok={null} label="Installer still running" detail="Buttons wait until it ends."
               details={{ title: "Installer still running", body: "A package script started before the plugin restarted (a Decky or plugin update) and runs to its end. Install, Uninstall, the driver switch, the add-on and removing old folders wait until it has ended; open this page again then.", lines: [x.script_running] }} />

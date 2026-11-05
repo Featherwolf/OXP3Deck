@@ -10,8 +10,8 @@ import { power_enable, power_info, power_profile, power_take_control } from "../
 import { friendlyName, lockedLine } from "../conflicts";
 import { EFFECTS } from "../effects";
 import {
-  blockers, capRows, clampW, editSlot, EMPTY, eppOptions, RESET, fwValues, gpuNotches, limitsLine, pl1Change, pl2Floor,
-  profileLine, reasonText, shown, Slot, suspects, watts,
+  blockers, capRows, clampW, cpuNowLine, editSlot, EMPTY, eppOptions, GOVERNOR_PERFORMANCE, RESET, fwValues, gpuNotches,
+  limitsLine, pl1Change, pl2Floor, profileLine, reasonText, shown, Slot, suspects, watts, yieldedText,
 } from "../power";
 import { RunningApp } from "../steam";
 import { invalidate, notePower, powerWriter, usePowerErrors, usePowerState, useResource } from "../store";
@@ -88,6 +88,8 @@ export const PowerStatusRows: FC<{ info: PowerInfo | null; state: PowerState; qu
   const blocking = blockers(info?.conflicts);
   const gpuHeld = state.enabled && (state.now.gpu?.reasons ?? []).some((r) => /^(pl\d|power|vr_tdc)$/.test(r));
   const sus = o ? suspects(o, info?.conflicts) : [];
+  const ignoredOwner = listText((info?.conflicts ?? []).filter((c) => c.kind === "cpu" && c.ignored).map((c) => friendlyName(c.id, c.name))) || "another program";
+  const yielded = yieldedText(state.yielded, ignoredOwner);
   const susNames = (o?.suspects ?? []).map((id) => (id === "steam" ? "Steam's own sliders" : id === "other" ? "another program"
     : friendlyName(id, info?.conflicts.find((c) => c.id === id)?.name)));
   return (
@@ -122,6 +124,23 @@ export const PowerStatusRows: FC<{ info: PowerInfo | null; state: PowerState; qu
             </ButtonItem>
           </WithDetails>
           <Problem what="Take control" error={act.error} />
+        </PanelSectionRow>
+      )}
+      {state.enabled && state.now.governor === "performance" && (
+        <PanelSectionRow>
+          <Status ok={false} red label={GOVERNOR_PERFORMANCE.label} detail={GOVERNOR_PERFORMANCE.line}
+            details={{ title: GOVERNOR_PERFORMANCE.label, body: paragraphs([GOVERNOR_PERFORMANCE.detail,
+              "With this policy the kernel holds every core at its top allowed speed: the CPU speed cap still works, energy preference cannot change and the minimum speed equals the cap. Another tool (SimpleDeckyTDP's governor setting, for example) set it; OXP3 Deck does not change it."]),
+              lines: ["cpufreq scaling_governor: performance (OXP3 Deck expects powersave with intel_pstate active)"] }} />
+        </PanelSectionRow>
+      )}
+      {state.enabled && yielded && (
+        <PanelSectionRow>
+          <Status ok={false} label="Left to another program" detail={yielded}
+            details={{ title: "Left to another program", body: paragraphs([
+              `${yielded} You set ${ignoredOwner} to be ignored, and it changed this again (power-profiles-daemon does on a power mode or charger change).`,
+              "OXP3 Deck leaves it instead of fighting; every other setting, the power limits too, keeps applying. Your value is written again at your next change, or turn the program off with Fix for me under Other power programs.",
+            ]) }} />
         </PanelSectionRow>
       )}
       {state.enabled && caps.length > 0 && (
@@ -287,6 +306,12 @@ export const ValuesEditor: FC<{
   const resetD = det("Reset to device defaults", [`Every value of ${what} goes back to the device's own.`, active ? "Applies at once." : "Saved now; used when this profile is active."]);
   return (
     <>
+      {state.blocked && (
+        <PanelSectionRow>
+          <Status ok={false} label="Paused" detail="Changes are saved and apply once the other program stops."
+            details={det("Paused", [state.blocked, "Power control is paused while another program changes the power limits. Changes here are saved in the profile and written as soon as it stops (Fix for me under Power control paused)."])} />
+        </PanelSectionRow>
+      )}
       <PanelSectionRow>
         <WithDetails details={pl1D}>
           <SliderField label={label("Sustained power", pl1D)} value={pl1} min={r.pl1_min} max={Math.max(r.pl1_min, r.pl1_max)} step={1}
@@ -351,6 +376,13 @@ export const ValuesEditor: FC<{
             )}
           </WithDetails>
           {(quick || !(cpu && cpu.epp_choices.length > 0)) && cpuRows}
+        </PanelSectionRow>
+      )}
+      {quick && cpu && active && (
+        <PanelSectionRow>
+          <Status ok={null} label="CPU now" detail={cpuNowLine(state.now)}
+            details={det("CPU now", ["The CPU values in effect now: speed cap, minimum, energy preference, CPU boost and the CPU vs GPU balance (with the power mode it counts in).",
+              "The minimum is the device's own floor on battery."])} />
         </PanelSectionRow>
       )}
       {!quick && (
@@ -439,13 +471,13 @@ export const PowerSection: FC<{ quick?: boolean; app?: RunningApp | null }> = ({
  * Fan mode and scheduler mode of a profile slot (also while power control is off), then the battery's own rows.
  * errors: show a refused power_set here too (false where a ValuesEditor beside it already shows the same error).
  */
-export const ExtrasRows: FC<{ profileKey: string; slot: Slot; stored: PowerValues; x: ExtrasState | null; battery?: boolean; errors?: boolean }> =
-  ({ profileKey, slot, stored, x, battery = true, errors = true }) => {
+export const ExtrasRows: FC<{ profileKey: string; slot: Slot; stored: PowerValues; x: ExtrasState | null; battery?: boolean; errors?: boolean; active?: boolean }> =
+  ({ profileKey, slot, stored, x, battery = true, errors = true, active = true }) => {
     const d = useDraft(profileKey, slot, stored);
     if (!x) return null;
     return (
       <PanelSectionRow>
-        <ProfileExtras v={d.values} write={d.write} x={x} />
+        <ProfileExtras v={d.values} write={d.write} x={x} active={active} />
         {battery && <ChargeRows x={x} />}
         {errors && <Problem what="Power" error={d.error} />}
       </PanelSectionRow>

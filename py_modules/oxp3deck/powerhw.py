@@ -612,22 +612,30 @@ def _apply_perf(ctx, cpu, tp, before, written, fail, checks) -> None:
 
 
 def _apply_caps(ctx, cpu, tc, before, written, fail, checks) -> None:
-    """Each policy's scaling_max_freq (kHz), clamped to [its scaling_min_freq now, cpuinfo_max_freq]."""
+    """Each policy's scaling_max_freq (kHz), clamped to [its scaling_min_freq now, its ceiling now]. The ceiling is
+    cpuinfo_max_freq, or base_frequency while turbo is off: intel_pstate then clamps policy->max to the non-turbo
+    maximum (intel_pstate_verify_cpu_policy), so a higher value reads back lower and would count as not taken.
+    Compared with a fresh read, not `before`: step 4 (turbo) may have just changed it."""
     if not tc:
         return
-    cur = before.get("caps") or {}
+    no_turbo = _int(_read(_no_turbo_path(ctx))) == 1
     for pol in cpu.get("policies") or []:
         if pol not in tc or tc[pol] is None:
             continue
         item = f"cpu/cap/{pol}"
         want = int(tc[pol])
         hi = _int(_read(_policy_file(ctx, pol, "cpuinfo_max_freq")))
+        if no_turbo:
+            base = _int(_read(_policy_file(ctx, pol, "base_frequency")))
+            if base:
+                hi = base if hi is None else min(hi, base)
         lo = _int(_read(_policy_file(ctx, pol, "scaling_min_freq")))
         if hi is not None:
             want = min(want, hi)
         if lo is not None:
             want = max(want, lo)
-        if not _close(cur.get(pol), want, CAP_TOLERANCE_KHZ):
+        cur = _int(_read(_policy_file(ctx, pol, "scaling_max_freq")))
+        if not _close(cur, want, CAP_TOLERANCE_KHZ):
             try:
                 _write(_policy_file(ctx, pol, "scaling_max_freq"), str(want))
                 written.append(item)

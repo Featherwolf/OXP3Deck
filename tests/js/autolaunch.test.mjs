@@ -91,3 +91,12 @@ test("effectiveOn, the per-game choice and reading stored values", () => {
   const rl = readLog({ 5: { added: { XESS: "latest", EVIL: "x" }, why: ["w", 3], at: 9, done: ["XESS", "NOPE"], undone: false }, bad: {} });
   assert.deepEqual(rl, { 5: { added: { XESS: "latest" }, why: ["w"], at: 9, done: ["XESS"], undone: false } });
 });
+
+test("plan never adds frame generation, whatever the backend suggests (MH Wilds crashed with XESS_FG)", () => {
+  const fg = { key: "XESS_FG", value: "2", why: "x" };
+  const fsrFg = { key: "FSR_FG", value: "xess", why: "x" };
+  assert.deepEqual(plan("", [fg, fsrFg], undefined), { text: "", added: [] });
+  const p = plan("%command%", [fg, XESS, fsrFg], undefined);
+  assert.equal(p.text, "XESS=latest %command%");
+  assert.deepEqual(p.added.map((a) => a.key), ["XESS"]);
+});

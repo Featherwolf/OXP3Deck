@@ -320,8 +320,54 @@ type GameInfo = {
               xell_unsupported: boolean|null, logged_at: number|null } | null,
                                         // from the prefix (null: no prefix; xell_unsupported null: not logged)
   advice: string[],                     // e.g. "XeSS 2.0.1: add XESS=latest", "XeLL 1.2: frame generation may fail"
+  // 0.4.x
+  known_issues: GameIssue[],            // games.py KNOWN_ISSUES (below)
+  fg_crash: boolean,                    // a known issue: XeSS frame generation crashes the game
+  has_fg: boolean|null,                 // libxess_fg.dll in the folder (null: folder unknown or searched in part)
+  prefix_checks: { driverstore_capital: boolean, driverstore_capital_shimmed: boolean|null,
+                   hides_wine: boolean|null } | null,
+  checks: { id, label, line, detail }[],   // short rows from prefix_checks and the last run (below)
 }
+// last_run also has xell_builtin ("[XeLL] Using built-in context") and fg_fullscreen (igdext_xefg.log: "Interpolation
+// is not supported in fullscreen mode"), null without that log.
 ```
+
+#### Known issues per game (games.py `KNOWN_ISSUES`, 0.4.x)
+
+`{appid: ({id, fg_crash, fsr_risk, label, line, detail, source}, ...)}`; every entry names its source, `line` fits one
+row (≤ 80). `fg_crash`: XeSS frame generation crashes the game; `fsr_risk`: FSR=xess / FSR_FG replace its signed
+FidelityFX DLL.
+
+| App | Issue | Source |
+|---|---|---|
+| 2246340 Monster Hunter Wilds | `fg_crash`, `fsr_risk`: "Frame generation crashes the game." The game has no `libxess_fg.dll` (its FG is DLSS-G / FSR 3.1), so XESS_FG has nothing to act on; FSR=xess / FSR_FG=xess replace Capcom's signed FidelityFX DLL (issue #42's crash pattern, anti-tamper suspected); XESS=latest also swaps files | owner report; xess-xmx-linux issue #42; OptiScaler wiki |
+| 292030 The Witcher 3 | "Its XeLL 1.2 refuses the add-on's GPU report, so frame gen stays off": XeLL 1.2.1.13 does not check for Wine, asks the shim for GTGeneration and accepts only 1270–1276 and 1300; the shim reports 30. What to try: Proton Experimental + XESS=latest; Compatibility mode (force_vk_vendor=-1, cross-vendor path, unverified); IGDEXT_GTGEN=1300 (experimental). proton-cachyos 11.0-20261005 hides Wine from it, so XeLL 1.3 refuses the GPU there too | XeLL 1.2.1.13 disassembly; shim GpuInfo.cpp; proton-cachyos release notes |
+
+The frontend (GameControls): each issue is a row (red while a frame generation or FSR key is set and the issue is
+`fg_crash`) with its detail and source in Details. For `fg_crash`, the Frame generation dropdown reads "Crashes this
+game: leave it on Game default." and choosing any number asks first ("Use it anyway", destructive); for `fsr_risk` /
+`fg_crash` the FSR → XeSS dropdown asks first too. Every game's frame generation Details carry "Frame generation can
+crash some games; if a game crashes, turn it off." (`FG_CRASH_LINE`). `has_fg === false` with no FSR route
+(FSR / FSR_FG unset: those bring XeSS frame generation in, and XESS_FG then sets its multi-frame, fsr-frame-generation.md:36-41)
+reads "This game has no XeSS frame generation." and, while XESS_FG is set, a row "No XeSS frame generation in this game".
+
+The XeLL 1.2 advice line no longer promises XESS=latest on a Proton without the hook (it said "swaps in XeLL 1.3.2.10"
+on system proton-cachyos, where the hook is missing): it says the hook is missing and to pick Proton Experimental;
+with `hides_wine` it adds that XeLL 1.3 may refuse the GPU too.
+
+#### What the plugin detects and shows (`checks`, 0.4.x)
+
+| id | When | Row |
+|---|---|---|
+| `driverstore` | the prefix's system32 has a `DriverStore` spelled otherwise than `driverstore` (proton-cachyos), and its `FileRepository/igd_faux.inf_1/igdext64.dll` (case-insensitive, link resolved; read only under the home, a library or a system tool folder) is not the shim | "Second driver store in the prefix": Wine picks it, so XeSS loads the stock file. Issue #46; the fix (PR #47) is on main only. Work-around: delete that folder with the game closed, or Proton Experimental |
+| `hides_wine` | `pfx/user.reg` names `HideWineExports` and the game has `libxell.dll` | "Proton hides Wine from this game": XeLL 1.3 then takes the Intel path and can refuse the GPU |
+| `fullscreen` | `last_run.fg_fullscreen` | "Last run: exclusive fullscreen": pick borderless |
+
+The XeSS tab (`xessoffer.releaseRows`): "Release older than 20261104" (its fixes: PR #43, low latency on, Mesa
+26.3.0-rc3 / 26.1.2, FSR → XeSS) and, with a system Proton named *cachyos* and a release up to 20261104, "Known bug:
+proton-cachyos driver store" (#46, fixed on main only). Not detectable from the backend, so only in the frame
+generation Details: a gamescope frame limit (the OXP3 frame-limit key, the dynamic limiter) or Steam's caps the
+generated frames too; exclusive fullscreen turns XeSS frame generation off.
 
 Launch options are read and written by the **frontend** (`SteamClient.Apps.RegisterForAppDetails`,
 `SetAppLaunchOptions`): the plugin manages only these variables before `%command%` and keeps every other token:
@@ -997,6 +1043,13 @@ with a fresh `read(gpu=False)`; `state()` (only while a panel shows) also compar
   A blocker found now sets `blocked` (tick answers "blocked"; writes resume by themselves once it is gone), not
   `overridden`. A drift of `epp` or `turbo` while a "cpu" conflict is now active drops `epp` and `turbo` from `ours`
   (they are left to it, as `cpu_blocked` says) and answers "nothing": power limits and GPU clocks go on.
+- 0.4.x (owner report "CPU power settings don't seem to affect anything"): a drift of a CPU field group (`epp`,
+  `turbo`, `cpu_pct`, `cpu_caps`, `soc`) by an **ignored** "cpu" conflict that sets that group (`FIELD_BLOCKERS`:
+  power-profiles-daemon rewrites EPP on a power mode or charger change) is no longer an override that stops every
+  write, power limits included: that group leaves `ours`, `p.yielded[group] = [ids]` (in memory) and the drift answers
+  "nothing". `state.yielded` lists those groups; the status rows show "Left to another program" ("Energy preference
+  left to Power Profiles.") with Details. The next apply that writes the group (a slider change, an event) takes it
+  back. A drift by anything else, or of a group the ignored program does not set, is an override as before.
 - `suspects`: for a RAPL or `gpu/*` item the active "blocks" conflicts (ignored ones too), for `epp` / `turbo` the
   "cpu" ones; none → `["steam"]`.
 - The UI shows the red line "Something else changed the power limits (now 35 W, OXP3 Deck set 15 W). Likely: <names>."
@@ -1584,8 +1637,13 @@ like PL1, drift-detected like EPP, restored by "TDP control" off from the boot s
    powerhw's last guard lowers a target `min` above the target `max` to it. An equal value is not written. Never
    "0" (the driver reads it as "the floor").
 8. **caps** (ids `cpu/cap/policyN`): each policy's `scaling_max_freq` in kHz, clamped to
-   `[that policy's scaling_min_freq read now, cpuinfo_max_freq]`; read back within `CAP_TOLERANCE_KHZ = 100_000`
-   (HWP rounds to its ratio steps). EINVAL → failed for that policy, the others go on.
+   `[that policy's scaling_min_freq read now, its ceiling]`; the ceiling is `cpuinfo_max_freq`, or, while
+   `no_turbo` reads 1, `min(cpuinfo_max_freq, base_frequency)`: intel_pstate (kernel 7.2,
+   `intel_pstate_verify_cpu_policy`) clamps policy->max to the non-turbo maximum then, so the boot value (5100 MHz)
+   reads back as the base speed. Compared with a fresh read of `scaling_max_freq`, not `before` (step 4 may have
+   just turned turbo off). Read back within `CAP_TOLERANCE_KHZ = 100_000` (HWP rounds to its ratio steps). EINVAL →
+   failed for that policy, the others go on. (0.4.x fix: before it, CPU boost off made every per-core cap fail and a
+   later change that wrote nothing was refused as a whole with "cpu/cap/policy0: did not take".)
 9. **soc** (ids `soc/offset`, `soc/balance`, `soc/profile`): write `slider_offset`, then `slider_balance`, then, only
    when the `profile` file reads exactly `balanced` now, write `balanced` to it (the kernel never skips a same-value
    write, and that write is what sends the slider to the firmware). When it reads anything else, the params are
@@ -1810,7 +1868,15 @@ extras_set); `tick` does steps 1–5.
    **Drift**: `ours` quiet/max and `pwm1_enable` reads 2 (outside 10 s after a resume) → `overridden` "Something
    else set the fan back to Auto" (Handheld Daemon, steamos-manager), no fan writes until `extras_take_control("fan")`
    or a fan setting change.
-3. **scx mode**: wanted = `active.values.scx_mode` (null = leave). Read the three properties at most every
+3. **scx mode** (0.4.x warning: the owner saw a game freeze when the mode was switched while it ran. The row's line is
+   "Can freeze a running game: change it before you start the game." and its Details say "Changing it while a game
+   runs can freeze the game; change it before starting the game." While a game runs and the edited profile slot is
+   the active one (the change would apply now), the dropdown and "Take control of the scheduler" ask first
+   ("Change the scheduler mode now?", destructive, Cancel keeps the old mode). A confirm rather than "apply at the
+   next game start": the mode is per profile and a game profile already switches at its game's start, while the game
+   loads, so deferring would still switch with a game running and would make the dropdown show a mode that is not
+   in effect; the confirm keeps the owner's choice explicit, defaults to not switching, and needs no backend state):
+   wanted = `active.values.scx_mode` (null = leave). Read the three properties at most every
    `SCX_CHECK_S = 10` s (and right before a call). When wanted is set, the loader runs `scx_lavd` and
    `SchedulerMode` ≠ wanted: on the first change record `before` (sched, mode, args), then `SwitchScheduler
    ("scx_lavd", mode)`; `ours` = mode. When wanted becomes null and `before` is set: restore (args non-empty →
@@ -1897,6 +1963,10 @@ text is never touched.
   - an FSR 3.1+ DLL and no XeSS DLL, with xess-xmx-linux 20261104+ (`features.fsr`) → `FSR=xess` ("The game has FSR
     3.1+ and no XeSS: its FSR runs on XeSS.").
   The `advice` lines stay as they are.
+  **Never frame generation** (0.4.x, owner report: XESS_FG from the launch options crashed Monster Hunter Wilds):
+  `XESS_FG` and `FSR_FG` are never suggested (games.py `NEVER_SUGGESTED`, a final filter in `_suggest`), and
+  `autolaunch.plan` and `copyopts` drop them too (`launchopts.NEVER_AUTO`), whatever the backend sends. A game with a
+  known `fsr_risk` / `fg_crash` issue gets no `FSR=xess` suggestion either.
 - **`src/autolaunch.ts`** (pure, node-tested):
   ```ts
   export type AutoSuggest = { key: ManagedKey; value: string; why: string };
@@ -2136,6 +2206,24 @@ Quick panel Power section, in order (texts ≤ 80 chars; "→ Details" as in "Up
 4. Always (when available): Fan mode, Scheduler mode, then Battery charge limit, Run from charger.
    intel_lpmd's toggle and the polling rate are on the Power tab only.
 
+0.4.x (owner report "CPU power settings don't seem to affect anything"; the CPU audit found the writes correct
+except the turbo clamp above, and the rest hidden or conditional):
+
+- **CPU values in effect** (`power.cpuNowLine`): "Cap 60 % · Min 9 % · Energy: Balance power · Boost: off · Balance 4
+  (balanced)": the Power tab's CPU row (sysfs names in its Details) and, in the quick panel, a "CPU now" row under
+  CPU boost.
+- **CPU minimum on battery**: on the active profile while on battery the line says "On battery: the device's own
+  floor (9 %) runs now." on both pages (the slider is disabled only in the quick panel).
+- **Paused**: while `state.blocked` (thermald came back), the profile editor starts with "Paused: Changes are saved
+  and apply once the other program stops."
+- **`performance` governor**: a red row up front, "CPU speed policy is Performance: energy preference and minimum
+  speed don't apply; the CPU runs at its cap." (Details: "A reboot or the desktop's power settings reset it.";
+  SimpleDeckyTDP's governor setting can leave it so; OXP3 Deck does not change it).
+- **Speed cap Details**: "With CPU boost off the cores stop at their base speed, so a high cap changes nothing.", and
+  when it shows at all (CPU-heavy games slow down; GPU-bound games at the power limit barely move). The minimum's
+  Details: it shows mostly at idle.
+- **Left to another program**: `state.yielded` (Drift, above).
+
 The Power tab shows the same controls in its profile editor (they edit the chosen profile and slot; extras' global
 options in a new "Battery" section, the intel_lpmd toggle under "Other power programs", "How often to check" under
 Control) and a "Live readouts" section after Status.
@@ -2255,6 +2343,23 @@ at a fixed PL1 (A/B); power_saving with a 40 FPS cap (W); min_perf_pct 50 on AC 
 charge limit 80 %, Run from charger (battery current ≈ 0 while gaming plugged in), Quiet fan (RPM, temperature,
 back to Auto at 90 °C, before sleep and on plugin reload); scx mode Gaming in a game and back after it; intel_lpmd
 paused while a game runs (`GetState` OFF) and back.
+
+### Tests 0.4.x (owner report: CPU, scheduler, XeSS frame generation)
+
+- `tests/powerfake.py`: `types()` writes a per-policy `base_frequency` (`base_khz`, P 2000 / E 1800 / LP-E 1200 MHz),
+  and `Writer` models intel_pstate's turbo clamp: with `no_turbo` 1 a policy's `scaling_max_freq` reads
+  min(the request, `base_frequency`), the request comes back with turbo on (only for policies with that file).
+- test_power `TurboClampTest`: boost off leaves `failed == []` and no override over ticks; boost off then a change
+  that writes nothing answers `ok`; per-core caps stop at base with boost off and come back with it on; TDP control
+  off restores the boot caps. `IgnoredCpuDaemonTest`: an ignored power-profiles-daemon rewriting EPP → `yielded
+  ["epp"]`, no override, power limits still apply; a speed cap drift is still an override. NewDriftTest: an ignored
+  intel_lpmd gets the slider back (`yielded ["soc"]`), a change takes it again; a GPU profile drift is an override.
+- test_games `KnownIssuesTest` (MH Wilds `fg_crash`, `has_fg` false, only XESS=latest suggested; every issue has a
+  source and a ≤ 80 line), `NeverFrameGenerationTest` (no XESS_FG / FSR_FG suggested for any DLL mix, no FSR for MH
+  Wilds, the final filter), `PrefixChecksTest` (capitalised DriverStore with a stock link → row, a shim there → none,
+  lowercase only → none; HideWineExports with XeLL and the fullscreen log line → rows; advice wording).
+- node: `plan` and `copyLine` drop XESS_FG / FSR_FG; `releaseRows`; `cpuNowLine`, `yieldedText`, the governor text;
+  source checks for the scheduler warning and confirm, the frame generation confirm and rows, the Paused row.
 
 ## Builders 0.4 (who owns which file)
 

@@ -140,7 +140,14 @@ export type GameDll = { name: string; path: string; version: string | null; kind
 export type GameLastRun = {
   trace: boolean; fallback: string | null; compile_failed: boolean; canary: boolean;
   xell_unsupported: boolean | null; logged_at: number | null;
+  xell_builtin?: boolean | null;           // XeLL's log: "Using built-in context" (cross-vendor mode); null: no log
+  fg_fullscreen?: boolean | null;          // XeSS-FG's log: exclusive fullscreen refused interpolation
 };
+/** A known issue of one game (games.py KNOWN_ISSUES), with its source. */
+export type GameIssue = { id: string; fg_crash: boolean; fsr_risk: boolean; label: string; line: string; detail: string; source: string };
+/** A row of what the prefix or the last run shows (games.py _checks). */
+export type GameCheck = { id: string; label: string; line: string; detail: string };
+export type GamePrefixChecks = { driverstore_capital: boolean; driverstore_capital_shimmed: boolean | null; hides_wine: boolean | null };
 export type GameInfo = {
   appid: string; install_dir: string | null; prefix: string | null;
   compat_tool: string | null;              // the game's own choice in Steam; null: Steam's default
@@ -153,6 +160,12 @@ export type GameInfo = {
   advice: string[];
   /** What the automatic launch options may add (DESIGN.md "Automatic launch options"); older backends: absent. */
   suggest?: GameSuggest[];
+  // 0.4.x (older backends: absent)
+  known_issues?: GameIssue[];
+  fg_crash?: boolean;                      // a known issue: XeSS frame generation crashes this game
+  has_fg?: boolean | null;                 // libxess_fg.dll in the game's folder (null: folder unknown or searched in part)
+  prefix_checks?: GamePrefixChecks | null;
+  checks?: GameCheck[];
 };
 export type GameSuggest = { key: ManagedKey; value: string; why: string };
 export type GameInfoRes = Res & { game: GameInfo | null };
@@ -236,6 +249,7 @@ export type PowerState = {
   blocked: string | null;                 // why nothing is written although enabled
   cpu_blocked: string | null;             // "<name> controls energy preference and CPU boost"
   cpu_blocked_by: string[];               // the conflict ids behind cpu_blocked (their Fix for me goes under EPP)
+  yielded?: BlockedGroup[];               // 0.4.x: field groups left to an ignored CPU program that changed them (until the next change)
   last: PowerApply | null;                // the last apply
 };
 export type PowerInfo = {

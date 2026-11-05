@@ -7,9 +7,10 @@ import { FC, useEffect, useRef, useState } from "react";
 import { useAction } from "../actions";
 import { extras_set, extras_take_control } from "../backend";
 import { EFFECTS } from "../effects";
+import { useRunningApp } from "../steam";
 import { noteExtras, useExtras } from "../store";
 import type { ExtrasState, ExtrasWhat, FanMode, PowerValues, ScxMode } from "../types";
-import { DetailsSpec, paragraphs } from "./confirm";
+import { confirm, DetailsSpec, paragraphs } from "./confirm";
 import { explainWhen, label, Note, Problem, Status, WithDetails } from "./Hint";
 
 const det = (title: string, body: (string | null | undefined | false)[], lines?: string[]): DetailsSpec =>
@@ -21,12 +22,29 @@ export const useExtrasState = (): { x: ExtrasState | null; error: string | null 
   return { x: r.data?.ok ? r.data.extras : null, error: r.data && !r.data.ok ? r.data.error : null };
 };
 
+/** The scheduler mode warning (owner report: switching scx_lavd's mode in a game froze it). */
+export const SCX_WARN = {
+  line: "Can freeze a running game: change it before you start the game.",
+  full: "Changing it while a game runs can freeze the game; change it before starting the game.",
+  confirmTitle: "Change the scheduler mode now?",
+  confirmText: (game: string) => `${game} is running. Changing the scheduler mode while a game runs can freeze the game. Safer: quit ${game}, change it, then start the game again.`,
+};
+
+/** Asks first while a game runs and the change applies now (the profile is active); true: go ahead. */
+const scxGoAhead = async (running: { name: string } | null, applies: boolean): Promise<boolean> =>
+  !running || !applies || await confirm({ title: SCX_WARN.confirmTitle, ok: "Change now", destructive: true,
+    text: SCX_WARN.confirmText(running.name), effect: EFFECTS["extras.scx"] });
+
 const TakeControl: FC<{ what: ExtrasWhat; label: string }> = ({ what, label: text }) => {
   const act = useAction();
+  const app = useRunningApp();
   return (
     <>
       <ButtonItem layout="below" disabled={!!act.busy}
-        onClick={() => act.run(what, async () => noteExtras(await extras_take_control(what)))}
+        onClick={() => act.run(what, async () => {
+          if (what === "scx" && !(await scxGoAhead(app, true))) return null;
+          return noteExtras(await extras_take_control(what));
+        })}
         description={explainWhen("Applies your setting again.", EFFECTS["extras.take_control"])}>
         {act.busy ? "Working…" : text}
       </ButtonItem>
@@ -39,8 +57,13 @@ const FAN_OPTS: { data: FanMode; label: string }[] = [{ data: "auto", label: "Au
 const SCX_OPTS: { data: ScxMode | null; label: string }[] = [{ data: null, label: "Leave as it is" }, { data: "auto", label: "Auto" },
   { data: "gaming", label: "Gaming" }, { data: "powersave", label: "Power save" }];
 
-/** Fan mode and scheduler mode of one profile slot; `write` is the profile's draft writer. */
-export const ProfileExtras: FC<{ v: PowerValues; write: (values: Partial<PowerValues>) => void; x: ExtrasState | null }> = ({ v, write, x }) => {
+/**
+ * Fan mode and scheduler mode of one profile slot; `write` is the profile's draft writer. `active`: the slot runs now,
+ * so a scheduler change applies at once (asks first while a game runs).
+ */
+export const ProfileExtras: FC<{ v: PowerValues; write: (values: Partial<PowerValues>) => void; x: ExtrasState | null; active?: boolean }> = ({ v, write, x, active = true }) => {
+  const app = useRunningApp();
+  const [rev, setRev] = useState(0);      // remounts the dropdown after a cancelled change
   if (!x) return null;
   const fan = x.fan;
   const scx = x.scx;
@@ -52,6 +75,7 @@ export const ProfileExtras: FC<{ v: PowerValues; write: (values: Partial<PowerVa
   ], ["oxp_ec hwmon pwm1_enable (2 auto, 1 manual, 0 full) and pwm1", fan.rpm != null ? `now ${fan.rpm} RPM` : "fan1_input"]);
   const scxD = det("CPU scheduler mode", [
     "CachyOS's LAVD scheduler can favour the game (Gaming), save battery (Power save) or decide itself (Auto). Per profile; \"Leave as it is\" changes nothing.",
+    `${SCX_WARN.full} While a game runs, OXP3 Deck asks before it switches. A game profile with another mode switches when that game starts, while it loads.`,
     "CachyOS's power switch may change it too; OXP3 Deck then stops and says so. Takes effect: Now.",
     scx.note ?? null,
   ], ["org.scx.Loader SwitchScheduler (scx_loader)", "scx_lavd --autopilot / --performance / --powersave", scx.scheduler ? `running: ${scx.scheduler}${scx.mode ? ` (${scx.mode})` : ""}` : "no scheduler"]);
@@ -77,9 +101,15 @@ export const ProfileExtras: FC<{ v: PowerValues; write: (values: Partial<PowerVa
       {scx.shown && (
         <>
           <WithDetails details={scxD}>
-            <DropdownItem label={label("CPU scheduler mode", scxD)} rgOptions={SCX_OPTS} selectedOption={v.scx_mode ?? null}
-              disabled={!scx.available} onChange={(o) => write({ scx_mode: o.data as ScxMode | null })}
-              description={explainWhen("Gaming favours the game; Power save saves battery.", EFFECTS["extras.scx"], scx.available ? null : scx.why)} />
+            <DropdownItem key={`scx-${rev}`} label={label("CPU scheduler mode", scxD)} rgOptions={SCX_OPTS} selectedOption={v.scx_mode ?? null}
+              disabled={!scx.available}
+              onChange={async (o) => {
+                const m = o.data as ScxMode | null;
+                if (m === (v.scx_mode ?? null)) return;
+                if (await scxGoAhead(app, active)) write({ scx_mode: m });
+                else setRev((n) => n + 1);
+              }}
+              description={explainWhen(SCX_WARN.line, EFFECTS["extras.scx"], scx.available ? null : scx.why)} />
           </WithDetails>
           {scx.overridden && (
             <>

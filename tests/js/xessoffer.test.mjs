@@ -169,3 +169,18 @@ test("jobNext: reboot, not a log-out, after a failed driver check (XESS-4)", () 
   assert.equal(jobNext("oxp3-apply", null), null);
   assert.equal(jobNext("oxp3-apply", "text"), null);
 });
+
+test("releaseRows: an older release and the unreleased proton-cachyos driver store fix", async () => {
+  const { releaseRows, FIXES_RELEASE } = await import("../../src/xessoffer.ts");
+  assert.equal(FIXES_RELEASE, "20261104");
+  assert.deepEqual(releaseRows("20261031").map((r) => r.id), ["older"]);
+  assert.deepEqual(releaseRows("20261031", ["proton-cachyos-slr"]).map((r) => r.id), ["older", "driverstore"]);
+  assert.deepEqual(releaseRows("20261104", ["proton-cachyos-slr"]).map((r) => r.id), ["driverstore"]);
+  assert.deepEqual(releaseRows("20261104", ["Proton 11.0"]), []);
+  assert.deepEqual(releaseRows("20261201", ["proton-cachyos"]), []);
+  assert.deepEqual(releaseRows(null, ["proton-cachyos"]), []);
+  for (const r of releaseRows("20261031", ["proton-cachyos"])) {
+    assert.ok(r.line.length <= 80, r.line);
+    assert.match(r.detail, /Source: /);
+  }
+});

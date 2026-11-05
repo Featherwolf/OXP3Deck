@@ -6,6 +6,9 @@ export type ManagedKey = "XESS" | "XESS_FG" | "MESA" | "force_vk_vendor" | "XESS
 /** The variables the plugin manages (xess-xmx-linux docs/launch-options.md). FSR and FSR_FG need 20261104+. */
 export const MANAGED_KEYS: readonly ManagedKey[] = ["XESS", "XESS_FG", "MESA", "force_vk_vendor", "XESS_LOG", "FSR", "FSR_FG"];
 export const FSR_KEYS: readonly ManagedKey[] = ["FSR", "FSR_FG"];
+/** Keys OXP3 Deck never adds by itself (automatic launch options, Copy launch options): frame generation can crash
+ * a game (Monster Hunter Wilds), so only the user turns it on. games.py NEVER_SUGGESTED is the same list. */
+export const NEVER_AUTO: readonly ManagedKey[] = ["XESS_FG", "FSR_FG"];
 
 /** The values xess-xmx-linux reads (MESA takes a driver version or a prefix of one, e.g. 26.1). */
 export const KNOWN_VALUES: Partial<Record<ManagedKey, readonly string[]>> = {

@@ -183,10 +183,13 @@ def _cpulist(text: str) -> list[int]:
     return out
 
 
-def types(ctx, p="0-3", atom="4-11", no_l3=(8, 9, 10, 11), max_khz=None, min_khz=400000, policies=None) -> None:
+def types(ctx, p="0-3", atom="4-11", no_l3=(8, 9, 10, 11), max_khz=None, min_khz=400000, policies=None,
+          base_khz=None) -> None:
     """A hybrid CPU: P cores `p`, atom cores `atom` (LP-E: those in `no_l3`, without cache/index3), one policy per
-    CPU (policyN for cpuN, as intel_pstate does). max_khz: {type: kHz} (cpuinfo_max_freq = scaling_max_freq)."""
+    CPU (policyN for cpuN, as intel_pstate does). max_khz: {type: kHz} (cpuinfo_max_freq = scaling_max_freq);
+    base_khz: {type: kHz} (base_frequency, the non-turbo maximum Writer clamps scaling_max_freq to with no_turbo=1)."""
     max_khz = {"p": 5100000, "e": 3800000, "lpe": 2500000, **(max_khz or {})}
+    base_khz = {"p": 2000000, "e": 1800000, "lpe": 1200000, **(base_khz or {})}
     base = ctx.sys_path("/sys/devices")
     if p is not None:
         put(os.path.join(base, "cpu_core", "cpus"), p)
@@ -202,6 +205,7 @@ def types(ctx, p="0-3", atom="4-11", no_l3=(8, 9, 10, 11), max_khz=None, min_khz
         pol = os.path.join(base, "system", "cpu", "cpufreq", f"policy{i}")
         put(os.path.join(pol, "affected_cpus"), i)
         put(os.path.join(pol, "cpuinfo_max_freq"), max_khz[kind])
+        put(os.path.join(pol, "base_frequency"), base_khz[kind])
         put(os.path.join(pol, "cpuinfo_min_freq"), 400000)
         put(os.path.join(pol, "scaling_max_freq"), max_khz[kind])
         put(os.path.join(pol, "scaling_min_freq"), min_khz)
@@ -269,12 +273,30 @@ def oxp_ec_fan(ctx, rpm, n=5) -> str:
 
 class Writer:
     """powerhw._write's stand-in: records (path, text), then writes the file. fail[path-suffix] = errno (EACCES gives
-    PermissionError) or a list of them used one per call; ignore: suffixes whose writes are dropped."""
+    PermissionError) or a list of them used one per call; ignore: suffixes whose writes are dropped.
+
+    Models intel_pstate's turbo clamp (kernel 7.2 intel_pstate_verify_cpu_policy): with no_turbo=1 a policy's
+    scaling_max_freq reads min(the request, base_frequency); the request is kept and comes back with turbo on.
+    Only for policies that have a base_frequency file."""
 
     def __init__(self):
         self.calls: list[tuple[str, str]] = []
         self.fail: dict = {}
         self.ignore: set = set()
+        self.req: dict[str, int] = {}     # policy folder -> the last scaling_max_freq asked for
+
+    def _clamp(self, pol: str) -> None:
+        base = os.path.join(pol, "base_frequency")
+        if not os.path.isfile(base):
+            return
+        nt = os.path.join(os.path.dirname(os.path.dirname(pol)), "intel_pstate", "no_turbo")
+        turbo_off = os.path.isfile(nt) and get(nt) == "1"
+        req = self.req.get(pol)
+        if req is None:
+            req = int(get(os.path.join(pol, "cpuinfo_max_freq")))
+        hi = int(get(base)) if turbo_off else int(get(os.path.join(pol, "cpuinfo_max_freq")))
+        with open(os.path.join(pol, "scaling_max_freq"), "w") as f:
+            f.write(f"{min(req, hi)}\n")
 
     def _match(self, table, path):
         for k in table:
@@ -301,6 +323,15 @@ class Writer:
             text = "[base]    power_saving" if text == "base" else "base    [power_saving]"
         with open(path, "w") as f:
             f.write(text + "\n")
+        if path.endswith("/scaling_max_freq"):
+            pol = os.path.dirname(path)
+            self.req[pol] = int(text)
+            self._clamp(pol)
+        elif path.endswith("intel_pstate/no_turbo"):
+            folder = os.path.join(os.path.dirname(os.path.dirname(path)), "cpufreq")
+            for name in sorted(os.listdir(folder)) if os.path.isdir(folder) else []:
+                if name.startswith("policy"):
+                    self._clamp(os.path.join(folder, name))
 
     def paths(self) -> list[str]:
         return [p for p, _ in self.calls]

@@ -13,16 +13,19 @@ import { effectiveOn } from "../autolaunch";
 import { getLaunchOptions, isSteamApp, RunningApp, setLaunchOptions } from "../steam";
 import { EFFECTS } from "../effects";
 import { notePending, useResource } from "../store";
-import type { GameInfo, GameInfoRes, XessDriver, XessStateRes } from "../types";
+import type { GameInfo, GameInfoRes, GameIssue, XessDriver, XessStateRes } from "../types";
 import { remember, when } from "../util";
 import { firstSentence } from "../text";
-import { DetailsSpec, paragraphs } from "./confirm";
+import { confirm, DetailsSpec, paragraphs } from "./confirm";
 import { AutoLaunchRows, useAutoLog, useAutoSettings } from "./AutoLaunch";
 import { CopyLaunchRows } from "./CopyLaunch";
 import { Pending } from "./Effect";
 import { Code, explain, explainWhen, label, Note, Problem, Status, WithDetails } from "./Hint";
 
 type Opt = { data: string; label: string };
+
+/** The general frame generation warning (owner report: XeSS frame generation from the launch options crashed MH Wilds). */
+export const FG_CRASH_LINE = "Frame generation can crash some games; if a game crashes, turn it off.";
 
 /** The FSR=/FSR_FG= pair as one choice (docs/fsr-frame-generation.md in xess-xmx-linux 20261104). */
 const FSR_MODES: { data: string; label: string; set: { FSR: string | null; FSR_FG: string | null }; line: string; does: string }[] = [
@@ -175,14 +178,37 @@ export const GameControls: FC<{ app: RunningApp; quick?: boolean; running?: bool
   const fgN = Number(cur.XESS_FG);
   const game = gi.data?.game ?? null;
   const lr = game ? lastRunLine(game.last_run) : null;
+  const fgIssue = steam ? (game?.known_issues ?? []).find((i) => i.fg_crash) ?? null : null;
+  const fsrIssue = steam ? (game?.known_issues ?? []).find((i) => i.fsr_risk || i.fg_crash) ?? null : null;
+  /** A choice a known issue says crashes this game: asks first; false (and the dropdown is reset) when cancelled. */
+  const risky = async (issue: GameIssue | null, what: string): Promise<boolean> => {
+    if (!issue) return true;
+    const ok = await confirm({ title: `${what} for ${app.name}?`, ok: "Use it anyway", destructive: true, effect: EFFECTS["game.fg"],
+      text: paragraphs([`${issue.line}`, issue.detail, "If the game crashes, set it back to the game's own choice."]) });
+    if (!ok) setRev((n) => n + 1);
+    return ok;
+  };
   const fsrNow = FSR_MODES.find((f) => f.data === mode);
+  /** No libxess_fg.dll and no FSR route (FSR=xess / FSR_FG bring XeSS frame generation in, XESS_FG then sets its multi-frame). */
+  const noFgLib = game?.has_fg === false && !cur.FSR && !cur.FSR_FG;
 
   const xessD = det("XeSS version", cur.XESS === "latest" ? "Intel's newest XeSS libraries from the package replace the game's older ones while it runs; the game's own files are back when it exits. For XeSS older than 2.0.2.68."
     : cur.XESS === "dp4a" ? "XeSS without Intel's extension (super resolution on the slower DP4a path, frame generation 2x only). For comparing, or ruling the fast path out."
     : "The game's own XeSS libraries, on the fast XMX cores through the patched driver.",
   "Needs the xess-xmx-linux hook in the game's Proton.", cur.XESS ? `XESS=${cur.XESS}` : "XESS=latest or XESS=dp4a");
-  const fgD = det("Frame generation", cur.XESS_FG ? `XeSS frame generation makes ${cur.XESS_FG}x, whatever the game's menu says. Turn frame generation on in the game and keep a frame limit on.${fgN > 4 ? " Experimental: beyond what Intel supports; 7x and 8x add latency." : ""}`
-    : "The game's own frame generation choice.", "Needs XeSS frame generation 1.2 or newer in the game (else also \"Newer XeSS\" above).", cur.XESS_FG ? `XESS_FG=${cur.XESS_FG}` : "XESS_FG=2..4");
+  const fgD: DetailsSpec = {
+    ...det("Frame generation", cur.XESS_FG ? `XeSS frame generation makes ${cur.XESS_FG}x, whatever the game's menu says. Turn frame generation on in the game and keep a frame limit on.${fgN > 4 ? " Experimental: beyond what Intel supports; 7x and 8x add latency." : ""}`
+      : "The game's own frame generation choice.", "Needs XeSS frame generation 1.2 or newer in the game (else also \"Newer XeSS\" above).", cur.XESS_FG ? `XESS_FG=${cur.XESS_FG}` : "XESS_FG=2..4"),
+    body: paragraphs([
+      cur.XESS_FG ? `XeSS frame generation makes ${cur.XESS_FG}x, whatever the game's menu says. Turn frame generation on in the game and keep a frame limit on.${fgN > 4 ? " Experimental: beyond what Intel supports; 7x and 8x add latency." : ""}`
+        : "The game's own frame generation choice.",
+      FG_CRASH_LINE,
+      fgIssue ? `${fgIssue.label}: ${fgIssue.line}` : null,
+      noFgLib ? "This game has no XeSS frame generation library (libxess_fg.dll), so this setting has nothing to act on." : null,
+      "A frame limit (Steam's, or gamescope's from the OXP3 frame-limit key) caps the generated frames too; exclusive fullscreen turns XeSS frame generation off.",
+      nextStart, "Needs XeSS frame generation 1.2 or newer in the game (else also \"Newer XeSS\" above). OXP3 Deck never adds it by itself.",
+    ]),
+  };
   const expD: DetailsSpec = { title: "Show 5x–8x (experimental)", body: "Offers 5x to 8x in the frame generation list: the add-on raises the number inside Intel's library, which Intel does not support. 7x and 8x are not recommended (latency). Only changes the list; nothing is written." };
   const mesaD = det("Graphics driver", cur.MESA ? `This game uses the package's Mesa ${cur.MESA} driver.` : "The package's default driver (the XeSS tab sets it for all games).",
     "For a game that misbehaves on one driver only.", cur.MESA ? `MESA=${cur.MESA}` : "MESA=26.1 or 26.3");
@@ -191,7 +217,8 @@ export const GameControls: FC<{ app: RunningApp; quick?: boolean; running?: bool
   const logD = det("Save XeSS logs", "Writes the add-on's, XeLL's and XeSS frame generation's logs into the game's prefix (C:\\igdext_trace.log and others), for a bug report.",
     "Leave it off otherwise.", "XESS_LOG=1");
   const fsrD = det("FSR → XeSS", fsrNow?.does ?? "Set by hand; pick one of the others to replace it.",
-    "Needs xess-xmx-linux 20261104 or newer and its hook in the game's Proton.", mode === "" ? "FSR=xess / FSR_FG=xess / FSR_FG=inject" : null);
+    `Needs xess-xmx-linux 20261104 or newer and its hook in the game's Proton. It replaces the game's FidelityFX DLL while the game runs: an anti-tamper check can make the game crash (xess-xmx-linux issue #42, a Capcom game). ${FG_CRASH_LINE}${fsrIssue ? ` ${fsrIssue.label}.` : ""}`,
+    mode === "" ? "FSR=xess / FSR_FG=xess / FSR_FG=inject" : null);
   const typoD: DetailsSpec = { title: "Launch options typo", body: "The launch options have \"%command\" without its closing \"%\". Steam then passes everything as game arguments, so no setting reaches the game. \"Fix the typo\" changes it to %command% and leaves the rest as it is." };
   const optsD: DetailsSpec = { title: "Launch options", body: <Code>{text || "(none)"}</Code> };
   const pasteD: DetailsSpec = {
@@ -240,8 +267,14 @@ export const GameControls: FC<{ app: RunningApp; quick?: boolean; running?: bool
         </WithDetails>
         <WithDetails details={fgD}>
           <DropdownItem key={`fg-${key}-${experimental}`} {...below} label={label("Frame generation", fgD)} menuLabel="XeSS frame generation"
-            disabled={disabled} rgOptions={fgOpts} selectedOption={cur.XESS_FG ?? ""} onChange={(o) => change({ XESS_FG: o.data || null }, "game.fg", "Frame generation")}
-            description={explainWhen(cur.XESS_FG ? "Turn on frame gen in the game and set a frame limit." : "Uses the game's own choice.", EFFECTS["game.fg"], why)} />
+            disabled={disabled} rgOptions={fgOpts} selectedOption={cur.XESS_FG ?? ""}
+            onChange={async (o) => {
+              if (o.data && !(await risky(fgIssue, `Use XeSS frame generation ${o.data}x`))) return;
+              change({ XESS_FG: o.data || null }, "game.fg", "Frame generation");
+            }}
+            description={explainWhen(fgIssue ? "Crashes this game: leave it on Game default."
+              : noFgLib ? "This game has no XeSS frame generation."
+              : cur.XESS_FG ? "Turn on frame gen in the game and set a frame limit." : "Uses the game's own choice. Can crash some games.", EFFECTS["game.fg"], why)} />
         </WithDetails>
         <WithDetails details={expD}>
           <ToggleField label={label("Show 5x–8x (experimental)", expD)} checked={experimental} bottomSeparator="none"
@@ -267,8 +300,13 @@ export const GameControls: FC<{ app: RunningApp; quick?: boolean; running?: bool
           <WithDetails details={fsrD}>
             <DropdownItem key={`fsr-${key}`} {...below} label={label("FSR → XeSS", fsrD)} menuLabel="FSR on XeSS" disabled={disabled}
               rgOptions={fsrOpts} selectedOption={mode}
-              onChange={(o) => { const m = FSR_MODES.find((f) => f.data === o.data); if (m) change(m.set, "game.fsr", "FSR → XeSS"); }}
-              description={explainWhen(fsrNow?.line ?? "Set by hand.", EFFECTS["game.fsr"], why)} />
+              onChange={async (o) => {
+                const m = FSR_MODES.find((f) => f.data === o.data);
+                if (!m) return;
+                if (m.data && !(await risky(fsrIssue, m.label))) return;
+                change(m.set, "game.fsr", "FSR → XeSS");
+              }}
+              description={explainWhen(fsrIssue ? "Can crash this game: leave it on the game's own." : fsrNow?.line ?? "Set by hand.", EFFECTS["game.fsr"], why)} />
           </WithDetails>
         )}
         {busy && <Status ok={null} label="Saving…" />}
@@ -296,6 +334,19 @@ export const GameControls: FC<{ app: RunningApp; quick?: boolean; running?: bool
         <Problem what="Game check" error={gi.data && !gi.data.ok ? gi.data.error : null} />
         {game && <Status ok={game.compat_tool_shimmed} label={`Proton: ${toolName(game)}`} detail={protonShort(game)}
           details={{ title: `Proton: ${toolName(game)}`, body: protonLine(game) }} />}
+        {steam && (game?.known_issues ?? []).map((i) => (
+          <Status key={`issue-${i.id}`} ok={false} red={i.fg_crash && !!(cur.XESS_FG || cur.FSR || cur.FSR_FG)} label={i.label} detail={i.line}
+            details={{ title: i.label, body: paragraphs([i.detail, `Source: ${i.source}.`]) }} />
+        ))}
+        {steam && cur.XESS_FG && noFgLib && (
+          <Status ok={false} label="No XeSS frame generation in this game" detail="Frame generation here has nothing to act on."
+            details={{ title: "No XeSS frame generation in this game", body: paragraphs([
+              `The launch options set XESS_FG=${cur.XESS_FG}, but the game's folder has no libxess_fg.dll: XeSS frame generation only changes a game that ships it (XeSS version: Latest replaces only files that are there).`,
+              "Set Frame generation back to Game default. For a game with FSR 3.1+, FSR → XeSS can bring XeSS frame generation in, but it replaces the game's FidelityFX DLL and can crash a game with anti-tamper."]) }} />
+        )}
+        {steam && (game?.checks ?? []).map((c) => (
+          <Status key={`check-${c.id}`} ok={false} label={c.label} detail={c.line} details={{ title: c.label, body: c.detail }} />
+        ))}
         {(game?.advice ?? []).map((a, i) => (
           <Note key={i} label={i === 0 ? "Tip" : undefined} details={a.length > 80 ? { title: "Tip", body: a } : undefined}>{firstSentence(a)}</Note>
         ))}

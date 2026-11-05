@@ -2,7 +2,7 @@
 // record of what was added (so it is added once and Undo removes only that), and the settings. Pure, so node can test
 // it (tests/js/autolaunch.test.mjs). The user's own text is never rewritten: a key is inserted as one token at the
 // place setManaged would put it, and Undo cuts out only that token.
-import { managed, type ManagedKey, MANAGED_KEYS, parse, setManaged } from "./launchopts";
+import { managed, type ManagedKey, MANAGED_KEYS, NEVER_AUTO, parse, setManaged } from "./launchopts";
 
 export type AutoSuggest = { key: ManagedKey; value: string; why: string };
 export type AutoRecord = {
@@ -65,6 +65,7 @@ export const plan = (text: string, suggest: AutoSuggest[], rec: AutoRecord | und
   const seen = new Set<string>();
   const add = (suggest ?? []).filter((a) => {
     if (!a || !(MANAGED_KEYS as readonly string[]).includes(a.key) || !SAFE.test(a.value ?? "")) return false;
+    if (NEVER_AUTO.includes(a.key)) return false;       // never frame generation, whatever the backend says
     if (have[a.key] !== undefined || done.has(a.key) || seen.has(a.key)) return false;
     // a key set anywhere before %command% (also an unmanaged copy) counts as set
     if (p.vars.some(([k]) => k === a.key)) return false;

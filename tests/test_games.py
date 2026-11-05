@@ -79,6 +79,12 @@ class GameInfoTest(GameBase):
         self.assertIn("self-test", advice)
         self.assertIn("proton-cachyos-slr is a system Proton without the shim", advice)
         self.assertIn("shim it from the XeSS page", advice)
+        # no hook on a system Proton: XESS=latest does nothing there (xess-research: the old line was wrong)
+        self.assertIn("needs the Proton hook, which proton-cachyos-slr does not have: pick Proton Experimental", advice)
+        self.assertNotIn("XESS=latest swaps in XeLL 1.3.2.10 while the game runs", advice)
+        self.assertEqual([i["id"] for i in g["known_issues"]], ["xell12"])
+        self.assertFalse(g["fg_crash"])
+        self.assertTrue(g["has_fg"])
 
     def test_shimmed_user_proton_and_current_xess(self):
         self.w.compat({WITCHER: "GE-Proton10-3"})
@@ -89,8 +95,12 @@ class GameInfoTest(GameBase):
         self.assertEqual((g["compat_tool_shimmed"], g["compat_tool_system"], g["compat_tool_hook"]),
                          (True, False, True))
         self.assertEqual(g["last_run"], {"trace": False, "fallback": None, "compile_failed": False, "canary": False,
-                                         "xell_unsupported": None, "logged_at": None})
+                                         "xell_unsupported": None, "xell_builtin": None, "fg_fullscreen": None,
+                                         "logged_at": None})
         self.assertEqual(g["advice"], [])
+        self.assertEqual(g["prefix_checks"], {"driverstore_capital": False, "driverstore_capital_shimmed": None,
+                                              "hides_wine": None})
+        self.assertEqual((g["has_fg"], g["checks"]), (False, []))
 
     def test_xell_refusal_seen_without_xell_12(self):
         self.w.compat({WITCHER: "GE-Proton10-3"})
@@ -186,6 +196,113 @@ class GameInfoTest(GameBase):
                 self.assertLogs("oxp3deck", "ERROR"):
             r = games.game_info(self.ctx, self.settings, WITCHER)
         self.assertEqual((r["ok"], r["error"]), (False, "game info: RuntimeError: boom"))
+
+
+MH_WILDS = "2246340"
+
+
+class KnownIssuesTest(GameBase):
+    def test_mh_wilds_frame_generation_crashes(self):
+        game, _pfx = self.w.app(MH_WILDS, "MonsterHunterWilds")
+        self.w.compat({MH_WILDS: "GE-Proton10-3"})
+        self.w.proton("GE-Proton10-3", "tools", dll=SHIM_OLD, hook=True)
+        fake_dll(os.path.join(game, "libxess.dll"), (1, 3, 1, 32))
+        fake_dll(os.path.join(game, "amd_fidelityfx_dx12.dll"), (1, 0, 1, 39157))
+        g = self.info(MH_WILDS)
+        self.assertTrue(g["fg_crash"])
+        self.assertEqual(g["known_issues"][0]["line"], "Frame generation crashes the game. Leave it on Game default.")
+        self.assertIn("issues/42", g["known_issues"][0]["source"])
+        self.assertIs(g["has_fg"], False)                            # no libxess_fg.dll: XESS_FG has nothing to act on
+        self.assertEqual([(a["key"], a["value"]) for a in g["suggest"]], [("XESS", "latest")])
+
+    def test_every_issue_names_its_source_and_fits_one_line(self):
+        for appid, issues in games.KNOWN_ISSUES.items():
+            for i in issues:
+                self.assertTrue(i["source"], appid)
+                self.assertLessEqual(len(i["line"]), 80, i["line"])
+                self.assertEqual(set(i), {"id", "fg_crash", "fsr_risk", "label", "line", "detail", "source"})
+
+    def test_other_games_have_none(self):
+        self.assertEqual(games.known_issues("10"), [])
+        self.assertEqual(self.info()["known_issues"][0]["id"], "xell12")
+
+
+class NeverFrameGenerationTest(GameBase):
+    """The automatic launch options never add XESS_FG (owner report: XeSS FG from launch options crashed MH Wilds)."""
+
+    def test_no_game_ever_gets_xess_fg_or_fsr_fg(self):
+        self.w.compat({WITCHER: "GE-Proton10-3", MH_WILDS: "GE-Proton10-3"})
+        self.w.proton("GE-Proton10-3", "tools", dll=SHIM_OLD, hook=True)
+        write(os.path.join(self.pkg, "tools", "fsr-fg.sh"), "#!/bin/sh\n")
+        game, _pfx = self.w.app(MH_WILDS, "MonsterHunterWilds")
+        cases = [((1, 3, 1, 0), (1, 1, 0, 19), (1, 2, 1, 13)), ((2, 0, 2, 68), (1, 3, 1, 78), (1, 3, 2, 10)),
+                 (None, None, None)]
+        for appid, folder in ((WITCHER, self.game), (MH_WILDS, game)):
+            for x, f, ll in cases:
+                for n, v in (("libxess.dll", x), ("libxess_fg.dll", f), ("libxell.dll", ll)):
+                    path = os.path.join(folder, n)
+                    if v is None:
+                        if os.path.exists(path):
+                            os.unlink(path)
+                    else:
+                        fake_dll(path, v)
+                fake_dll(os.path.join(folder, "amd_fidelityfx_dx12.dll"), (1, 0, 0, 0))
+                keys = [a["key"] for a in self.info(appid)["suggest"]]
+                self.assertFalse(set(keys) & {"XESS_FG", "FSR_FG"}, (appid, keys))
+                if appid == MH_WILDS:
+                    self.assertNotIn("FSR", keys)                # its FSR route crashes (issue #42 pattern)
+        with mock.patch.object(games, "_version_of", return_value=(None, None)):
+            self.assertFalse([a for a in self.info()["suggest"] if a["key"] == "XESS_FG"])
+
+    def test_the_filter_drops_frame_generation_whatever_adds_it(self):
+        det = {"installed": True, "path": self.pkg}
+        game = {"compat_tool_hook": True, "dlls": [], "known_issues": []}
+        with mock.patch.object(games, "_version_of", return_value=(None, None)):
+            self.assertEqual(games._suggest(det, game), [])
+        self.assertEqual(games.NEVER_SUGGESTED, ("XESS_FG", "FSR_FG"))
+
+
+class PrefixChecksTest(GameBase):
+    def sys32(self):
+        return os.path.join(self.pfx, "drive_c", "windows", "system32")
+
+    def test_a_capitalised_driver_store_without_the_shim(self):
+        stock = self.w.proton("proton-cachyos-slr", "system", dll=STOCK)
+        d = os.path.join(self.sys32(), "DriverStore", "FileRepository", "igd_faux.inf_1")
+        os.makedirs(d)
+        os.symlink(os.path.join(stock, xess.IGDEXT_REL), os.path.join(d, "igdext64.dll"))
+        os.makedirs(os.path.join(self.sys32(), "driverstore", "filerepository", "igd_faux.inf_1"))
+        g = self.info()
+        self.assertEqual(g["prefix_checks"]["driverstore_capital"], True)
+        self.assertIs(g["prefix_checks"]["driverstore_capital_shimmed"], False)
+        self.assertIn("driverstore", [c["id"] for c in g["checks"]])
+        os.unlink(os.path.join(d, "igdext64.dll"))
+        write(os.path.join(d, "igdext64.dll"), SHIM_OLD)
+        xess._marker_cache.clear()
+        self.assertNotIn("driverstore", [c["id"] for c in self.info()["checks"]])
+
+    def test_lowercase_only_is_fine(self):
+        os.makedirs(os.path.join(self.sys32(), "driverstore"))
+        g = self.info()
+        self.assertFalse(g["prefix_checks"]["driverstore_capital"])
+        self.assertEqual(g["checks"], [])
+
+    def test_hidden_wine_and_fullscreen(self):
+        self.w.compat({WITCHER: "GE-Proton10-3"})
+        self.w.proton("GE-Proton10-3", "tools", dll=SHIM_OLD, hook=True)
+        self.dll("bin/libxell.dll", (1, 2, 1, 13))
+        write(os.path.join(self.pfx, "user.reg"), '[Software\\\\Wine] 1\n"HideWineExports"="1"\n')
+        c = os.path.join(self.pfx, "drive_c")
+        write(os.path.join(c, "igdext_xefg.log"), "xefg: Interpolation is not supported in fullscreen mode\n")
+        write(os.path.join(c, "igdext_xell.log"), "[XeLL] Using built-in context\n")
+        g = self.info()
+        self.assertEqual([x["id"] for x in g["checks"]], ["hides_wine", "fullscreen"])
+        self.assertTrue(g["last_run"]["fg_fullscreen"])
+        self.assertTrue(g["last_run"]["xell_builtin"])
+        self.assertIn("This prefix hides Wine from the game (HideWineExports)", "\n".join(g["advice"]))
+        self.assertIn("XESS=latest swaps in XeLL 1.3.2.10 while the game runs", "\n".join(g["advice"]))  # hook
+        for x in g["checks"]:
+            self.assertLessEqual(len(x["line"]), 80)
 
 
 class SuggestTest(GameBase):

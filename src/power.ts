@@ -377,6 +377,33 @@ export const eppOptions = (choices: Epp[] | null | undefined): { data: Epp | nul
 export const eppText = (e: string | null | undefined): string =>
   e == null ? "?" : e === "mixed" ? "mixed" : e === "default" ? "device default" : EPP_LABELS[e as Epp] ?? e;
 
+const onOffText = (b: boolean | null | undefined): string => (b == null ? "?" : b ? "on" : "off");
+
+/** The CPU values in effect now, one line (Power tab's CPU row, the quick panel under the CPU controls). */
+export const cpuNowLine = (n: PowerState["now"]): string =>
+  `Cap ${n.cpu_max_pct ?? "?"} % · Min ${n.cpu_min_pct ?? "?"} % · Energy: ${eppText(n.epp)} · Boost: ${onOffText(n.turbo)}${
+    n.soc ? ` · Balance ${n.soc.balance} (${n.soc.profile ?? "?"})` : ""}`;
+
+/** The red row when the cpufreq governor is `performance` (SimpleDeckyTDP's governor slider can leave it so). */
+export const GOVERNOR_PERFORMANCE = {
+  label: "CPU speed policy is Performance",
+  line: "Energy preference and minimum speed don't apply; the CPU runs at its cap.",
+  detail: "CPU speed policy is Performance: energy preference and minimum speed don't apply; the CPU runs at its cap. A reboot or the desktop's power settings reset it.",
+};
+
+const GROUP_NAMES: Record<string, string> = {
+  epp: "energy preference", turbo: "CPU boost", cpu_pct: "the CPU speed cap and minimum", cpu_caps: "the per-core caps",
+  soc: "the CPU vs GPU balance",
+};
+
+/** "Energy preference left to Power Profiles": an ignored program changed a field it owns (state.yielded). */
+export const yieldedText = (groups: readonly string[] | null | undefined, owner: string): string | null => {
+  const names = (groups ?? []).map((g) => GROUP_NAMES[g] ?? g);
+  if (!names.length) return null;
+  const list = names.length === 1 ? names[0] : `${names.slice(0, -1).join(", ")} and ${names[names.length - 1]}`;
+  return `${list[0].toUpperCase()}${list.slice(1)} left to ${owner}.`;
+};
+
 /** The game profiles in the editor's order: Default, the running game, then the others by name. */
 export const profileOrder = (profiles: Record<string, { name: string | null }>, running: string | null | undefined): { key: string; label: string }[] => {
   const label = (k: string) => (k === "default" ? "Default" : profiles[k]?.name || `App ${k}`);

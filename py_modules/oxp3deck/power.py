@@ -358,6 +358,7 @@ class _Power:
         self.last_poll: float | None = None  # the last drift check (poll_s)
         self.pending: list[str] = []         # ids that failed `transient` at the last apply (the GPU asleep)
         self.pending_left = 0                # retries left for them
+        self.yielded: dict[str, list[str]] = {}   # field group -> the ignored conflicts it was left to (drift)
 
 
 def _get(ctx) -> _Power:
@@ -825,6 +826,8 @@ def _do_apply(ctx, p: _Power, target: dict, split: bool = False, retry: bool = F
         log.warning("power: locked by firmware this boot: %s", ", ".join(newly))
     p.run["locked"] = sorted(set(p.run["locked"]) | set(newly))
     p.run["ours"] = _ours(hw, target, res, p.run["locked"], split)
+    for g in [g for g in p.yielded if any(_group(k) == g for k in p.run["ours"])]:
+        del p.yielded[g]        # written again (a change, an event): ours until the other program changes it again
     p.last = {"ok": res["ok"], "error": res["error"], "written": res["written"], "failed": res["failed"]}
     p.started = True
     p.drift_seen = None
@@ -1179,6 +1182,15 @@ def _suspects(p: _Power, item: str) -> list[str]:
     return ["other"] if group is not None else ["steam"]
 
 
+def _ignored_owners(p: _Power, group: str | None) -> list[str]:
+    """The ignored CPU conflicts running now that set field group `group` (FIELD_BLOCKERS): [] for power limits and
+    GPU clocks, and for a group no ignored one writes."""
+    if group is None:
+        return []
+    ids = FIELD_BLOCKERS.get(group, ())
+    return [r["id"] for r in _present(p) if r["kind"] == "cpu" and r["ignored"] and r["id"] in ids]
+
+
 def _on_drift(ctx, p: _Power, d: tuple, now: float, confirm: bool) -> str:
     item, want, got = d
     # look for other power managers now (the cached check can be a minute old): one that has just started is
@@ -1203,6 +1215,17 @@ def _on_drift(ctx, p: _Power, d: tuple, now: float, confirm: bool) -> str:
         return "applied"
     if confirm and p.drift_seen != item:
         p.drift_seen = item      # seen once: an AC change the next tick explains is not a fight
+        return "nothing"
+    owners = _ignored_owners(p, group)
+    if owners:
+        # an ignored CPU daemon (power-profiles-daemon rewrites EPP on a profile or charger change) changed a field
+        # it owns: leave that field group to it instead of stopping every write, power limits included
+        p.run["ours"] = {k: v for k, v in p.run["ours"].items() if _group(k) != group}
+        p.yielded[group] = owners
+        p.drift_seen = None
+        log.info("power: %s changed to %s by %s (ignored); leaving %s to it until the next change",
+                 item, _fmt(item, got), ", ".join(owners), group)
+        _save_run(ctx, p)
         return "nothing"
     suspects = _suspects(p, item)
     p.run["overridden"] = {"what": item, "ours": _fmt(item, want), "now": _fmt(item, got), "since": time.time(),
@@ -1271,6 +1294,7 @@ def _state(ctx, p: _Power, reading: dict | None = None) -> dict:
         "blocked_fields": _blocked_fields(ctx, p),
         "cpu_blocked": _cpu_blocked(ctx, p),
         "cpu_blocked_by": [r["id"] for r in _cpu_rows(ctx, p)],
+        "yielded": sorted(p.yielded),
         "last": p.last,
     }
 

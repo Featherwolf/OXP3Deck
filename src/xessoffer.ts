@@ -147,3 +147,30 @@ export const jobNext = (kind: string, result: unknown): string | null => {
   }
   return next;
 };
+
+export type ReleaseRow = { id: string; label: string; line: string; detail: string };
+
+/** The release that fixes the known bugs below (xess-xmx-linux 20261104 release notes). */
+export const FIXES_RELEASE = "20261104";
+
+/**
+ * Known bugs of the installed release that a newer release, or the project's main branch, fixes (each with its
+ * source). `protons`: the system Protons' names (the driver store bug is proton-cachyos's).
+ */
+export const releaseRows = (version: string | null | undefined, protons: readonly string[] = []): ReleaseRow[] => {
+  const out: ReleaseRow[] = [];
+  if (!version) return out;
+  if (tagNewer(FIXES_RELEASE, version)) {
+    out.push({ id: "older", label: `Release older than ${FIXES_RELEASE}`,
+      line: `${FIXES_RELEASE} fixes known bugs. Update above.`,
+      detail: `xess-xmx-linux ${version} is installed. ${FIXES_RELEASE} fixes Proton 11.0 games running without the add-on after a reboot in Game Mode (PR #43), turns frame generation low latency on by default (IGDEXT_XELL_CAP=off turns it off), adds the patched Mesa 26.3.0-rc3 and 26.1.2 drivers and FSR → XeSS. Source: the project's release notes (github.com/HHHHanasak1/xess-xmx-linux/releases).` });
+  }
+  const k = tagKey(version);
+  const cachy = protons.some((n) => /cachyos/i.test(n));
+  if (cachy && k && !tagNewer(version, FIXES_RELEASE)) {
+    out.push({ id: "driverstore", label: "Known bug: proton-cachyos driver store",
+      line: "Fixed on the project's main branch, not in a release yet.",
+      detail: "proton-cachyos makes a capitalised system32\\DriverStore folder in each game's prefix, with a link to its own igdext64.dll, and Wine uses that one; install.sh up to 20261104 writes only the lowercase driverstore, so such a game loads the stock file (no fast mode). The fix is merged on main (PR #47) but in no release yet. A game's own check on the Games tab says when its prefix has the folder; deleting it while the game is closed works around it. Source: github.com/HHHHanasak1/xess-xmx-linux/issues/46." });
+  }
+  return out;
+};

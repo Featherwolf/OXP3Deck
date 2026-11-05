@@ -14,7 +14,7 @@ import { LiveSection } from "../components/LiveRows";
 import { cpuBlockers, EnableToggle, ExtrasRows, PowerStatusRows, settle, usePower, ValuesEditor } from "../components/PowerControls";
 import { friendlyName } from "../conflicts";
 import { EFFECTS } from "../effects";
-import { eppText, limitsLine, pollIndex, pollText, pollValue, POLL_DEFAULT, POLL_STEPS, profileOrder, reasonText, Slot, watts } from "../power";
+import { cpuNowLine, limitsLine, pollIndex, pollText, pollValue, POLL_DEFAULT, POLL_STEPS, profileOrder, reasonText, Slot, watts } from "../power";
 import { useRunningApp } from "../steam";
 import { flushPower, powerWriter, put } from "../store";
 import type { ExtrasState, PowerInfo, PowerOptions, PowerState, PowerZone } from "../types";
@@ -22,7 +22,6 @@ import { listText, when } from "../util";
 
 const det = (title: string, body: (string | null | undefined | false)[], lines?: string[], linesTitle?: string): DetailsSpec =>
   ({ title, body: paragraphs(body), lines, linesTitle });
-const onOff = (b: boolean | null | undefined) => (b == null ? "?" : b ? "on" : "off");
 
 const zoneLine = (z: PowerZone) => {
   const lock = (c: string) => (z.locked.includes(c) ? " (locked)" : "");
@@ -57,8 +56,11 @@ const NowSection: FC<{ info: PowerInfo | null; state: PowerState }> = ({ info, s
             details={det("GPU", [`Allowed now: ${n.gpu.min ?? "?"}–${n.gpu.max ?? "?"} MHz.`, why ? `Limited: ${why}.` : "Not limited."],
               n.gpu.reasons.length ? [`throttle reasons: ${n.gpu.reasons.join(", ")}`] : undefined)} />
         )}
-        <Status ok={null} label="CPU" detail={`Energy: ${eppText(n.epp)} · Boost: ${onOff(n.turbo)} · ${ac(state)}`}
-          details={det("CPU", ["Energy preference, CPU boost and the power source as they are now."], [`governor: ${n.governor ?? "?"}`, `EPP: ${n.epp ?? "?"}`])} />
+        <Status ok={null} label="CPU" detail={cpuNowLine(n)}
+          details={det("CPU", ["The CPU values in effect now: the speed cap and minimum (shares of the top speed), energy preference, CPU boost and, with the SoC power slider, the CPU vs GPU balance and the power mode it counts in.",
+            "The minimum is the device's own floor on battery; the balance counts only in the Balanced (balanced) power mode.", ac(state)],
+          [`governor: ${n.governor ?? "?"}`, `EPP: ${n.epp ?? "?"}`, `intel_pstate max_perf_pct ${n.cpu_max_pct ?? "?"} / min_perf_pct ${n.cpu_min_pct ?? "?"}`,
+            `no_turbo: ${n.turbo == null ? "?" : n.turbo ? 0 : 1}`, n.soc ? `slider_balance ${n.soc.balance}, offset ${n.soc.offset}, profile ${n.soc.profile ?? "?"}` : "no SoC power slider"])} />
         {state.enabled && state.cpu_blocked && (
           <>
             <Status ok={false} label="Energy preference & boost: locked" detail={lockedBy}
@@ -148,7 +150,7 @@ const EditorSection: FC<{ info: PowerInfo; state: PowerState; x: ExtrasState | n
       </PanelSectionRow>
       <ValuesEditor key={`${k}/${slot}`} state={state} info={info} profileKey={k} slot={slot} stored={stored} active={active && state.enabled}
         label={`${name}${info.options.split_ac ? (slot === "ac" ? " (plugged-in values)" : " (battery values)") : ""}`} />
-      <ExtrasRows key={`x-${k}/${slot}`} profileKey={k} slot={slot} stored={stored} x={x} battery={false} errors={false} />
+      <ExtrasRows key={`x-${k}/${slot}`} profileKey={k} slot={slot} stored={stored} x={x} battery={false} errors={false} active={active} />
       <PanelSectionRow>
         {canAdd && (
           <ButtonItem layout="below" disabled={!!act.busy}

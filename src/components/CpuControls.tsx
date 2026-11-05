@@ -79,7 +79,10 @@ export const CpuControls: FC<{
     `Caps every core at this share of its top speed (${pctMin}–100 %). Lower leaves more of the power limit to the GPU in GPU-heavy games; 60–70 % is a good start on battery.`,
     "Steadier frame pacing at a fixed power limit is likely, but not measured on this device yet.",
     "Takes effect: Now. Resets at reboot; OXP3 Deck sets it again while power control is on.",
-    "Either this or the per-core caps (advanced options), not both.", where,
+    "Either this or the per-core caps (advanced options), not both.",
+    "With CPU boost off the cores stop at their base speed, so a high cap changes nothing.",
+    "It shows only when the CPU wants to run faster than the cap: a CPU-heavy game slows down; in a GPU-heavy game held at the power limit the GPU gets a few watts more and the frame rate barely moves.",
+    where,
   ], ["intel_pstate/max_perf_pct"]);
   const balD = det("CPU vs GPU balance", [
     "A hint to the chip's firmware about where the shared power goes: 1 favours the CPU, 5 the GPU, 3 is the device default.",
@@ -96,7 +99,8 @@ export const CpuControls: FC<{
   ], ["xe freq0/power_profile: base / power_saving"]);
   const minD = det("CPU minimum speed (plugged in)", [
     `The CPU never runs slower than this share of its top speed while plugged in, from the device's own floor (${minR.lo} %) to 50 %, never above the speed cap. Higher reacts faster and uses more power.`,
-    "On battery the device's own floor is used.", "Takes effect: Now.", where,
+    "On battery the device's own floor is used: the slider keeps your value for when you plug in.",
+    "Shows mostly at idle: a game's busy cores already run faster than this.", "Takes effect: Now.", where,
   ], ["intel_pstate/min_perf_pct"]);
   const advD = det("Show advanced CPU options", ["Shows a speed cap and an energy preference per core type (performance, efficient and low-power cores). Only changes this list."]);
 
@@ -154,7 +158,9 @@ export const CpuControls: FC<{
               disabled={!!pctLock || minR.hi <= minR.lo || (quick && !plugged)}
               onChange={(x) => write({ cpu_min_pct: Math.min(minR.hi, Math.max(minR.lo, Math.round(x))) })}
               description={explainWhen("Higher reacts faster, uses more power.", EFFECTS["power.cpu_min_pct"],
-                pctLock ?? (minR.hi <= minR.lo ? "The speed cap is at the device's floor." : quick && !plugged ? "Only while plugged in." : null))} />
+                pctLock ?? (minR.hi <= minR.lo ? "The speed cap is at the device's floor."
+                  : active && state.active.ac === false ? `On battery: the device's own floor (${minR.lo} %) runs now.`
+                  : quick && !plugged ? "Only while plugged in." : null))} />
           </WithDetails>
         </PanelSectionRow>
       )}

@@ -2,7 +2,7 @@
 // cannot write it itself, and the row's texts. Pure, so node can test it (tests/js/copyopts.test.mjs). The line is
 // the user's own text with the managed keys set through launchopts.setManaged, never a rewrite of the rest.
 import { plan } from "./autolaunch";
-import { managed, type ManagedKey, MANAGED_KEYS, parse, setManaged } from "./launchopts";
+import { managed, type ManagedKey, MANAGED_KEYS, NEVER_AUTO, parse, setManaged } from "./launchopts";
 
 export type CopySuggest = { key: ManagedKey; value: string; why?: string };
 
@@ -36,6 +36,7 @@ const missing = (text: string, suggest: CopySuggest[], done: ManagedKey[]): Copy
   const seen = new Set<string>();
   return suggest.filter((a) => {
     if (!a || !(MANAGED_KEYS as readonly string[]).includes(a.key) || !SAFE.test(a.value ?? "")) return false;
+    if (NEVER_AUTO.includes(a.key)) return false;       // never frame generation (it can crash a game)
     if (have[a.key] !== undefined || p.vars.some(([k]) => k === a.key) || done.includes(a.key) || seen.has(a.key)) return false;
     seen.add(a.key);
     return true;
