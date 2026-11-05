@@ -1128,7 +1128,10 @@ on CachyOS and Bazzite alike), `tuned-ppd.service` (the same bus names, `Systemd
    do). A `MASKABLE` unit with `/etc/systemd/system/<unit>` already there (a file or a link other than to
    `/dev/null`: an admin override that `mask` would replace) refuses the whole fix with nothing run and nothing
    recorded: "<unit> has its own unit file in /etc/systemd/system (an admin override), so OXP3 Deck will not mask
-   it; nothing was changed. Turn it off yourself (Details: Do it yourself)". Record `{unit, was_enabled:
+   it; nothing was changed. Turn it off yourself (Details: Do it yourself)". A `/dev/null` link there while the unit
+   still reads `loaded` (someone else's mask, not reloaded yet) is refused the same way ("<unit> is already masked
+   in /etc/systemd/system (not loaded by systemd yet) …"): recording it as OXP3 Deck's mask would let Undo remove
+   it. Record `{unit, was_enabled:
    UnitFileState, was_active: ActiveState in (active, activating, reloading)}`, plus `was_masked: false` for a
    `MASKABLE` unit (it was not masked: a masked one is never fixed; Undo unmasks the units that carry it).
    When a record for `cid` already exists (Fix again after it came back), each unit keeps its earlier `was_enabled`
@@ -1223,7 +1226,8 @@ Deck will stop <who>. It is not set to start at boot, so nothing else changes." 
 <who> from starting at boot. It is not running now." (disable only); the `lines` hold only those commands (without
 a plan: both, for every offered unit). For a `MASKABLE` id the lead is instead "OXP3 Deck will stop <who>, keep it
 from starting at boot and mask it: while masked, nothing can start it again, not the desktop, a game launcher or
-another service." (the stop / boot parts as the plan says), and the `lines` are `stop`, `disable`, `mask` in that
+another service." (the stop / boot parts as the plan says; a plan that only masks, e.g. thermald found by its
+process while its unit is stopped and disabled, says "OXP3 Deck will mask <who>: …" and lists only the mask), and the `lines` are `stop`, `disable`, `mask` in that
 order (`fix_plan.mask`, or the row's `MASKABLE` units). Then "Nothing is uninstalled." ("Nothing is deleted." for
 the scripts); for a "cpu" id while power control is on, "Then OXP3 Deck can set energy preference and CPU boost.";
 then the rest below; then "Undo turns it back on." (masked: "Undo unmasks it and turns it back on as before.").
@@ -1547,7 +1551,7 @@ from the fixtures, `show` from a per-unit table and each command with a chosen r
   running (`stop`, `mask`, `stop` again), stays gone over later ticks, Undo runs `unmask` then `start` (never
   `enable`: it was disabled); Undo order `unmask`, `enable`, `start`; a failing unmask keeps the record and runs
   nothing else; `/etc/systemd/system/<unit>` as a file or a non-`/dev/null` link refuses with "admin override" and
-  nothing run or recorded; a record without `was_masked` (written before masking) is undone with enable/start only;
+  nothing run or recorded, a `/dev/null` link with "already masked"; a record without `was_masked` (written before masking) is undone with enable/start only;
   a masked unit running again gets `came_back` and `fix` refuses with "running although OXP3 Deck masked it";
   `powerstation` is stopped and disabled, never masked; `MASKABLE` is exactly the five units, all in `FIXABLE`.
 - power.json `fixed` validation: an unknown id, a unit not in `FIXABLE[id]` (e.g. `sshd.service`, `../../x`), a

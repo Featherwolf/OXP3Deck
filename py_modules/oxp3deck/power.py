@@ -1664,12 +1664,14 @@ def _lpmd_note(ctx, p: _Power) -> str | None:
 
 def _admin_override(ctx, unit: str) -> str | None:
     """Why `unit` must not be masked: /etc/systemd/system/<unit> already exists (an admin's own copy or link of the
-    unit; `mask` would have to replace it), else None. A link to /dev/null is a mask already (then it is not loaded
-    and never reaches here)."""
+    unit; `mask` would have to replace it), else None. A link to /dev/null there while the unit still reads loaded
+    is someone else's mask systemd has not loaded yet: masking "again" would record was_masked false and Undo would
+    remove that mask, so it is refused too."""
     path = ctx.sys_path(f"/etc/systemd/system/{unit}")
     try:
         if os.path.islink(path) and os.readlink(path) == "/dev/null":
-            return None
+            return (f"{unit} is already masked in /etc/systemd/system (not loaded by systemd yet), so OXP3 Deck "
+                    "will not mask it; nothing was changed. Reboot, or run sudo systemctl daemon-reload")
     except OSError:
         pass
     if os.path.lexists(path):

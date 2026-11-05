@@ -361,8 +361,9 @@ class Writer:
 class Systemctl:
     """sysexec.run's stand-in for systemctl: a table of units {name: [load, unit_file_state, active]} that
     list-units and show answer from, and that stop / disable / mask / unmask / enable / start change (a masked
-    unit reads LoadState and UnitFileState "masked", and enable / start of it fail as systemd's do). rc[action] = (rc, stderr)
-    fails that action; restart: units that come back (active) right after a stop (a D-Bus activation)."""
+    unit reads LoadState and UnitFileState "masked", and enable / start of it fail as systemd's do).
+    rc[action] = (rc, stderr) fails that action; restart: units that come back (active) right after a stop (a
+    D-Bus activation; not while masked)."""
 
     def __init__(self, units: dict | None = None):
         self.units = {k: list(v) for k, v in (units or {}).items()}

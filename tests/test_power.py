@@ -922,8 +922,14 @@ class FixTest(Base):
                          else {})
         self.assertEqual(self.sc.units[PPD], ["loaded", "enabled", True])
         os.remove(path)
-        os.symlink("/dev/null", path)                        # a mask link is not an override (and not loaded)
-        self.assertIsNone(power._admin_override(self.ctx, PPD))
+        os.symlink("/dev/null", path)        # someone else's mask, not reloaded yet (the unit still reads loaded)
+        self.sc.calls.clear()
+        res = power.fix(self.ctx, "ppd")
+        self.assertFalse(res["ok"])
+        self.assertIn("already masked", res["error"])
+        self.assertEqual(self.sc.actions(), [])          # never recorded as OXP3 Deck's mask, so Undo cannot unmask it
+        self.assertNotIn("ppd", self.record() if os.path.exists(os.path.join(self.ctx.settings_dir, "power.json"))
+                         else {})
         os.remove(path)
         os.symlink("/opt/x/power-profiles-daemon.service", path)    # a linked unit file is one
         self.assertIsNotNone(power._admin_override(self.ctx, PPD))

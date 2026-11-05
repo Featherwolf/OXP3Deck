@@ -127,6 +127,11 @@ test("the Fix dialog lists only what the backend's fix_plan runs, and says so", 
   const both = fixConfirm(row("ppd", { fix_plan: { disable: units, stop: units, mask: units } }));
   assert.match(both.text, /stop power-profiles-daemon, keep it from starting at boot and mask it/);
   assert.deepEqual(fixConfirm(row("ppd", { fix_plan: null })).lines.map((l) => l.split(" ")[2]), ["stop", "disable", "mask"]);
+  // thermald found by its process while its unit is stopped and not enabled: the plan is a mask only, and the
+  // dialog must not promise a stop or a disable it will not run
+  const maskOnly = fixConfirm(row("thermald", { fix_plan: { disable: [], stop: [], mask: ["thermald.service"] } }));
+  assert.deepEqual(maskOnly.lines, ["systemctl --no-ask-password mask -- thermald.service"]);
+  assert.match(maskOnly.text, /OXP3 Deck will mask thermald:/);
   // an older backend's plan without mask: the MASKABLE units of the row
   assert.deepEqual(fixConfirm(row("ppd", { fix_plan: { disable: [], stop: units } })).lines.map((l) => l.split(" ")[2]), ["stop", "mask"]);
 });

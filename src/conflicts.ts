@@ -239,7 +239,8 @@ export const fixConfirm = (row: Pick<PowerConflict, "id" | "name"> & Partial<Pic
   powerOn?: boolean): DialogText => {
   const name = friendlyName(row.id, row.name);
   const units = row.fix_units?.length ? row.fix_units : FIXABLE[row.id] ?? [];
-  const plan = row.fix_plan && (row.fix_plan.disable.length || row.fix_plan.stop.length) ? row.fix_plan : null;
+  const plan = row.fix_plan && (row.fix_plan.disable.length || row.fix_plan.stop.length || row.fix_plan.mask?.length)
+    ? row.fix_plan : null;
   const disable = plan ? plan.disable : units;
   const stop = plan ? plan.stop : units;
   const mask = plan?.mask ?? units.filter((u) => MASKABLE.has(u));
