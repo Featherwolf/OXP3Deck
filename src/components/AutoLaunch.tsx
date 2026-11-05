@@ -23,8 +23,8 @@ const LOG = "ui_autolaunch_log";
 // both settings in the store's cache, so every row shows the same and a change re-renders them
 const loadSettings = async (): Promise<AutoSettings> => readSettings(await get_setting(SETTINGS));
 const loadLog = async (): Promise<AutoLog> => readLog(await get_setting(LOG));
-const useAutoSettings = () => useResource<AutoSettings>("ui:autolaunch", loadSettings);
-const useAutoLog = () => useResource<AutoLog>("ui:autolaunch-log", loadLog);
+export const useAutoSettings = () => useResource<AutoSettings>("ui:autolaunch", loadSettings);
+export const useAutoLog = () => useResource<AutoLog>("ui:autolaunch-log", loadLog);
 
 const saveSettings = async (s: AutoSettings): Promise<string | null> => {
   const v = fitSettings(s);

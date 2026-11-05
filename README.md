@@ -311,6 +311,12 @@ next start. No re-login is needed.
   `VARIABLES %command% ARGUMENTS`, with each argument in quotes where the shell would read it otherwise
   (`-name (Player One)` becomes `-name '(Player' 'One)'`; a backslash, as in `C:\Games\cfg.ini`, stays as it is).
   A `%command` without its closing `%` is shown as a warning.
+- **Copy launch options** (the game's section in Quick Access and on the Games tab): the whole launch line, your
+  own text plus the options above, with a Copy button. It is there when OXP3 Deck cannot set it itself (Steam
+  refused or kept other text, a non-Steam game, Steam did not return the options, the game needs an option that waits
+  until you quit it or that automatic mode is off for) and also when you just want a copy. Paste it into the game's
+  Properties → General → Launch options; it applies when you start the game again. When copying does not work in
+  Game Mode, the line shows in a text field to copy with Steam's keyboard.
 
 ## What it never does
 

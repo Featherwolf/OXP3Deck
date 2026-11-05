@@ -37,7 +37,7 @@ export const EFFECTS: Record<string, EffectSpec> = {
   "xess.install": XESS_PKG, "xess.update": XESS_PKG, "xess.repair": XESS_PKG, "xess.uninstall": XESS_PKG,
   "xess.driver": "game", "xess.shim": "game", "xess.remove_folder": NOW,
   "game.xess": "game", "game.fg": "game", "game.mesa": "game", "game.vendor": "game", "game.log": "game", "game.fsr": "game",
-  "game.typo": "game",
+  "game.typo": "game", "game.copy": "game",
   "game.auto": "game", "game.auto_undo": "game", "auto.global": "game",
   "kernel.try": "reboot", "kernel.keep": "reboot",
   "oxp3.install": NOW,

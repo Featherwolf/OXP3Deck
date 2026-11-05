@@ -9,6 +9,7 @@ import { FC, useEffect, useMemo, useRef, useState } from "react";
 
 import { game_info, xess_state } from "../backend";
 import { driverPrefix, fixTypo, fsrSupported, managed, ManagedKey, parse, setManaged } from "../launchopts";
+import { effectiveOn } from "../autolaunch";
 import { getLaunchOptions, isSteamApp, RunningApp, setLaunchOptions } from "../steam";
 import { EFFECTS } from "../effects";
 import { notePending, useResource } from "../store";
@@ -16,7 +17,8 @@ import type { GameInfo, GameInfoRes, XessDriver, XessStateRes } from "../types";
 import { remember, when } from "../util";
 import { firstSentence } from "../text";
 import { DetailsSpec, paragraphs } from "./confirm";
-import { AutoLaunchRows } from "./AutoLaunch";
+import { AutoLaunchRows, useAutoLog, useAutoSettings } from "./AutoLaunch";
+import { CopyLaunchRows } from "./CopyLaunch";
 import { Pending } from "./Effect";
 import { Code, explain, explainWhen, label, Note, Problem, Status, WithDetails } from "./Hint";
 
@@ -93,6 +95,7 @@ export const GameControls: FC<{ app: RunningApp; quick?: boolean; running?: bool
   const [busy, setBusy] = useState(false);
   const [err, setErr] = useState<string | null>(null);
   const [saved, setSaved] = useState(false);
+  const [wanted, setWanted] = useState<string | null>(null);   // the last write Steam refused or changed: to copy
   const [rev, setRev] = useState(0);              // remounts the dropdowns when the value is not what was picked
   const [experimental, setExperimental] = useState(() => remember.get("fgExperimental") === "1");
 
@@ -103,9 +106,10 @@ export const GameControls: FC<{ app: RunningApp; quick?: boolean; running?: bool
     const o = steam ? await getLaunchOptions(app.appid) : null;
     if (mine !== seq.current) return;
     setOpts(o);
+    setWanted(null);
     setRev((n) => n + 1);
   };
-  useEffect(() => { setErr(null); setSaved(false); setDraft(""); read(); }, [app.appid]);
+  useEffect(() => { setErr(null); setSaved(false); setDraft(""); setWanted(null); read(); }, [app.appid]);
 
   const writable = steam && typeof opts === "string";
   const text = writable ? (opts as string) : draft;
@@ -131,6 +135,7 @@ export const GameControls: FC<{ app: RunningApp; quick?: boolean; running?: bool
     setOpts(now);
     if (now !== next) setRev((n) => n + 1);
     setErr(r.ok ? null : r.error);
+    setWanted(r.ok ? null : next);
     // while the game runs, the pending row ("Restart … to apply") says it instead of "Saved"
     setSaved(r.ok && !(running && what));
     if (r.ok && running && what) notePending({ id: what.id, effect: EFFECTS["game.xess"], label: what.label, appid: app.appid, game: app.name });
@@ -192,8 +197,16 @@ export const GameControls: FC<{ app: RunningApp; quick?: boolean; running?: bool
   const pasteD: DetailsSpec = {
     title: "Paste these launch options",
     body: <>{steam ? "Steam did not return this game's launch options, so OXP3 Deck does not write them (that would replace yours). " : "OXP3 Deck does not change a non-Steam game's launch options. "}
-      Paste this into the game's Properties → Launch options{text ? ":" : " once you picked something above."}
-      {text && <><br /><Code>{text}</Code></>}</>,
+      Pick the settings above, then copy the line with the button below and paste it into the game's Properties → Launch options.</>,
+  };
+  // the whole line to paste by hand (copyopts.ts): the refused write, the draft, or Steam's text with what the game needs
+  const auto = useAutoSettings();
+  const autoLog = useAutoLog();
+  const copyInput = {
+    steam, text: opts, draft, wanted,
+    suggest: steam ? game?.suggest ?? [] : [],
+    done: autoLog.data?.[app.appid]?.done ?? [],
+    autoOn: effectiveOn(auto.data, app.appid), running: !!running,
   };
   const lastD: DetailsSpec | null = game && lr ? {
     title: lr.label,
@@ -272,6 +285,7 @@ export const GameControls: FC<{ app: RunningApp; quick?: boolean; running?: bool
             {steam && <ButtonItem layout="below" onClick={read} description={explain("Asks Steam again.")}>Read again</ButtonItem>}
           </>
         )}
+        <CopyLaunchRows input={copyInput} game={app.name} />
       </PanelSectionRow>
       {steam && (
         <PanelSectionRow>

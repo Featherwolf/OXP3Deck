@@ -92,6 +92,8 @@ src/                   frontend (TypeScript, @decky/ui)
   power.ts             power control's serial writer and texts (pure, tested under node)
   effects.ts           "When it takes effect": the tags, the tag of every setting, pending texts (pure, node-tested)
   autolaunch.ts        automatic launch options: what to add, the record, Undo (pure, node-tested)
+  copyopts.ts          "Copy launch options": the line to paste by hand, why, its texts (pure, node-tested)
+  clipboard.ts         copy text in Steam's CEF: execCommand / navigator.clipboard chain (framework-free, node-tested)
   live.ts              the live readouts' line and Details texts (pure, node-tested)
   conflicts.ts         the conflicts' friendly names, one-liners, Details and Fix / Undo dialogs (pure, node-tested)
   text.ts              firstSentence and the one-line limit (pure, node-tested)
@@ -627,6 +629,7 @@ is filled in. Rows not listed keep their text.
 | Games | FSR | "FSR → XeSS" | per mode ≤ 60 chars |
 | Games | Proton | "Proton: <name>" ✓/✗ | "XeSS fast mode ready" / "Needs the XeSS add-on" / "Some settings won't work" |
 | Games | non-Steam | "Paste these launch options" ⓘ | "OXP3 Deck can't write them for this game." |
+| Games, This game | copy | "Copy launch options" ⓘ (button) | per reason ≤ 60 chars: "Steam didn't take them. Paste them by hand." / "OXP3 Deck can't write them for this game." / "Steam didn't return them. Paste them by hand." / "Or wait: added when you quit the game." / "Includes what this game needs." / "To paste them by hand." |
 | Games | last run | "Last run: fast mode used" / "slower mode" / "no logs" ⓘ | ≤ 60 chars (files and prefix move into its Details) |
 | Kernel | rows | "<package>" | "Running now" / "Default" / "Can't boot" |
 | Kernel | try | "Try once" | "Next restart only. Hold power to go back." |
@@ -1925,6 +1928,38 @@ text is never touched.
   first."). The global toggle sits on the Games tab top and in the XeSS tab ("Add needed launch options
   automatically").
 
+## Copy launch options
+
+Owner request: "If launch options can't be set automatically, allow easy copying from the quick menu." In GameControls
+(so both the quick panel's "This game" and the Games tab), `components/CopyLaunch.tsx` under the XeSS options. It
+never writes launch options.
+
+- **The line** (`copyopts.ts` `copyLine(input) → { line, reason, adds } | null`): the base is the last write Steam
+  refused or changed (`setLaunchOptions` not ok: GameControls keeps it as `wanted` until the next read or a write that
+  works) → reason `rejected`; else for a non-Steam shortcut or unreadable options the draft picked here (`shortcut`,
+  `unreadable`); else Steam's text. Then the `GameInfo.suggest` keys the base lacks (any value, also an unmanaged
+  copy, counts as set; keys in the auto log's `done` are skipped: the user removed them) are set with
+  `launchopts.setManaged`, so the user's text is kept; with such keys a `current` base becomes `running` (automatic
+  on and the game runs: added after it quits) or `advice` (automatic off, or it could not add them). A "%command"
+  typo is left as it is. null while reading or when the line is empty. `copyRow` (label, one line) and `copyDetails`
+  (what it does and why, where to paste: "<game>'s Properties (the gear on its page) → General → Launch options",
+  "Takes effect: Restart the game.", the text field fallback) are there too; the line itself is in the Details as
+  Code, and what it adds under "Adds to launch options:".
+- **UI**: ButtonItem "Copy launch options ⓘ" in WithDetails, `explainWhen(row.line, EFFECTS["game.copy"])`. Shown
+  whenever `copyLine` gives a line, also when nothing is wrong (the user may just want them). The old "Paste these
+  launch options" Status stays for shortcut / unreadable, pointing to the button.
+- **Clipboard** (`clipboard.ts`): @decky/ui types no Steam call that copies text (only
+  `SteamClient.System.CopyFilesToClipboard`, for files), so a chain of web methods, each limited to 1.5 s (a method
+  that throws, says false or hangs falls through): `document.execCommand("copy")` on a hidden, read-only textarea in
+  the document of the pressed button (`e.currentTarget.ownerDocument`: the Steam UI window, not the plugin's
+  SharedJSContext; synchronous inside the press, focus given back afterwards), then
+  that window's `navigator.clipboard.writeText` (needs a focused document), then both in the global `document` when
+  it is another one. Success: toast title "Copied", body "Paste it into <game>'s Properties → Launch options.". All
+  failed: a `TextField` (value the line, `bShowCopyAction`, edits ignored) with "Couldn't copy. Select the line and
+  copy it with Steam's keyboard." Which method works in Game Mode is untested on the device.
+- Tests: `tests/js/copyopts.test.mjs` (the line and reasons, texts ≤ 60 chars without variable names, Details name
+  Properties → Launch options and the tag, the chain's order and fall-through with fake documents, the wiring).
+
 ## When it takes effect (effect tags)
 
 Every setting shows when it takes effect, in the short-line style, next to its one line, in its confirm dialog and,
@@ -1988,6 +2023,7 @@ after a change that is not immediate, in a pending row.
 | `xess.remove_folder` | Remove an old folder | Now |
 | `game.xess`, `game.fg`, `game.mesa`, `game.vendor`, `game.log`, `game.fsr`, `game.typo` | per-game launch options | Restart the game |
 | `game.auto`, `game.auto_undo`, `auto.global` | automatic launch options | Restart the game |
+| `game.copy` | Copy launch options (pasted by hand) | Restart the game |
 | `kernel.try`, `kernel.keep` | Kernel | Reboot |
 | `oxp3.install` | Install / Update fixes tool | Now |
 | `reboot` | Reboot to finish | Now |
