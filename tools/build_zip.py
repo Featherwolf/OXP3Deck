@@ -1,12 +1,13 @@
 #!/usr/bin/env python3
 """Build release/OXP3Deck.zip, the file Decky installs with "Install Plugin from URL" or "from ZIP File".
 
-    pnpm build && pnpm zip                   # writes decky/release/OXP3Deck.zip
+    pnpm build && pnpm zip                   # writes release/OXP3Deck.zip
     python3 tools/build_zip.py --out FILE    # writes FILE instead
 
 The zip holds one folder named after plugin.json's "name": the frontend (dist/), the backend (main.py and
-py_modules/oxp3deck/*.py), a copy of oxp3-tool (the repository's dist/oxp3-tool, checked against its .sha256)
-and the docs. The same inputs always give the same bytes: sorted entries, fixed times and modes.
+py_modules/oxp3deck/*.py), a copy of oxp3-tool (vendor/oxp3-tool, checked against its .sha256;
+tools/vendor_oxp3_tool.py refreshes it) and the docs. The same inputs always give the same bytes: sorted entries,
+fixed times and modes.
 
 Keep the file name <name>.zip: Decky takes the plugin's name from the URL's or the file's name, and only finds
 the installed copy to replace (and removes its old files) when that matches plugin.json.
@@ -18,7 +19,6 @@ from __future__ import annotations
 
 import argparse
 import hashlib
-import importlib.util
 import io
 import json
 import os
@@ -30,8 +30,7 @@ import zipfile
 from dataclasses import dataclass, field
 from pathlib import Path
 
-PLUGIN = Path(__file__).resolve().parent.parent   # decky/
-REPO = PLUGIN.parent
+PLUGIN = Path(__file__).resolve().parent.parent   # the repository root
 
 # The earliest time a zip can hold; any fixed value keeps two builds identical.
 STAMP = (1980, 1, 1, 0, 0, 0)
@@ -90,20 +89,6 @@ def _tool_version(data: bytes) -> str | None:
     return m.group(1) if m else None
 
 
-def _tool_is_stale(repo: Path, data: bytes) -> bool | None:
-    """Compare dist/oxp3-tool with a fresh build of oxp3_tool/ (None: the builder is not there)."""
-    builder = repo / "tools" / "build_zipapp.py"
-    if not builder.is_file():
-        return None
-    try:
-        spec = importlib.util.spec_from_file_location("_oxp3_build_zipapp", builder)
-        mod = importlib.util.module_from_spec(spec)
-        spec.loader.exec_module(mod)
-        return mod.build() != data
-    except Exception:   # only a warning depends on it
-        return None
-
-
 def _dist_files(plugin: Path) -> list[tuple[str, Path]]:
     dist = plugin / "dist"
     _regular(dist / "index.js", "dist/index.js", "run pnpm build first")
@@ -134,18 +119,16 @@ def _backend_files(plugin: Path, warnings: list[str]) -> list[tuple[str, Path]]:
     return out
 
 
-def _tool_files(repo: Path, warnings: list[str]) -> tuple[list[tuple[str, Path]], str | None]:
-    hint = "run python3 tools/build_zipapp.py in the repository root"
-    tool = _regular(repo / "dist" / TOOL, f"../dist/{TOOL}", hint)
-    sums = _regular(repo / "dist" / f"{TOOL}.sha256", f"../dist/{TOOL}.sha256", hint)
+def _tool_files(vendor: Path) -> tuple[list[tuple[str, Path]], str | None]:
+    hint = "run python3 tools/vendor_oxp3_tool.py"
+    tool = _regular(vendor / TOOL, f"vendor/{TOOL}", hint)
+    sums = _regular(vendor / f"{TOOL}.sha256", f"vendor/{TOOL}.sha256", hint)
     data = tool.read_bytes()
     words = sums.read_text(encoding="utf-8", errors="replace").split()
     if len(words) != 2 or words[1] != TOOL or not re.fullmatch(r"[0-9a-f]{64}", words[0]):
-        raise BuildError(f"../dist/{TOOL}.sha256 is not '<sha256>  {TOOL}': {hint}")
+        raise BuildError(f"vendor/{TOOL}.sha256 is not '<sha256>  {TOOL}': {hint}")
     if hashlib.sha256(data).hexdigest() != words[0]:
-        raise BuildError(f"../dist/{TOOL} does not match ../dist/{TOOL}.sha256: {hint}")
-    if _tool_is_stale(repo, data):
-        warnings.append(f"../dist/{TOOL} is older than oxp3_tool/: {hint}")
+        raise BuildError(f"vendor/{TOOL} does not match vendor/{TOOL}.sha256: {hint}")
     return [(f"bin/{TOOL}", tool), (f"bin/{TOOL}.sha256", sums)], _tool_version(data)
 
 
@@ -159,7 +142,7 @@ def _newest(folder: Path) -> Path | None:
     return newest
 
 
-def collect(plugin: Path = PLUGIN, repo: Path = REPO) -> Plan:
+def collect(plugin: Path = PLUGIN, vendor: Path | None = None) -> Plan:
     manifest = _load_json(plugin / "plugin.json", "plugin.json")
     name = manifest.get("name")
     if not isinstance(name, str) or not NAME_RE.match(name):
@@ -181,7 +164,7 @@ def collect(plugin: Path = PLUGIN, repo: Path = REPO) -> Plan:
     if newest and newest.stat().st_mtime > (plugin / "dist" / "index.js").stat().st_mtime:
         warnings.append(f"dist/index.js is older than {newest.relative_to(plugin).as_posix()}: run pnpm build")
     files += _backend_files(plugin, warnings)
-    tool_files, tool_version = _tool_files(repo, warnings)
+    tool_files, tool_version = _tool_files(vendor or plugin / "vendor")
     files += tool_files
     files += [(doc, _regular(plugin / doc, doc)) for doc in DOCS]
     return Plan(top=name, version=version, tool_version=tool_version, files=files, warnings=warnings)
@@ -235,9 +218,9 @@ def write_atomic(path: Path, data: bytes) -> None:
         raise
 
 
-def build(out: Path | None = None, plugin: Path = PLUGIN, repo: Path = REPO) -> tuple[Path, str, Plan]:
+def build(out: Path | None = None, plugin: Path = PLUGIN, vendor: Path | None = None) -> tuple[Path, str, Plan]:
     """Write the zip; returns its path, its sha256 and what went into it."""
-    plan = collect(plugin, repo)
+    plan = collect(plugin, vendor)
     if out is None:
         out = plugin / "release" / f"{plan.top}.zip"
     elif out.name != f"{plan.top}.zip":

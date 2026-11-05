@@ -1,5 +1,5 @@
 """oxp3tool.py against a fake oxp3-tool: a small Python file in a fake root that prints fixture JSON
-(tests/fixtures/oxp3, real output of this repository's CLI; tests/make_fixtures.py regenerates them)."""
+(tests/fixtures/oxp3, real output of oxp3-tool's CLI; tests/make_fixtures.py regenerates them)."""
 import hashlib
 import json
 import os

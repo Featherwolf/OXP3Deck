@@ -40,5 +40,7 @@ Google's Material Design icons (Apache License 2.0).
 
 ## oxp3-tool
 
-`bin/oxp3-tool` is oxp3-tool from this repository (`dist/oxp3-tool`). Where its fixes come from is in the
+`bin/oxp3-tool` is oxp3-tool from
+[OXP3-Tool-for-Bazzite](https://github.com/Featherwolf/OXP3-Tool-for-Bazzite) (its `dist/oxp3-tool`, kept here
+in `vendor/`). Where its fixes come from is in its
 [main README](https://github.com/Featherwolf/OXP3-Tool-for-Bazzite#background).

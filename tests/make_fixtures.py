@@ -1,7 +1,8 @@
-"""Regenerate tests/fixtures/oxp3/*.json: real `oxp3-tool ... --json` output of this repository's CLI, run in-process
-against the fake ONEXPLAYER 3 systems of the repository's own tests (tests/fakeroot.py).
+"""Regenerate tests/fixtures/oxp3/*.json: real `oxp3-tool ... --json` output of oxp3-tool's CLI, run in-process
+against the fake ONEXPLAYER 3 systems of oxp3-tool's own tests (tests/fakeroot.py).
 
-Run from anywhere: python3 decky/tests/make_fixtures.py
+It needs a checkout of https://github.com/Featherwolf/OXP3-Tool-for-Bazzite: next to this repository, or named by
+OXP3_TOOL_SRC. Run from anywhere: OXP3_TOOL_SRC=/path/to/OXP3-Tool-for-Bazzite python3 tests/make_fixtures.py
 The fake root's temporary path is replaced with "" so the files do not change with it; everything else is the CLI's
 own output (timestamps included).
 """
@@ -17,14 +18,16 @@ import tempfile
 from pathlib import Path
 
 HERE = Path(__file__).resolve().parent
-REPO = HERE.parent.parent
+REPO = Path(os.environ.get("OXP3_TOOL_SRC") or HERE.parent.parent / "OXP3-Tool-for-Bazzite").resolve()
 OUT = HERE / "fixtures" / "oxp3"
 KERNELS = {"linux-cachyos-deckify": "7.2.11-1-cachyos-deckify",
            "linux-cachyos-deckify-vsw": "7.2.11-1-cachyos-deckify-vsw"}
 
 
 def load_fakeroot():
-    """The repository's tests/fakeroot.py, by path: decky/tests is also a package called `tests`."""
+    """oxp3-tool's tests/fakeroot.py, by path: this repository's tests is also a package called `tests`."""
+    if not (REPO / "oxp3_tool" / "cli.py").is_file():
+        sys.exit(f"make_fixtures: no oxp3-tool checkout at {REPO} (set OXP3_TOOL_SRC)")
     if str(REPO) not in sys.path:
         sys.path.insert(0, str(REPO))
     spec = importlib.util.spec_from_file_location("oxp3_repo_fakeroot", REPO / "tests" / "fakeroot.py")

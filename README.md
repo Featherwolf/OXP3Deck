@@ -4,7 +4,7 @@ A [Decky Loader](https://github.com/SteamDeckHomebrew/decky-loader) plugin for t
 Lake, Arc B390) on **CachyOS** (the Handheld Edition) and **Bazzite**. From one Quick Access panel in Game Mode, it
 installs, sets up and updates two things:
 
-1. **oxp3-tool**, from [this repository](https://github.com/Featherwolf/OXP3-Tool-for-Bazzite): the controller,
+1. **oxp3-tool**, from [OXP3-Tool-for-Bazzite](https://github.com/Featherwolf/OXP3-Tool-for-Bazzite): the controller,
    sleep and display fixes, the button layout and the kernel switch. The plugin runs `oxp3-tool` as root and shows
    what it says. It has no fixes of its own.
 2. **xess-xmx-linux**, by [HHHHanasak1](https://github.com/HHHHanasak1/xess-xmx-linux): XeSS super resolution and
@@ -29,7 +29,7 @@ Then, in Game Mode:
 3. Open **Developer**. Under **Install Plugin from URL**, enter this address and tap **Install**:
 
    ```
-   https://raw.githubusercontent.com/Featherwolf/OXP3-Tool-for-Bazzite/HEAD/decky/release/OXP3Deck.zip
+   https://raw.githubusercontent.com/Featherwolf/OXP3Deck/HEAD/release/OXP3Deck.zip
    ```
 
 4. Confirm. OXP3 Deck appears in Decky's list.
@@ -193,21 +193,31 @@ next start. No re-login is needed.
 ## Building from source
 
 ```bash
-cd decky
 pnpm install
 pnpm build    # the frontend: dist/index.js
 pnpm zip      # release/OXP3Deck.zip (python3 tools/build_zip.py)
 ```
 
-`tools/build_zip.py` packs the frontend, `main.py`, `py_modules/oxp3deck/*.py`, the docs and the repository's
-`dist/oxp3-tool` (checked against `dist/oxp3-tool.sha256`) into one `OXP3Deck/` folder. The same files always give
-the same zip. `--out FILE` writes it elsewhere. If you changed `oxp3_tool/`, run `python3 tools/build_zipapp.py` in
-the repository root first.
+`tools/build_zip.py` packs the frontend, `main.py`, `py_modules/oxp3deck/*.py`, the docs and
+`vendor/oxp3-tool` (checked against `vendor/oxp3-tool.sha256`) into one `OXP3Deck/` folder. The same files always
+give the same zip. `--out FILE` writes it elsewhere.
+
+`vendor/oxp3-tool` is a copy of `dist/oxp3-tool` from [OXP3-Tool-for-Bazzite](https://github.com/Featherwolf/OXP3-Tool-for-Bazzite). To bundle a newer one:
+
+```bash
+python3 tools/vendor_oxp3_tool.py                  # the newest on GitHub (or --ref v0.4.1)
+python3 tools/vendor_oxp3_tool.py --from ../OXP3-Tool-for-Bazzite   # a local checkout
+pnpm zip
+```
+
+It only replaces `vendor/` when the file matches its SHA-256 and is at least the version the plugin needs
+(`MIN_VERSION` in `py_modules/oxp3deck/oxp3tool.py`).
 
 Tests:
 
 ```bash
 python3 -m unittest discover -s tests -t . -v
+ruff check .
 node --experimental-strip-types --test tests/js/*.test.mjs   # launch options, xess offers (Node 22.6+, python3, sh)
 pnpm typecheck
 ```

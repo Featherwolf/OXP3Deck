@@ -2,7 +2,7 @@
 
 A Decky Loader plugin for the ONEXPLAYER 3 that installs, configures and updates, from one Quick Access panel:
 
-1. **oxp3-tool** (this repository): the controller, sleep and display fixes, the button layout, the kernel switch.
+1. **oxp3-tool** ([OXP3-Tool-for-Bazzite](https://github.com/Featherwolf/OXP3-Tool-for-Bazzite)): the controller, sleep and display fixes, the button layout, the kernel switch.
 2. **xess-xmx-linux** (github.com/HHHHanasak1/xess-xmx-linux): XeSS super resolution and frame generation on the XMX
    cores, and its per-game launch options.
 
@@ -41,7 +41,7 @@ from it (credited in CREDITS.md). It runs on CachyOS (Handheld Edition and deskt
 - **Every control explains itself** in its own `description` (the D-pad scrolls it into view), and every action
   shows its result or its error in a row under the control.
 
-## Layout (the plugin folder, `decky/` in this repo, shipped as `OXP3Deck/` in the zip)
+## Layout (the repository root, shipped as `OXP3Deck/` in the zip)
 
 ```
 plugin.json            name "OXP3Deck", flags ["root"], api_version 1
@@ -72,10 +72,13 @@ src/                   frontend (TypeScript, @decky/ui)
   steam.ts             the running game, launch options through SteamClient
   pages/, components/  the quick panel, the full page's tabs, shared rows (Hint, JobView, GameControls, ...)
 tests/                 unittest, with a stub `decky` module and fake roots; fixtures/oxp3: real oxp3-tool --json
-                       output (tests/make_fixtures.py regenerates it from the repository's CLI); js/: node tests
+                       output (tests/make_fixtures.py regenerates it from an OXP3-Tool-for-Bazzite checkout's
+                       CLI, found next to this repository or by OXP3_TOOL_SRC); js/: node tests
                        of launchopts.ts and xessoffer.ts; test_main.py also checks that api.ts and main.py name the
                        same methods and that main.py calls the real modules' functions with arguments they take
-tools/build_zip.py     assembles OXP3Deck.zip from dist/ and the backend files
+tools/build_zip.py     assembles OXP3Deck.zip from dist/, the backend files and vendor/oxp3-tool
+tools/vendor_oxp3_tool.py  refreshes vendor/oxp3-tool (+ .sha256) from OXP3-Tool-for-Bazzite's dist/
+vendor/                the oxp3-tool the zip carries as bin/oxp3-tool
 ```
 
 State the plugin keeps: `DECKY_PLUGIN_SETTINGS_DIR/settings.json` (the xess keys listed under the install job,

@@ -1,4 +1,4 @@
-"""Tests for the OXP3Deck backend. Run from decky/: python3 -m unittest discover -s tests -t . -v"""
+"""Tests for the OXP3Deck backend. Run from the repository root: python3 -m unittest discover -s tests -t . -v"""
 import os
 import sys
 

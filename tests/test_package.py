@@ -12,8 +12,7 @@ import unittest
 import zipfile
 from pathlib import Path
 
-PLUGIN = Path(__file__).resolve().parent.parent
-REPO = PLUGIN.parent
+PLUGIN = Path(__file__).resolve().parent.parent   # the repository root
 BUILDER = PLUGIN / "tools" / "build_zip.py"
 SEMVER = re.compile(r"^(0|[1-9]\d*)\.(0|[1-9]\d*)\.(0|[1-9]\d*)(-[0-9A-Za-z.-]+)?(\+[0-9A-Za-z.-]+)?$")
 
@@ -41,7 +40,7 @@ class ManifestTest(unittest.TestCase):
         image = manifest.get("publish", {}).get("image")
         if image:   # only an asset that exists in the repository
             rel = image.split("/HEAD/", 1)[-1]
-            self.assertTrue((REPO / rel).is_file(), image)
+            self.assertTrue((PLUGIN / rel).is_file(), image)
 
     def test_package_json(self):
         package = json.loads((PLUGIN / "package.json").read_text())
@@ -51,14 +50,14 @@ class ManifestTest(unittest.TestCase):
 
 
 class FakeTreeTest(unittest.TestCase):
-    """build_zip against a fake plugin folder and repository, so it runs without pnpm build."""
+    """build_zip against a fake plugin folder, so it runs without pnpm build."""
 
     def setUp(self):
         self.bz = load_builder()
         self.tmp = tempfile.TemporaryDirectory()
         self.addCleanup(self.tmp.cleanup)
         base = Path(self.tmp.name)
-        self.plugin, self.repo = base / "repo" / "decky", base / "repo"
+        self.plugin = base / "repo"
         files = {
             "plugin.json": json.dumps({"name": "OXP3Deck", "flags": ["root"], "api_version": 1}),
             "package.json": json.dumps({"name": "oxp3deck", "version": "1.2.3", "type": "module"}),
@@ -75,16 +74,16 @@ class FakeTreeTest(unittest.TestCase):
             p.parent.mkdir(parents=True, exist_ok=True)
             p.write_text(text)
         self.tool = b"#!/usr/bin/python3 -I\nfake"
-        (self.repo / "dist").mkdir()
-        (self.repo / "dist" / "oxp3-tool").write_bytes(self.tool)
+        (self.plugin / "vendor").mkdir()
+        (self.plugin / "vendor" / "oxp3-tool").write_bytes(self.tool)
         self.write_sums(hashlib.sha256(self.tool).hexdigest())
         self.out = base / "out" / "OXP3Deck.zip"
 
     def write_sums(self, digest):
-        (self.repo / "dist" / "oxp3-tool.sha256").write_text(f"{digest}  oxp3-tool\n")
+        (self.plugin / "vendor" / "oxp3-tool.sha256").write_text(f"{digest}  oxp3-tool\n")
 
     def build(self, out=None):
-        return self.bz.build(out or self.out, plugin=self.plugin, repo=self.repo)
+        return self.bz.build(out or self.out, plugin=self.plugin)
 
     def test_contents(self):
         out, digest, plan = self.build()
@@ -107,6 +106,11 @@ class FakeTreeTest(unittest.TestCase):
     def test_checksum_mismatch(self):
         self.write_sums("0" * 64)
         with self.assertRaisesRegex(self.bz.BuildError, "does not match"):
+            self.build()
+
+    def test_needs_the_vendored_tool(self):
+        (self.plugin / "vendor" / "oxp3-tool").unlink()
+        with self.assertRaisesRegex(self.bz.BuildError, "vendor/oxp3-tool is missing: run python3 tools/vendor_oxp3"):
             self.build()
 
     def test_missing_backend_or_docs(self):
@@ -198,7 +202,7 @@ class RealBuildTest(unittest.TestCase):
 
     def source(self, name):
         rel = name[len("OXP3Deck/"):]
-        return REPO / "dist" / rel[len("bin/"):] if rel.startswith("bin/") else PLUGIN / rel
+        return PLUGIN / "vendor" / rel[len("bin/"):] if rel.startswith("bin/") else PLUGIN / rel
 
     def test_no_bytecode(self):
         for name in self.zf.namelist():
