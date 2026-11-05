@@ -1,8 +1,8 @@
 // "Copy launch options" (DESIGN.md "Copy launch options"): the whole launch line to paste by hand when OXP3 Deck
 // cannot write it itself, and the row's texts. Pure, so node can test it (tests/js/copyopts.test.mjs). The line is
 // the user's own text with the managed keys set through launchopts.setManaged, never a rewrite of the rest.
-import { plan } from "./autolaunch";
-import { managed, type ManagedKey, MANAGED_KEYS, NEVER_AUTO, parse, setManaged } from "./launchopts";
+import { autoArgs, plan, planned } from "./autolaunch";
+import { managed, type ManagedKey, MANAGED_KEYS, NEVER_AUTO, parse, setArg, setManaged } from "./launchopts";
 
 export type CopySuggest = { key: ManagedKey; value: string; why?: string };
 
@@ -22,6 +22,8 @@ export type CopyInput = {
   done?: ManagedKey[];                // keys added once by the automatic launch options (removed since: not again)
   autoOn?: boolean;                   // the automatic launch options act for this game
   running?: boolean;                  // the game runs now
+  appid?: string;                     // for the game's DirectX 12 argument (launchopts DX12_ARGS) with frame generation
+  argsDone?: string[];                // arguments added once by the automatic launch options (removed since: not again)
 };
 
 export type CopyLine = { line: string; reason: CopyReason; adds: string };
@@ -57,12 +59,16 @@ export const copyLine = (i: CopyInput): CopyLine | null => {
   else if (i.text === null || i.text === undefined) { base = i.draft; reason = "unreadable"; }
   else { base = i.text; reason = "current"; }
   const add = missing(base, i.suggest ?? [], i.done ?? []);
-  const line = add.length ? setManaged(base, Object.fromEntries(add.map((a) => [a.key, a.value]))) : base;
-  const adds = line === base ? "" : add.map((a) => `${a.key}=${a.value}`).join(" ");
+  const keyed = add.length ? setManaged(base, Object.fromEntries(add.map((a) => [a.key, a.value]))) : base;
+  // the game's DirectX 12 argument after %command% when frame generation is set (autolaunch.autoArgs), not on a typo
+  const args = parse(base).typo ? [] : autoArgs(i.appid ?? "", keyed).filter((a) => !(i.argsDone ?? []).includes(a.arg));
+  let line = keyed;
+  for (const a of args) line = setArg(line, a.arg, true);
+  const adds = line === base ? "" : [...(keyed === base ? [] : add.map((a) => `${a.key}=${a.value}`)), ...(line === keyed ? [] : args.map((a) => a.arg))].join(" ");
   // "running" only when the automatic launch options would really add it after the game quits: plan() refuses
   // game arguments without %command% that would need quoting. The record is not needed: `add` already left out `done`.
   if (adds && reason === "current")
-    reason = i.autoOn && i.running && plan(base, add.map((a) => ({ ...a, why: a.why ?? "" })), undefined).added.length ? "running" : "advice";
+    reason = i.autoOn && i.running && planned(plan(base, add.map((a) => ({ ...a, why: a.why ?? "" })), undefined, args)) ? "running" : "advice";
   if (!line.trim()) return null;
   return { line, reason, adds };
 };
@@ -84,7 +90,7 @@ const WHY: Record<CopyReason, string> = {
   shortcut: "OXP3 Deck does not change a non-Steam game's launch options.",
   unreadable: "Steam did not return this game's launch options, so OXP3 Deck does not write them (that would replace yours). This line has only what you picked here.",
   running: "The automatic launch options add what this game needs only after it has quit. This line has it already.",
-  advice: "This line adds what this game needs for XeSS fast mode; the rest is your own text.",
+  advice: "This line adds what this game needs for XeSS fast mode (and, for a game that needs it with frame generation, its DirectX 12 argument); the rest is your own text.",
   current: "These are the game's launch options as Steam has them.",
 };
 

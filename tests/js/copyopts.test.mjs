@@ -146,3 +146,19 @@ test("copyLine never adds frame generation keys (they can crash a game)", () => 
   assert.equal(r.line, "XESS=latest %command%");
   assert.doesNotMatch(r.line, /XESS_FG|FSR_FG/);
 });
+
+test("copyLine: the DirectX 12 argument for a known game with frame generation set", () => {
+  const W3 = "292030";
+  const c = copyLine({ ...base, text: "XESS_FG=3 %command% --launcher-skip", suggest: [XESS], appid: W3 });
+  assert.deepEqual(c, { line: "XESS_FG=3 XESS=latest %command% --launcher-skip -dx12", reason: "advice", adds: "XESS=latest -dx12" });
+  assert.deepEqual(copyLine({ ...base, text: "XESS_FG=3 %command%", appid: W3 }), { line: "XESS_FG=3 %command% -dx12", reason: "advice", adds: "-dx12" });
+  assert.equal(copyLine({ ...base, text: "XESS_FG=3 %command%", appid: W3, autoOn: true, running: true }).reason, "running");
+  // not without frame generation, not for another game, not when removed after an automatic addition
+  assert.equal(copyLine({ ...base, text: "XESS=latest %command%", appid: W3 }).adds, "");
+  assert.equal(copyLine({ ...base, text: "XESS_FG=3 %command%", appid: "10" }).adds, "");
+  assert.equal(copyLine({ ...base, text: "XESS_FG=3 %command%", appid: W3, argsDone: ["-dx12"] }).adds, "");
+  // the draft (a shortcut, unreadable options) has what the toggle wrote already
+  assert.equal(copyLine({ ...base, steam: false, text: null, draft: "%command% -dx12", appid: W3 }).line, "%command% -dx12");
+  assert.match(readFileSync(new URL("../../src/components/GameControls.tsx", import.meta.url), "utf8"),
+    /appid: app\.appid, argsDone: autoLog\.data\?\.\[app\.appid\]\?\.argsDone \?\? \[\]/);
+});

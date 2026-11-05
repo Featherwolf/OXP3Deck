@@ -96,7 +96,7 @@ class GameInfoTest(GameBase):
                          (True, False, True))
         self.assertEqual(g["last_run"], {"trace": False, "fallback": None, "compile_failed": False, "canary": False,
                                          "xell_unsupported": None, "xell_builtin": None, "fg_fullscreen": None,
-                                         "logged_at": None})
+                                         "xefg": None, "logged_at": None})
         self.assertEqual(g["advice"], [])
         self.assertEqual(g["prefix_checks"], {"driverstore_capital": False, "driverstore_capital_shimmed": None,
                                               "hides_wine": None})
@@ -359,3 +359,70 @@ class SuggestTest(GameBase):
 
 if __name__ == "__main__":
     unittest.main()
+
+
+class FrameGenerationRefusedTest(GameBase):
+    """The owner's Witcher 3 log (GE-Proton11-11): XeLL latency reduction off, so every frame is refused."""
+    W3_LOG = "XeFG[3] Latency reduction is not enabled.\nxefgSwapChainSetEnabled(1) -> -15\n"
+
+    def xefg(self, text):
+        p = os.path.join(self.pfx, "drive_c", "igdext_xefg.log")
+        write(p, text)
+        return p
+
+    def test_latency_reduction_off(self):
+        self.xefg("XeFG[2] xefgSwapChainD3D12CreateContext -> 0\n" + self.W3_LOG * 2000)
+        g = self.info()
+        xf = g["last_run"]["xefg"]
+        self.assertEqual((xf["refused"], xf["reason"], xf["code"], xf["call"]),
+                         (True, "latency_reduction_off", -15, "xefgSwapChainSetEnabled"))
+        self.assertEqual(xf["lines"], ["XeFG[3] Latency reduction is not enabled.",
+                                       "xefgSwapChainSetEnabled(1) -> -15"])
+        self.assertIsInstance(xf["logged_at"], float)
+        row = next(c for c in g["checks"] if c["id"] == "fg_refused")
+        self.assertEqual(row["label"] + ": " + row["line"][0].lower() + row["line"][1:],
+                         "Frame generation is refused: turn on Xe Low Latency in the game's graphics menu.")
+        self.assertLessEqual(len(row["line"]), 80)
+        self.assertIn("XESS_LOG=1", row["detail"])
+        self.assertIn("IGDEXT_XEFG_LOG=1", row["detail"])
+        self.assertIn('"xefgSwapChainSetEnabled(1) -> -15"', row["detail"])
+        self.assertEqual(row["at"], xf["logged_at"])
+        self.assertEqual(row["lines"], xf["lines"])
+
+    def test_other_errors_are_a_generic_refusal(self):
+        self.xefg("xefgSwapChainSetEnabled(1) -> -3\n")
+        xf = self.info()["last_run"]["xefg"]
+        self.assertEqual((xf["reason"], xf["code"]), ("refused", -3))
+        # -15 without the latency line is not called latency
+        self.xefg("xefgSwapChainSetEnabled(1) -> -15\n")
+        self.assertEqual(self.info()["last_run"]["xefg"]["reason"], "refused")
+        # no SetEnabled at all: the last xefg call that failed
+        self.xefg("xefgSwapChainD3D12InitFromSwapChain(0x7f, 0x1) -> -7\n")
+        g = self.info()
+        xf = g["last_run"]["xefg"]
+        self.assertEqual((xf["reason"], xf["code"], xf["call"]), ("refused", -7, "xefgSwapChainD3D12InitFromSwapChain"))
+        row = next(c for c in g["checks"] if c["id"] == "fg_refused")
+        self.assertEqual(row["line"], "XeSS frame generation refused to start (code -7).")
+
+    def test_no_refusal_or_no_log(self):
+        self.assertIsNone(self.info()["last_run"]["xefg"])          # no log: the frontend says how to turn it on
+        self.xefg(self.W3_LOG + "xefgSwapChainSetEnabled(1) -> 0\n")   # turned on later: fine now
+        g = self.info()
+        self.assertEqual(g["last_run"]["xefg"]["refused"], False)
+        self.assertNotIn("fg_refused", [c["id"] for c in g["checks"]])
+        self.xefg("XeFG[2] all good\n")
+        self.assertEqual(self.info()["last_run"]["xefg"]["refused"], False)
+
+    def test_bounded_read_and_safe_open(self):
+        # only the tail is read: an old refusal far before the last XEFG_TAIL bytes is not seen
+        self.xefg(self.W3_LOG + ("x" * 80 + "\n") * (games.XEFG_TAIL // 81 + 10) + "XeFG[2] ok\n")
+        self.assertEqual(self.info()["last_run"]["xefg"]["refused"], False)
+        with mock.patch.object(games.os, "read", wraps=os.read) as rd:
+            p = self.xefg(self.W3_LOG * 100000)
+            self.assertTrue(games.xefg_check(p)["refused"])
+            self.assertLessEqual(sum(c.args[1] for c in rd.call_args_list), games.XEFG_TAIL)
+        # a link (the backend reads as root) and a folder are not read
+        link = os.path.join(self.tmp.name, "link.log")
+        os.symlink(p, link)
+        self.assertIsNone(games.xefg_check(link))
+        self.assertIsNone(games.xefg_check(self.tmp.name))

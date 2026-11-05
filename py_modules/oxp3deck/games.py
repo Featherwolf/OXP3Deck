@@ -24,6 +24,7 @@ FFX_DLLS = ("amd_fidelityfx_dx12.dll", "amd_fidelityfx_loader_dx12.dll", "amd_fi
 MAX_DEPTH = 10        # tools/proton-hook.py game_libs() searches this deep, so XESS=latest finds the same files
 MAX_ENTRIES = 20000
 LOG_MAX = 16 << 20    # bytes of a log read from its end
+XEFG_TAIL = 256 << 10  # bytes of igdext_xefg.log read from its end (its lines repeat every frame)
 _APPID = re.compile(r"^[0-9]+$")
 
 # Per-game known issues (DESIGN.md "Known issues per game"). fg_crash: XeSS frame generation (XESS_FG, and the FSR
@@ -118,18 +119,56 @@ def _dll_list(ctx, paths: list[str]) -> list[dict]:
     return out
 
 
-def _last_match(path: str, pattern: bytes) -> str | None:
-    """The last match (group 1) of `pattern` in the last LOG_MAX bytes of a log, or None."""
-    rx = re.compile(pattern, re.I)
+def _open_log(path: str) -> tuple[int, os.stat_result] | None:
+    """(fd, stat) of a regular file opened without following a link (the backend reads as root), or None."""
     try:
         fd = os.open(path, os.O_RDONLY | os.O_NOFOLLOW | os.O_NONBLOCK | os.O_CLOEXEC)
     except OSError:
         return None
-    last = None
     try:
         st = os.fstat(fd)
-        if not stat.S_ISREG(st.st_mode):
-            return None
+    except OSError:
+        os.close(fd)
+        return None
+    if not stat.S_ISREG(st.st_mode):
+        os.close(fd)
+        return None
+    return fd, st
+
+
+def _tail(path: str, size: int) -> tuple[str, float] | None:
+    """(text, mtime) of the last `size` bytes of a log, a cut first line dropped; None without a readable file."""
+    opened = _open_log(path)
+    if opened is None:
+        return None
+    fd, st = opened
+    try:
+        start = max(0, st.st_size - size)
+        os.lseek(fd, start, os.SEEK_SET)
+        data = b""
+        while len(data) < size:
+            chunk = os.read(fd, min(1 << 20, size - len(data)))
+            if not chunk:
+                break
+            data += chunk
+    except OSError:
+        return None
+    finally:
+        os.close(fd)
+    if start > 0:
+        data = data.split(b"\n", 1)[1] if b"\n" in data else b""
+    return data.decode("utf-8", errors="replace"), st.st_mtime
+
+
+def _last_match(path: str, pattern: bytes) -> str | None:
+    """The last match (group 1) of `pattern` in the last LOG_MAX bytes of a log, or None."""
+    rx = re.compile(pattern, re.I)
+    opened = _open_log(path)
+    if opened is None:
+        return None
+    fd, st = opened
+    last = None
+    try:
         os.lseek(fd, max(0, st.st_size - LOG_MAX), os.SEEK_SET)
         carry = b""
         while True:
@@ -145,6 +184,48 @@ def _last_match(path: str, pattern: bytes) -> str | None:
         return last.decode("utf-8", errors="replace").strip() if last is not None else None
     finally:
         os.close(fd)
+
+
+# XeSS frame generation's log (C:\igdext_xefg.log, written with XESS_LOG=1 or IGDEXT_XEFG_LOG=1). Owner report from
+# The Witcher 3 (GE-Proton11-11, November 2026): with XeLL latency reduction off in the game, every frame logs
+# "XeFG[3] Latency reduction is not enabled." and "xefgSwapChainSetEnabled(1) -> -15".
+_XEFG_SET = re.compile(r"xefgSwapChainSetEnabled\(\s*1\s*\)\s*->\s*(-?\d+)")
+_XEFG_CALL = re.compile(r"\b(xefg\w+)\([^)\r\n]{0,200}\)\s*->\s*(-\d+)")
+_XEFG_LATENCY = re.compile(r"latency reduction is not enabled", re.I)
+XEFG_LATENCY_CODE = -15
+
+
+def xefg_check(path: str) -> dict | None:
+    """Whether XeSS frame generation refused to turn on, from the tail of its log (XEFG_TAIL bytes): None without the
+    log, else {logged_at, refused, reason, code, call, lines}. reason "latency_reduction_off": the log says "Latency
+    reduction is not enabled" and xefgSwapChainSetEnabled(1) returned -15; "refused": another xefg call failed (code
+    N). The last SetEnabled(1) result decides: one that worked (>= 0) after earlier refusals means it is on now."""
+    got = _tail(path, XEFG_TAIL)
+    if got is None:
+        return None
+    text, mtime = got
+    out = {"logged_at": mtime, "refused": False, "reason": None, "code": None, "call": None, "lines": []}
+    lines = text.splitlines()
+    sets = [(i, int(m.group(1))) for i, ln in enumerate(lines) for m in [_XEFG_SET.search(ln)] if m]
+    hit = None
+    if sets:
+        i, code = sets[-1]
+        if code < 0:
+            hit = (i, "xefgSwapChainSetEnabled", code)
+    else:
+        calls = [(i, m.group(1), int(m.group(2))) for i, ln in enumerate(lines) for m in [_XEFG_CALL.search(ln)] if m]
+        if calls:
+            hit = calls[-1]
+    if hit is None:
+        return out
+    i, call, code = hit
+    latency = [j for j, ln in enumerate(lines) if _XEFG_LATENCY.search(ln)]
+    out.update(refused=True, code=code, call=call,
+               reason="latency_reduction_off" if code == XEFG_LATENCY_CODE and latency else "refused")
+    # the log's own words: the latency line before the refusal (if any) and the refusal itself
+    picked = [lines[j] for j in latency if j <= i][-1:] + [lines[i]]
+    out["lines"] = [ln.strip()[:200] for ln in picked]
+    return out
 
 
 def last_run(prefix: str | None) -> dict | None:
@@ -181,6 +262,8 @@ def last_run(prefix: str | None) -> dict | None:
         # fsr-frame-generation.md:162, launch-options.md:79)
         "fg_fullscreen": (_last_match(xefg, rb"(not supported in fullscreen)") is not None)
         if os.path.isfile(xefg) else None,
+        # XeSS frame generation turned on by the game but refused (xefg_check); None: no log
+        "xefg": xefg_check(xefg),
         "logged_at": max(times) if times else None,
     }
 
@@ -401,6 +484,31 @@ def _checks(game: dict) -> list[dict]:
                     "detail": "XeSS frame generation's log says \"Interpolation is not supported in fullscreen "
                               "mode\": in exclusive fullscreen it shows only the real frames. Choose borderless or "
                               "windowed in the game's display settings."})
+    xf = lr.get("xefg") or {}
+    if xf.get("refused"):
+        said = " and ".join(f'"{ln}"' for ln in xf.get("lines") or [])
+        logging_on = ("The log is written only while Save XeSS logs is on (XESS_LOG=1 in the launch options, or "
+                      "IGDEXT_XEFG_LOG=1 for this log alone) and keeps what the last run wrote, so check its time: "
+                      "a log from before your last start describes an older run.")
+        if xf.get("reason") == "latency_reduction_off":
+            out.append({"id": "fg_refused", "label": "Frame generation is refused",
+                        "line": "Turn on Xe Low Latency in the game's graphics menu.",
+                        "detail": "The game turned XeSS frame generation on, but XeSS frame generation needs Xe Low "
+                                  "Latency (XeLL latency reduction) on as well and refuses every frame without it. "
+                                  f"Its log (C:\\igdext_xefg.log in the game's prefix) says {said}: -15 is the "
+                                  "refusal. Turn on Xe Low Latency (or Low latency mode) in the game's graphics "
+                                  "menu next to frame generation; some games offer it only in DirectX 12 (for The "
+                                  f"Witcher 3: Start in DirectX 12). {logging_on}",
+                        "at": xf.get("logged_at"), "lines": xf.get("lines") or []})
+        else:
+            code = xf.get("code")
+            out.append({"id": "fg_refused", "label": "Frame generation is refused",
+                        "line": f"XeSS frame generation refused to start (code {code}).",
+                        "detail": f"XeSS frame generation's log (C:\\igdext_xefg.log in the game's prefix) says "
+                                  f"{said}: {xf.get('call')} failed with code {code}, so frame generation stays "
+                                  "off. Check the game's frame generation and latency settings, and use borderless "
+                                  f"or windowed mode. {logging_on}",
+                        "at": xf.get("logged_at"), "lines": xf.get("lines") or []})
     return out
 
 

@@ -133,3 +133,59 @@ test("driver prefixes", () => {
   assert.equal(driverPrefix("26.1.2"), "26.1");
   assert.equal(driverPrefix("odd"), "odd");
 });
+
+test("Start in DirectX 12: the argument goes after %command%, the user's text stays byte for byte", async () => {
+  const { DX12_ARGS, dx12Arg, dx12Known, fgConfigured, hasArg, setArg } = await import("../../src/launchopts.ts");
+  assert.deepEqual(DX12_ARGS, { "292030": "-dx12" });
+  assert.equal(dx12Arg("292030"), "-dx12");
+  assert.equal(dx12Arg("10"), "-dx12");          // the manual toggle's default for any game
+  assert.equal(dx12Known("292030"), true);
+  assert.equal(dx12Known("10"), false);
+  // on: appended as the last argument
+  assert.equal(setArg("", "-dx12", true), "%command% -dx12");
+  assert.equal(setArg("XESS_FG=3 gamemoderun  %command%  --launcher-skip", "-dx12", true), "XESS_FG=3 gamemoderun  %command%  --launcher-skip -dx12");
+  assert.equal(setArg("%command% --launcher-skip  ", "-dx12", true), "%command% --launcher-skip  -dx12");
+  // without %command% the text is the game's arguments as they are: appended to it, nothing re-quoted
+  assert.equal(setArg("--launcher-skip C:\\a.ini", "-dx12", true), "--launcher-skip C:\\a.ini -dx12");
+  assert.equal(setArg("-name \"a", "-dx12", true), "-name \"a");    // unclosed quote: left alone
+  // already there (also quoted): unchanged
+  assert.equal(setArg("%command% '-dx12'", "-dx12", true), "%command% '-dx12'");
+  assert.equal(hasArg("%command% '-dx12'", "-dx12"), true);
+  assert.equal(hasArg("-dx12 %command%", "-dx12"), false);          // before %command% it is not a game argument
+  assert.equal(hasArg("-x -dx12", "-dx12"), true);
+  assert.equal(hasArg("%command% -dx121", "-dx12"), false);
+  // an argument that needs quoting behind %command% gets literal quoting
+  assert.equal(setArg("%command%", "-mode (dx12)", true), "%command% '-mode (dx12)'");
+  assert.equal(hasArg("%command% '-mode (dx12)'", "-mode (dx12)"), true);
+  // off: only that word (every copy) and the space in front of it
+  assert.equal(setArg("A=1 %command% -dx12 --launcher-skip", "-dx12", false), "A=1 %command% --launcher-skip");
+  assert.equal(setArg("A=1 %command%  --launcher-skip -dx12", "-dx12", false), "A=1 %command%  --launcher-skip");
+  assert.equal(setArg("%command% -dx12 -x -dx12", "-dx12", false), "%command% -x");
+  assert.equal(setArg("%command% -dx12", "-dx12", false), "");
+  assert.equal(setArg("-dx12 -x", "-dx12", false), "-x");
+  assert.equal(setArg("%command% -x", "-dx12", false), "%command% -x");
+  // a %command typo is left alone
+  assert.equal(setArg("XESS=latest %command -x", "-dx12", true), "XESS=latest %command -x");
+  // a pipe, ";", "&&" or a comment after the game's arguments: the argument goes before it, not to the next command
+  assert.equal(setArg("XESS_FG=2 %command% 2>&1 | tee /tmp/log", "-dx12", true), "XESS_FG=2 %command% 2>&1 -dx12 | tee /tmp/log");
+  assert.equal(setArg("%command% --launcher-skip; echo done", "-dx12", true), "%command% --launcher-skip -dx12; echo done");
+  assert.equal(setArg("%command% -x && true", "-dx12", true), "%command% -x -dx12 && true");
+  assert.equal(setArg("%command% -x|tee l", "-dx12", true), "%command% -x -dx12|tee l");
+  assert.equal(setArg("%command% -x # note", "-dx12", true), "%command% -x -dx12 # note");
+  assert.equal(setArg("%command% >/tmp/l 2>&1", "-dx12", true), "%command% >/tmp/l 2>&1 -dx12");   // redirections are not operators
+  assert.equal(setArg("%command% 'a|b'", "-dx12", true), "%command% 'a|b' -dx12");                 // quoted: an argument
+  assert.equal(hasArg("%command% -dx12|tee l", "-dx12"), true);                                    // no second copy
+  assert.equal(hasArg("%command% | grep -dx12", "-dx12"), false);                                  // grep's, not the game's
+  assert.equal(setArg("%command% -dx12|tee l -dx12", "-dx12", false), "%command%|tee l -dx12");
+  for (const t of ["A=1 %command% -x | tee l", "%command% ; echo", "%command% -y && b # c"])
+    assert.equal(setArg(setArg(t, "-dx12", true), "-dx12", false), t);
+  // round trip
+  const user = "PROTON_LOG=1 %command%   -novid 'a b'";
+  assert.equal(setArg(setArg(user, "-dx12", true), "-dx12", false), user);
+  // frame generation set in the launch options
+  assert.equal(fgConfigured("XESS_FG=3 %command%"), true);
+  assert.equal(fgConfigured("FSR_FG=xess %command%"), true);
+  assert.equal(fgConfigured("FSR=xess %command%"), true);
+  assert.equal(fgConfigured("XESS=latest %command%"), false);
+  assert.equal(fgConfigured("XESS_FG=0 %command%"), false);
+});

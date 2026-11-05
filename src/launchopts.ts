@@ -103,26 +103,32 @@ const ARG_GAP = /[ \t\r\n]+/;
  * groups words up to its closing quote and is dropped, a backslash is an ordinary character (RC-3: `C:\Games\a.ini`
  * stays as it is). null when a quote is not closed.
  */
-const argWords = (s: string): string[] | null => {
-  const words: string[] = [];
+type Span = { word: string; start: number; end: number };
+const argSpans = (s: string): Span[] | null => {
+  const words: Span[] = [];
   let w: string | null = null;
+  let start = 0;
   for (let i = 0; i < s.length; i++) {
     const c = s[i];
     if (ARG_GAP.test(c)) {
-      if (w !== null) words.push(w);
+      if (w !== null) words.push({ word: w, start, end: i });
       w = null;
-    } else if (c === "'" || c === "\"") {
+      continue;
+    }
+    if (w === null) { w = ""; start = i; }
+    if (c === "'" || c === "\"") {
       const close = s.indexOf(c, i + 1);
       if (close < 0) return null;
-      w = (w ?? "") + s.slice(i + 1, close);
+      w += s.slice(i + 1, close);
       i = close;
     } else {
-      w = (w ?? "") + c;
+      w += c;
     }
   }
-  if (w !== null) words.push(w);
+  if (w !== null) words.push({ word: w, start, end: s.length });
   return words;
 };
+const argWords = (s: string): string[] | null => argSpans(s)?.map((w) => w.word) ?? null;
 
 /**
  * Game arguments written without %command% (Steam passed them to the game as they are), as literal shell words to
@@ -220,4 +226,110 @@ export const fsrSupported = (version: string | null | undefined): boolean => {
 export const driverPrefix = (version: string): string => {
   const m = /^(\d+)\.(\d+)/.exec(version);
   return m ? `${m[1]}.${m[2]}` : version;
+};
+
+// ---- game arguments after %command% ("Start in DirectX 12", DESIGN.md "Start in DirectX 12") ------------------------
+
+/**
+ * Known DirectX 12 arguments per Steam appid. Add a game only with a source for its argument in a comment.
+ * 292030 The Witcher 3 (next-gen update): "-dx12" after %command% starts its DirectX 12 renderer (owner report,
+ * ONEXPLAYER 3 with GE-Proton11-11, November 2026: the XeSS frame generation menu option stays on only with it,
+ * together with --launcher-skip).
+ */
+export const DX12_ARGS: Readonly<Record<string, string>> = { "292030": "-dx12" };
+/** The argument the manual toggle uses for a game not in DX12_ARGS (not every game knows it). */
+export const DX12_DEFAULT = "-dx12";
+export const dx12Arg = (appid: string | null | undefined): string => DX12_ARGS[String(appid ?? "")] ?? DX12_DEFAULT;
+export const dx12Known = (appid: string | null | undefined): boolean => String(appid ?? "") in DX12_ARGS;
+
+/**
+ * Where the game's own arguments end in text with %command%: at the first shell control operator after %command%
+ * (| ; & outside quotes, not the & of a redirection such as 2>&1 or &>, a line end, or a # comment). What follows
+ * belongs to another command ("%command% | tee log": an argument at the very end would go to tee). s.length without one.
+ */
+const argsEnd = (s: string): number => {
+  const c0 = s.indexOf(COMMAND);
+  if (c0 < 0) return s.length;
+  for (let i = c0 + COMMAND.length; i < s.length; i++) {
+    const c = s[i];
+    if (c === "\\") { i++; continue; }
+    if (c === "'") { const close = s.indexOf("'", i + 1); if (close < 0) return s.length; i = close; continue; }
+    if (c === "\"") {
+      i++;
+      while (i < s.length && s[i] !== "\"") i += s[i] === "\\" ? 2 : 1;
+      if (i >= s.length) return s.length;
+      continue;
+    }
+    if (c === "|" || c === ";" || c === "\n" || c === "\r") return i;
+    if (c === "&" && s[i - 1] !== ">" && s[i - 1] !== "<" && s[i + 1] !== ">") return i;
+    if (c === "#" && /\s/.test(s[i - 1] ?? "")) return i;
+  }
+  return s.length;
+};
+
+/** Where the game's arguments are in `s`, each with its unquoted word and its place (null: an unclosed quote). */
+const gameArgs = (s: string): Span[] | null => {
+  const all = tokenize(s);
+  const at = all.findIndex((t) => t.raw.includes(COMMAND));
+  if (at < 0) return TYPO.test(s) ? [] : argSpans(s);
+  const end = argsEnd(s);
+  const head = tokenize(s.slice(0, end));
+  const cmd = head.findIndex((t) => t.raw.includes(COMMAND));
+  return head.slice(cmd + 1).map((t) => ({ word: unquote(t.raw), start: t.end - t.raw.length, end: t.end }));
+};
+
+/** A space unless the text ends with one already (a word is appended to the text as it is). */
+const gap = (s: string): string => (/[ \t\r\n]$/.test(s) ? "" : " ");
+
+/** Whether the game gets `arg` as one of its arguments (after %command%, or the whole text without one). */
+export const hasArg = (str: string, arg: string): boolean => {
+  if (!arg) return false;
+  return (gameArgs(str ?? "") ?? []).some((w) => w.word === arg);
+};
+
+/**
+ * Add `arg` as the game's last argument (on) or take out every copy of it (off). The user's text stays as it is:
+ * an addition is appended to the end (as a literal shell word behind %command%, or as it is to text without %command%, which
+ * Steam passes to the game unchanged), a removal cuts out only that word and the space in front of it. Empty text
+ * becomes "%command% ARG"; text that is then only %command% becomes "". A "%command" typo is left alone.
+ */
+export const setArg = (str: string, arg: string, on: boolean): string => {
+  const s = str ?? "";
+  if (!arg) return s;
+  const p = parse(s);
+  if (p.typo && !p.hasCommand) return s;
+  if (on) {
+    if (hasArg(s, arg)) return s;
+    if (!s.trim()) return `${COMMAND} ${quote(arg)}`;
+    if (!p.hasCommand) {
+      // without %command% Steam passes the text to the game as it is: a word with a space or quote cannot go in
+      if (/[\s'"]/.test(arg) || argSpans(s) === null) return s;
+      return `${s}${gap(s)}${arg}`;
+    }
+    const end = argsEnd(s);
+    if (end >= s.length) return `${s}${gap(s)}${quote(arg)}`;
+    // before a pipe, ";", "&&" or a comment: the last of the game's own arguments, the rest stays as it is
+    let a = end;
+    while (a > 0 && /[ \t]/.test(s[a - 1])) a--;
+    return `${s.slice(0, a)} ${quote(arg)}${s.slice(a)}`;
+  }
+  const spans = (gameArgs(s) ?? []).filter((w) => w.word === arg);
+  if (!spans.length) return s;
+  let out = "";
+  let from = 0;
+  for (const w of spans) {
+    let a = w.start;
+    while (a > from && /\s/.test(s[a - 1])) a--;
+    out += s.slice(from, a);
+    from = w.end;
+  }
+  out += s.slice(from);
+  if (!p.hasCommand) out = out.replace(/^\s+/, "");
+  return out.trim() === COMMAND ? "" : out;
+};
+
+/** XeSS frame generation is set for the game in its launch options (XESS_FG, or an FSR route that brings it in). */
+export const fgConfigured = (str: string): boolean => {
+  const m = managed(parse(str ?? ""));
+  return (!!m.XESS_FG && m.XESS_FG !== "0") || !!m.FSR_FG || m.FSR === "xess";
 };

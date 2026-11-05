@@ -329,7 +329,9 @@ type GameInfo = {
   checks: { id, label, line, detail }[],   // short rows from prefix_checks and the last run (below)
 }
 // last_run also has xell_builtin ("[XeLL] Using built-in context") and fg_fullscreen (igdext_xefg.log: "Interpolation
-// is not supported in fullscreen mode"), null without that log.
+// is not supported in fullscreen mode"), null without that log, and xefg (below: frame generation refused).
+// last_run.xefg: { logged_at: number, refused: boolean, reason: "latency_reduction_off" | "refused" | null,
+//                  code: number|null, call: string|null, lines: string[] } | null   (null: no igdext_xefg.log)
 ```
 
 #### Known issues per game (games.py `KNOWN_ISSUES`, 0.4.x)
@@ -362,6 +364,19 @@ with `hides_wine` it adds that XeLL 1.3 may refuse the GPU too.
 | `driverstore` | the prefix's system32 has a `DriverStore` spelled otherwise than `driverstore` (proton-cachyos), and its `FileRepository/igd_faux.inf_1/igdext64.dll` (case-insensitive, link resolved; read only under the home, a library or a system tool folder) is not the shim | "Second driver store in the prefix": Wine picks it, so XeSS loads the stock file. Issue #46; the fix (PR #47) is on main only. Work-around: delete that folder with the game closed, or Proton Experimental |
 | `hides_wine` | `pfx/user.reg` names `HideWineExports` and the game has `libxell.dll` | "Proton hides Wine from this game": XeLL 1.3 then takes the Intel path and can refuse the GPU |
 | `fullscreen` | `last_run.fg_fullscreen` | "Last run: exclusive fullscreen": pick borderless |
+| `fg_refused` | `last_run.xefg.refused` | "Frame generation is refused" · "Turn on Xe Low Latency in the game's graphics menu." (reason `latency_reduction_off`), else "XeSS frame generation refused to start (code N)." Details: what the log says (the check's `lines`), how the log is turned on (XESS_LOG=1, or IGDEXT_XEFG_LOG=1 for this log alone), and the log's time (`at`, shown with `when()` so a stale log is obvious) |
+
+**Frame generation refused** (games.py `xefg_check`, 0.4.x; owner report from The Witcher 3 on GE-Proton11-11): the
+last `XEFG_TAIL` (256 KiB) of `drive_c/igdext_xefg.log`, read with the same safe open as `_last_match` (`_open_log`:
+`O_NOFOLLOW | O_NONBLOCK`, regular files only; the backend reads as root), a cut first line dropped. The last
+`xefgSwapChainSetEnabled(1) -> N` decides: N < 0 is a refusal (a later N >= 0 means it is on now); without any
+SetEnabled line, the last `xefg…(…) -> -N` call that failed. Reason `latency_reduction_off` when N is -15 and the tail
+has "Latency reduction is not enabled" (the owner's log repeats "XeFG[3] Latency reduction is not enabled." and
+"xefgSwapChainSetEnabled(1) -> -15" every frame: the game did not turn XeLL latency reduction on, Xe Low Latency off in
+its menu), else `refused` with the code. `lines`: the latency line before the refusal and the refusal line (≤ 200
+chars each). Each check row may carry `at` (the log's mtime) and `lines`; GameControls shows them in its Details
+("The log was written …", "The log says:"). Without the log, the last run's Details say how to turn it on (Save XeSS
+logs, XESS_LOG=1); nothing up front.
 
 The XeSS tab (`xessoffer.releaseRows`): "Release older than 20261104" (its fixes: PR #43, low latency on, Mesa
 26.3.0-rc3 / 26.1.2, FSR → XeSS) and, with a system Proton named *cachyos* and a release up to 20261104, "Known bug:
@@ -2023,7 +2038,9 @@ text is never touched.
     `why` names the oldest reason, e.g. "XeSS 1.3.1 is older than 2.0.2.68, so it would run in the slower mode.").
   - an FSR 3.1+ DLL and no XeSS DLL, with xess-xmx-linux 20261104+ (`features.fsr`) → `FSR=xess` ("The game has FSR
     3.1+ and no XeSS: its FSR runs on XeSS.").
-  The `advice` lines stay as they are.
+  The `advice` lines stay as they are. Besides the keys, the frontend adds a game argument after `%command%`: the
+  DirectX 12 argument for a game in `launchopts.DX12_ARGS` when XeSS frame generation is set in its launch options
+  ("Start in DirectX 12" below).
   **Never frame generation** (0.4.x, owner report: XESS_FG from the launch options crashed Monster Hunter Wilds):
   `XESS_FG` and `FSR_FG` are never suggested (games.py `NEVER_SUGGESTED`, a final filter in `_suggest`), and
   `autolaunch.plan` and `copyopts` drop them too (`launchopts.NEVER_AUTO`), whatever the backend sends. A game with a
@@ -2091,6 +2108,43 @@ never writes launch options.
 - Tests: `tests/js/copyopts.test.mjs` (the line and reasons, texts ≤ 60 chars without variable names, Details name
   Properties → Launch options and the tag, the chain's order and fall-through with fake documents, the wiring).
 
+## Start in DirectX 12
+
+Owner field result (The Witcher 3, 292030, GE-Proton11-11): its XeSS frame generation menu option stays on only when
+the game starts in DirectX 12, with `-dx12` after `%command%` (plus `--launcher-skip`, which the user adds).
+
+- **`launchopts.ts`**: `DX12_ARGS: Record<appid, string>` (`{"292030": "-dx12"}`; a game is added only with a source
+  cited in a comment), `DX12_DEFAULT = "-dx12"`, `dx12Arg(appid)`, `dx12Known(appid)`; `hasArg(text, arg)` (a game
+  argument: a word after `%command%`, unquoted, or a word of text without `%command%` split as Steam passes it;
+  a word before `%command%` does not count); `setArg(text, arg, on)`: on appends the argument as the last word (a
+  literal shell word behind `%command%` through `quote`; to text without `%command%`, which Steam passes to the game
+  as it is, only a word without spaces or quotes; empty text becomes `%command% -dx12`). The game's arguments end
+  at the first shell control operator after `%command%` (`argsEnd`: `|`, `;`, `&` outside quotes and not part of a
+  redirection such as `2>&1` / `&>`, a line end, or a `#` comment): `%command% 2>&1 | tee log` becomes
+  `%command% 2>&1 -dx12 | tee log`, never `… | tee log -dx12`, and a `-dx12` after the pipe is not the game's. Off
+  cuts out every copy of that word among the game's arguments and the whitespace in front of it, nothing else; text that is then only `%command%` becomes "". A
+  `%command` typo is left alone. `fgConfigured(text)`: XESS_FG (not 0), FSR_FG or FSR=xess is set.
+- **UI** (GameControls, after Compatibility mode): ToggleField "Start in DirectX 12 ⓘ", checked `hasArg(text,
+  dx12Arg(appid))`, writes `setArg` through the same `write()` as the other options (so a shortcut or unreadable
+  options get it in the draft, and Copy launch options carries it). One line: "This game's frame generation needs
+  DirectX 12." (a game in the table), else "Only for games that know it."; tag `game.dx12` (Restart the game), pending
+  row like the others. Details: what it does (the argument after %command%, only that word is taken out again), for a
+  table game why and that the automatic launch options add it, the note (table game: Xe Low Latency must be on too;
+  any other: "Not every game knows -dx12 …"), "Adds to launch options: -dx12".
+- **Automatic launch options**: `autolaunch.autoArgs(appid, text)` gives `[{arg: "-dx12", why}]` for a game in
+  `DX12_ARGS` whose launch options set XeSS frame generation (`fgConfigured`) and lack the argument. `plan(text,
+  suggest, rec, args)` adds the keys as before, then appends each argument with `setArg` (`SAFE_ARG`: one plain word),
+  skipping one in `rec.argsDone`; it returns `{text, added, args}`. `AutoRecord` gains `args?` (Undo takes them out
+  with `setArg(…, false)`) and `argsDone?` (added once, never again); `record(prev, added, now, args)`, `readLog`,
+  `hasAdded`, `recordText` ("XESS=latest -dx12") and the toast include them. `autoApply` reads the launch options of
+  a table game even without `suggest`.
+- **Copy launch options**: `CopyInput` gains `appid` and `argsDone`; `copyLine` appends `autoArgs(appid, line)` (not
+  in `argsDone`, not on a typo) after setting the keys; `adds` lists it ("XESS=latest -dx12").
+- Tests: `tests/js/launchopts.test.mjs` (byte-for-byte text, quoting, removal, typo, round trip), `autolaunch.test.mjs`
+  (autoArgs, plan/record/undo/readLog with arguments), `copyopts.test.mjs`, `pages.test.mjs` (the toggle's wiring and
+  tag); `tests/test_games.py` `FrameGenerationRefusedTest` (the owner's log, generic codes, a later success, no log,
+  the bounded read, links and folders not read).
+
 ## When it takes effect (effect tags)
 
 Every setting shows when it takes effect, in the short-line style, next to its one line, in its confirm dialog and,
@@ -2155,6 +2209,7 @@ after a change that is not immediate, in a pending row.
 | `game.xess`, `game.fg`, `game.mesa`, `game.vendor`, `game.log`, `game.fsr`, `game.typo` | per-game launch options | Restart the game |
 | `game.auto`, `game.auto_undo`, `auto.global` | automatic launch options | Restart the game |
 | `game.copy` | Copy launch options (pasted by hand) | Restart the game |
+| `game.dx12` | Start in DirectX 12 | Restart the game |
 | `kernel.try`, `kernel.keep` | Kernel | Reboot |
 | `oxp3.install` | Install / Update fixes tool | Now |
 | `reboot` | Reboot to finish | Now |

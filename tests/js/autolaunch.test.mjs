@@ -1,5 +1,6 @@
 // Tests for src/autolaunch.ts. Run from the repository root: node --experimental-strip-types --test tests/js/*.test.mjs
 import assert from "node:assert/strict";
+import { readFileSync } from "node:fs";
 import { test } from "node:test";
 
 import "./tsresolve.mjs";
@@ -12,7 +13,7 @@ const XESS = { key: "XESS", value: "latest", why: "XeSS 1.3.1 is older than 2.0.
 const FSR = { key: "FSR", value: "xess", why: "The game has FSR 3.1+ and no XeSS: its FSR runs on XeSS." };
 
 test("plan adds absent keys only, keeping the user's text byte for byte", () => {
-  assert.deepEqual(plan("", [XESS], undefined), { text: "XESS=latest %command%", added: [XESS] });
+  assert.deepEqual(plan("", [XESS], undefined), { text: "XESS=latest %command%", added: [XESS], args: [] });
   const user = "PROTON_LOG=1   gamemoderun  %command%  -dx11 'a  b'";
   const p = plan(user, [XESS, FSR], undefined);
   assert.equal(p.text, "PROTON_LOG=1   XESS=latest FSR=xess gamemoderun  %command%  -dx11 'a  b'");
@@ -38,7 +39,7 @@ test("plan skips keys done before and does nothing on a typo", () => {
   assert.deepEqual(plan("%command%", [XESS, FSR], rec).added, [FSR]);
   const gone = undone(rec, 200);
   assert.deepEqual(plan("", [XESS], gone).added, []);
-  assert.deepEqual(plan("XESS=latest %command", [FSR], undefined), { text: "XESS=latest %command", added: [] });
+  assert.deepEqual(plan("XESS=latest %command", [FSR], undefined), { text: "XESS=latest %command", added: [], args: [] });
 });
 
 test("undo removes only the added keys whose value is unchanged", () => {
@@ -95,8 +96,60 @@ test("effectiveOn, the per-game choice and reading stored values", () => {
 test("plan never adds frame generation, whatever the backend suggests (MH Wilds crashed with XESS_FG)", () => {
   const fg = { key: "XESS_FG", value: "2", why: "x" };
   const fsrFg = { key: "FSR_FG", value: "xess", why: "x" };
-  assert.deepEqual(plan("", [fg, fsrFg], undefined), { text: "", added: [] });
+  assert.deepEqual(plan("", [fg, fsrFg], undefined), { text: "", added: [], args: [] });
   const p = plan("%command%", [fg, XESS, fsrFg], undefined);
   assert.equal(p.text, "XESS=latest %command%");
   assert.deepEqual(p.added.map((a) => a.key), ["XESS"]);
+});
+
+test("the DirectX 12 argument: added for a known game with frame generation set, recorded, undone", async () => {
+  const { autoArgs, DX12_WHY, hasAdded, recordText, planned, addedToast } = await import("../../src/autolaunch.ts");
+  const W3 = "292030";
+  assert.deepEqual(autoArgs(W3, "XESS_FG=3 %command% --launcher-skip"), [{ arg: "-dx12", why: DX12_WHY }]);
+  assert.deepEqual(autoArgs(W3, "XESS=latest %command%"), [], "no frame generation set: nothing");
+  assert.deepEqual(autoArgs(W3, "XESS_FG=3 %command% -dx12"), [], "already there");
+  assert.deepEqual(autoArgs("10", "XESS_FG=3 %command%"), [], "a game not in the table: only the manual toggle");
+  const user = "XESS_FG=3 %command%  --launcher-skip";
+  const p = plan(user, [XESS], undefined, autoArgs(W3, user));
+  assert.equal(p.text, "XESS_FG=3 XESS=latest %command%  --launcher-skip -dx12");
+  assert.equal(planned(p), true);
+  assert.deepEqual(p.args.map((a) => a.arg), ["-dx12"]);
+  assert.equal(addedToast("The Witcher 3", p.added, p.args), "Added launch options for The Witcher 3: XESS=latest -dx12. They apply at its next start.");
+  const rec = record(undefined, p.added, 100, p.args);
+  assert.deepEqual(rec.args, ["-dx12"]);
+  assert.deepEqual(rec.argsDone, ["-dx12"]);
+  assert.equal(recordText(rec), "XESS=latest -dx12");
+  assert.ok(hasAdded(rec));
+  assert.equal(undo(p.text, rec), user);
+  // once added (or undone) never again
+  assert.deepEqual(plan(user, [], rec, autoArgs(W3, user)).args, []);
+  assert.deepEqual(plan(user, [], undone(rec, 200), autoArgs(W3, user)).args, []);
+  // an argument only (no key): the text is appended to, nothing else changes
+  const q = plan(user, [], undefined, autoArgs(W3, user));
+  assert.equal(q.text, `${user} -dx12`);
+  const r2 = record(undefined, q.added, 100, q.args);
+  assert.ok(hasAdded(r2));
+  assert.equal(undo(q.text, r2), user);
+  // a pipe after the game's arguments: the argument goes before it (not to tee), and Undo gives the text back
+  const piped = "XESS_FG=3 %command% --launcher-skip 2>&1 | tee /tmp/w3.log";
+  const pp = plan(piped, [], undefined, autoArgs(W3, piped));
+  assert.equal(pp.text, "XESS_FG=3 %command% --launcher-skip 2>&1 -dx12 | tee /tmp/w3.log");
+  assert.equal(undo(pp.text, record(undefined, pp.added, 100, pp.args)), piped);
+  assert.deepEqual(autoArgs(W3, "XESS_FG=3 %command% -dx12|tee l"), [], "already the game's argument");
+  // a typo or an unsafe argument: nothing
+  assert.deepEqual(plan("XESS_FG=3 %command", [], undefined, [{ arg: "-dx12", why: "" }]).args, []);
+  assert.deepEqual(plan("%command%", [], undefined, [{ arg: "$(rm)", why: "" }]).args, []);
+  // stored and read back
+  const rl = readLog({ [W3]: { ...rec, args: ["-dx12", "a b", 3], argsDone: ["-dx12"] } });
+  assert.deepEqual(rl[W3].args, ["-dx12"]);
+  assert.deepEqual(rl[W3].argsDone, ["-dx12"]);
+  // a record without arguments keeps its old shape
+  assert.equal("args" in record(undefined, [XESS], 1), false);
+});
+
+test("AutoLaunch passes the DirectX 12 argument to plan and records it", () => {
+  const s = readFileSync(new URL("../../src/components/AutoLaunch.tsx", import.meta.url), "utf8");
+  assert.match(s, /plan\(text, suggest, rec, autoArgs\(appid, text\)\)/);
+  assert.match(s, /record\(rec, p\.added, Math\.floor\(Date\.now\(\) \/ 1000\), p\.args\)/);
+  assert.match(s, /if \(!suggest\.length && !dx12Known\(appid\)\) return none;/);
 });

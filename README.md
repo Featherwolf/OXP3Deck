@@ -304,10 +304,18 @@ next start. No re-login is needed.
   write to. The Games page says whether the game's Proton has the shim and the hook. Without the shim, XeSS stays on
   DP4a.
 - Keep a frame limit on with frame generation, or the generated frames reach the screen unevenly.
+- **Start in DirectX 12** (per game): adds the game's DirectX 12 argument (`-dx12`) after `%command%`, as its last
+  argument; your own text stays as it is. The Witcher 3 needs it for XeSS frame generation (its menu option stays on
+  only in DirectX 12; add `--launcher-skip` yourself to skip its launcher). Other games may not know `-dx12`.
+- **Frame generation is refused** (Games tab): with **Save XeSS logs** on, the plugin reads the end of
+  `C:\igdext_xefg.log` in the game's prefix. When it says "Latency reduction is not enabled" and
+  `xefgSwapChainSetEnabled(1) -> -15`, turn on **Xe Low Latency** in the game's graphics menu; the Details show the
+  log's lines and when it was written.
 - **Add needed launch options automatically** (Games and XeSS tabs, off by default; each game can override it): when
   a game needs `XESS=latest` (XeSS older than 2.0.2.68, old frame generation, XeLL 1.2) or `FSR=xess` (FSR 3.1+ and
   no XeSS, xess-xmx-linux 20261104+), OXP3 Deck adds just that variable, a few seconds after you quit the game or
-  when you open its settings while it is not running; never while it runs. The game's settings show **Added:
+  when you open its settings while it is not running; never while it runs. For The Witcher 3 with XeSS frame
+  generation set in its launch options it also adds `-dx12`. The game's settings show **Added:
   XESS=latest** with why, and **Undo**. A key added once, or undone, is never added again for that game.
 - Everything else in the launch options stays as you wrote it: wrappers such as `gamemoderun`, other variables, and
   the game's own arguments. Options without `%command%` are game arguments, so the plugin writes

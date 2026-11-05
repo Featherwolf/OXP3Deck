@@ -1,6 +1,6 @@
 {
   "name": "oxp3deck",
-  "version": "0.4.0",
+  "version": "0.4.1",
   "description": "OXP3 Deck - oxp3-tool and xess-xmx-linux for the ONEXPLAYER 3 in one Quick Access panel",
   "type": "module",
   "scripts": {

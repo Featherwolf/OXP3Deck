@@ -2,14 +2,18 @@
 // record of what was added (so it is added once and Undo removes only that), and the settings. Pure, so node can test
 // it (tests/js/autolaunch.test.mjs). The user's own text is never rewritten: a key is inserted as one token at the
 // place setManaged would put it, and Undo cuts out only that token.
-import { managed, type ManagedKey, MANAGED_KEYS, NEVER_AUTO, parse, setManaged } from "./launchopts";
+import { DX12_ARGS, fgConfigured, hasArg, managed, type ManagedKey, MANAGED_KEYS, NEVER_AUTO, parse, setArg, setManaged } from "./launchopts";
 
 export type AutoSuggest = { key: ManagedKey; value: string; why: string };
+/** A game argument to add after %command% ("Start in DirectX 12"). */
+export type AutoArg = { arg: string; why: string };
 export type AutoRecord = {
   added: Partial<Record<ManagedKey, string>>;   // what OXP3 Deck added (and Undo removes while unchanged)
   why: string[]; at: number;                    // at: Unix seconds of the last addition or undo
   done: ManagedKey[];                           // keys added once (or undone): never added again
   undone: boolean;
+  args?: string[];                              // game arguments added after %command% (Undo removes them)
+  argsDone?: string[];                          // arguments added once (or undone): never added again
 };
 export type AutoSettings = { on: boolean; games: Record<string, boolean> };   // settings.json ui_autolaunch
 export type AutoLog = Record<string, AutoRecord>;                            // settings.json ui_autolaunch_log
@@ -44,6 +48,21 @@ export const readSettings = (v: unknown): AutoSettings => {
 };
 
 const SAFE = /^[A-Za-z0-9._-]{1,32}$/;
+/** A game argument the automatic launch options may add: one plain word, no quoting needed anywhere. */
+const SAFE_ARG = /^-{0,2}[A-Za-z0-9][A-Za-z0-9._:=-]{0,31}$/;
+
+/** Why the DirectX 12 argument is added (DESIGN.md "Start in DirectX 12"). */
+export const DX12_WHY = "This game's XeSS frame generation stays on only in DirectX 12.";
+
+/**
+ * The game arguments the automatic launch options add for this text: the game's DirectX 12 argument (DX12_ARGS) when
+ * XeSS frame generation is set in its launch options (XESS_FG, FSR_FG or FSR=xess) and the argument is not there yet.
+ */
+export const autoArgs = (appid: string, text: string | null | undefined): AutoArg[] => {
+  const arg = DX12_ARGS[String(appid ?? "")];
+  const s = text ?? "";
+  return arg && fgConfigured(s) && !hasArg(s, arg) ? [{ arg, why: DX12_WHY }] : [];
+};
 
 /** "XESS=latest FSR=xess". */
 export const tokensText = (added: Partial<Record<ManagedKey, string>> | AutoSuggest[]): string =>
@@ -55,11 +74,29 @@ export const tokensText = (added: Partial<Record<ManagedKey, string>> | AutoSugg
  * (rec.done). Nothing on a "%command" typo, for a value that would need quoting, or when the text has game arguments
  * that would have to be re-quoted to put %command% in front of them (that would rewrite the user's text).
  */
-export const plan = (text: string, suggest: AutoSuggest[], rec: AutoRecord | undefined): { text: string; added: AutoSuggest[] } => {
+export type Plan = { text: string; added: AutoSuggest[]; args: AutoArg[] };
+export const plan = (text: string, suggest: AutoSuggest[], rec: AutoRecord | undefined, args: AutoArg[] = []): Plan => {
   const s = text ?? "";
   const p = parse(s);
-  const none = { text: s, added: [] as AutoSuggest[] };
+  const none: Plan = { text: s, added: [], args: [] };
   if (p.typo) return none;
+  const keys = planKeys(s, p, suggest, rec);
+  // then the game arguments, appended after the rest (setArg keeps the text as it is)
+  const argsDone = new Set(rec?.argsDone ?? []);
+  let out = keys.text;
+  const addArgs: AutoArg[] = [];
+  for (const a of args ?? []) {
+    if (!a || !SAFE_ARG.test(a.arg ?? "") || argsDone.has(a.arg) || hasArg(out, a.arg)) continue;
+    const next = setArg(out, a.arg, true);
+    if (next === out) continue;
+    out = next;
+    addArgs.push(a);
+  }
+  return { text: out, added: keys.added, args: addArgs };
+};
+
+const planKeys = (s: string, p: ReturnType<typeof parse>, suggest: AutoSuggest[], rec: AutoRecord | undefined): { text: string; added: AutoSuggest[] } => {
+  const none = { text: s, added: [] as AutoSuggest[] };
   const have = managed(p);
   const done = new Set(rec?.done ?? []);
   const seen = new Set<string>();
@@ -98,7 +135,12 @@ const commandStart = (s: string, tokens: { end: number }[]): number => {
  * changed since stays). Only those tokens and the space after them go; text that is then only %command% becomes "".
  */
 export const undo = (text: string, rec: AutoRecord): string => {
-  const s = text ?? "";
+  let out = undoKeys(text ?? "", rec);
+  for (const a of rec.args ?? []) out = setArg(out, a, false);
+  return out;
+};
+
+const undoKeys = (s: string, rec: AutoRecord): string => {
   const p = parse(s);
   if (!p.hasCommand) return s;
   const cut: [number, number][] = [];
@@ -119,15 +161,21 @@ export const undo = (text: string, rec: AutoRecord): string => {
 };
 
 /** The record after an addition (or, with `added` empty, the previous one unchanged). `now`: Unix seconds. */
-export const record = (prev: AutoRecord | undefined, added: AutoSuggest[], now: number): AutoRecord => {
-  if (!added.length && prev) return prev;
+export const record = (prev: AutoRecord | undefined, added: AutoSuggest[], now: number, args: AutoArg[] = []): AutoRecord => {
+  if (!added.length && !args.length && prev) return prev;
   const done = [...new Set([...(prev?.done ?? []), ...added.map((a) => a.key)])];
-  const keep = prev && !prev.undone ? prev.added : {};
-  return {
+  const live = prev && !prev.undone;
+  const keep = live ? prev.added : {};
+  const r: AutoRecord = {
     added: { ...keep, ...Object.fromEntries(added.map((a) => [a.key, a.value])) },
-    why: [...(prev && !prev.undone ? prev.why : []), ...added.map((a) => (a.why ?? "").slice(0, 160))],
+    why: [...(live ? prev.why : []), ...[...added, ...args].map((a) => (a.why ?? "").slice(0, 160))],
     at: now, done, undone: false,
   };
+  const keptArgs = [...new Set([...(live ? prev.args ?? [] : []), ...args.map((a) => a.arg)])];
+  const argsDone = [...new Set([...(prev?.argsDone ?? []), ...args.map((a) => a.arg)])];
+  if (keptArgs.length) r.args = keptArgs;
+  if (argsDone.length) r.argsDone = argsDone;
+  return r;
 };
 
 /** The record after Undo: nothing counts as added any more, the keys stay done. */
@@ -174,13 +222,25 @@ export const readLog = (v: unknown): AutoLog => {
       done: Array.isArray(o.done) ? o.done.filter((d): d is ManagedKey => (MANAGED_KEYS as readonly string[]).includes(d as string)) : [],
       undone: o.undone === true,
     };
+    const words = (x: unknown): string[] => Array.isArray(x) ? x.filter((w): w is string => typeof w === "string" && SAFE_ARG.test(w)) : [];
+    if (words(o.args).length) out[k].args = words(o.args);
+    if (words(o.argsDone).length) out[k].argsDone = words(o.argsDone);
   }
   return out;
 };
 
 /** True when the record has something Undo can still take out. */
-export const hasAdded = (rec: AutoRecord | undefined): rec is AutoRecord => !!rec && !rec.undone && Object.keys(rec.added).length > 0;
+export const hasAdded = (rec: AutoRecord | undefined): rec is AutoRecord =>
+  !!rec && !rec.undone && (Object.keys(rec.added).length > 0 || (rec.args ?? []).length > 0);
+
+/** What a record or a plan adds, as one line: "XESS=latest -dx12". */
+export const addedText = (added: Partial<Record<ManagedKey, string>> | AutoSuggest[], args: (string | AutoArg)[] = []): string =>
+  [tokensText(added), ...args.map((a) => (typeof a === "string" ? a : a.arg))].filter(Boolean).join(" ");
+export const recordText = (rec: AutoRecord): string => addedText(rec.added, rec.args ?? []);
+
+/** The plan adds something. */
+export const planned = (p: Plan): boolean => p.added.length > 0 || p.args.length > 0;
 
 /** The toast after an addition. */
-export const addedToast = (name: string, added: AutoSuggest[]): string =>
-  `Added launch options for ${name}: ${tokensText(added)}. They apply at its next start.`;
+export const addedToast = (name: string, added: AutoSuggest[], args: AutoArg[] = []): string =>
+  `Added launch options for ${name}: ${addedText(added, args)}. They apply at its next start.`;

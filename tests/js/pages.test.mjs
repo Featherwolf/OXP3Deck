@@ -371,3 +371,16 @@ test("no libxess_fg.dll counts only without an FSR route (FSR=xess / FSR_FG brin
   assert.doesNotMatch(s, /game\?\.has_fg === false \?/);
   assert.match(s, /\{steam && cur\.XESS_FG && noFgLib && \(/);
 });
+
+test("Start in DirectX 12: a per-game toggle that writes only its argument, with the effect tag", async () => {
+  const s = src("components/GameControls.tsx");
+  assert.match(s, /onChange=\{\(v\) => write\(setArg\(text, dxArg, v\), \{ id: "game\.dx12", label: "Start in DirectX 12" \}\)\}/);
+  assert.match(s, /EFFECTS\["game\.dx12"\]/);
+  assert.match(s, /"game\.dx12"/);
+  assert.match(s, /Not every game knows \$\{dxArg\}/);
+  const { EFFECTS, effectText } = await import("../../src/effects.ts");
+  assert.equal(effectText(EFFECTS["game.dx12"]), "Restart the game");
+  // the frame generation check: the log's time in the check's Details, how to turn the log on without one
+  assert.match(s, /The log was written \$\{when\(c\.at\)\}/);
+  assert.match(s, /turn on Save XeSS logs \(XESS_LOG=1\)/);
+});

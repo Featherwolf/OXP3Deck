@@ -5,10 +5,11 @@ import { ButtonItem, DropdownItem, ToggleField } from "@decky/ui";
 import { FC, useEffect, useRef, useState } from "react";
 
 import {
-  addedToast, AutoChoice, AutoLog, AutoRecord, AutoSettings, choiceOf, effectiveOn, fitLog, fitSettings, hasAdded, plan,
-  readLog, readSettings, record, tokensText, undo, undone, withChoice,
+  addedText, addedToast, autoArgs, AutoChoice, AutoLog, AutoRecord, AutoSettings, choiceOf, effectiveOn, fitLog, fitSettings,
+  hasAdded, plan, planned, readLog, readSettings, record, recordText, undo, undone, withChoice,
 } from "../autolaunch";
 import { game_info, get_setting, set_setting } from "../backend";
+import { dx12Known } from "../launchopts";
 import { EFFECTS } from "../effects";
 import { getLaunchOptions, isRunning, isSteamApp, RunningApp, runningApp, setLaunchOptions, watchRunningApp } from "../steam";
 import { put, useResource } from "../store";
@@ -55,19 +56,20 @@ export const autoApply = async (appid: string, name: string, opts: { quiet?: boo
     if (!effectiveOn(await loadSettings(), appid)) return none;
     const gi = await game_info(appid);
     const suggest = gi.ok ? gi.game?.suggest ?? [] : [];
-    if (!suggest.length) return none;
+    // the DirectX 12 argument depends on the launch options (frame generation set), so a known game reads them too
+    if (!suggest.length && !dx12Known(appid)) return none;
     const text = await getLaunchOptions(appid);
     if (text === null) return none;                       // unreadable: writing would replace the user's options
     const rec = (await loadLog())[appid];
-    const p = plan(text, suggest, rec);
-    if (!p.added.length) return none;
+    const p = plan(text, suggest, rec, autoArgs(appid, text));
+    if (!planned(p)) return none;
     // never while that game runs: checked right before the write
     if (isRunning(appid)) return { ...none, waiting: true };
     const r = await setLaunchOptions(appid, p.text);
     if (!r.ok) return { ...none, error: r.error };
-    const err = await saveRecord(appid, record(rec, p.added, Math.floor(Date.now() / 1000)));
-    if (!opts.quiet) toast(addedToast(name, p.added));
-    return { added: tokensText(p.added), waiting: false, error: err };
+    const err = await saveRecord(appid, record(rec, p.added, Math.floor(Date.now() / 1000), p.args));
+    if (!opts.quiet) toast(addedToast(name, p.added, p.args));
+    return { added: addedText(p.added, p.args), waiting: false, error: err };
   } catch (e) {
     return { ...none, error: e instanceof Error ? e.message : String(e) };
   } finally {
@@ -94,8 +96,8 @@ export const watchGameExits = (): (() => void) => {
 };
 
 const GLOBAL_TEXT = [
-    "When a game needs a launch option for XeSS fast mode, OXP3 Deck adds it to the game's Steam launch options: XESS=latest for a game with XeSS older than 2.0.2.68 (or old frame generation or XeLL 1.2), FSR=xess for a game with FSR 3.1+ and no XeSS (xess-xmx-linux 20261104 or newer).",
-    "It adds only these variables and never changes your own text. A key is added once per game: if you remove it, or tap Undo, it stays removed.",
+    "When a game needs a launch option for XeSS fast mode, OXP3 Deck adds it to the game's Steam launch options: XESS=latest for a game with XeSS older than 2.0.2.68 (or old frame generation or XeLL 1.2), FSR=xess for a game with FSR 3.1+ and no XeSS (xess-xmx-linux 20261104 or newer), and -dx12 after %command% for The Witcher 3 when XeSS frame generation is set for it (its frame generation stays on only in DirectX 12).",
+    "It adds only these and never changes your own text. A key is added once per game: if you remove it, or tap Undo, it stays removed.",
     "Takes effect: from the game's next start. Never while that game runs: it is added a few seconds after you quit, or when you open the game's settings here while it is not running.",
     "Each game can override this on its own settings (Games tab).",
 ];
@@ -138,26 +140,27 @@ export const AutoLaunchRows: FC<{ app: RunningApp; running: boolean; onWritten: 
   const choice = choiceOf(s.data, appid);
   const rec = log.data?.[appid];
   const suggest = gi.data?.ok ? gi.data.game?.suggest ?? [] : [];
+  const needs = suggest.length > 0 || dx12Known(appid);    // something may be added for this game
 
   // opening the controls of a game that does not run applies what it needs, once per mount
   useEffect(() => {
-    if (!s.data || !on || running || tried.current === appid || !suggest.length) return;
+    if (!s.data || !on || running || tried.current === appid || !needs) return;
     tried.current = appid;
     autoApply(appid, app.name).then((r) => {
       if (r.error) setErr(r.error);
       if (r.added) { log.reload(); getLaunchOptions(appid).then(onWritten); }
     });
-  }, [appid, on, running, !!s.data, suggest.length]);
+  }, [appid, on, running, !!s.data, needs]);
 
   // while it runs: what will be added once it has quit
   useEffect(() => {
     setWaiting(null);
-    if (!running || !on || !suggest.length) return;
+    if (!running || !on || !needs) return;
     let alive = true;
     getLaunchOptions(appid).then((text) => {
       if (!alive || text === null) return;
-      const p = plan(text, suggest, rec);
-      setWaiting(p.added.length ? tokensText(p.added) : null);
+      const p = plan(text, suggest, rec, autoArgs(appid, text));
+      setWaiting(planned(p) ? addedText(p.added, p.args) : null);
     });
     return () => { alive = false; };
   }, [appid, running, on, suggest.map((x) => x.key).join(","), JSON.stringify(rec ?? null)]);
@@ -171,7 +174,7 @@ export const AutoLaunchRows: FC<{ app: RunningApp; running: boolean; onWritten: 
     if (!rec || !hasAdded(rec)) return;
     setErr(null);
     const ok = await confirm({ title: `Undo for ${app.name}?`, ok: "Undo", effect: EFFECTS["game.auto_undo"],
-      text: `Removes ${tokensText(rec.added)} from the game's launch options (only where you haven't changed them). OXP3 Deck won't add them again for this game.` });
+      text: `Removes ${recordText(rec)} from the game's launch options (only where you haven't changed them). OXP3 Deck won't add them again for this game.` });
     if (!ok) return;
     setBusy(true);
     try {
@@ -195,9 +198,9 @@ export const AutoLaunchRows: FC<{ app: RunningApp; running: boolean; onWritten: 
   const choiceD: DetailsSpec = { title: "Add launch options automatically",
     body: paragraphs(["This game's own choice; \"Use global\" follows the toggle on the Games tab.", ...GLOBAL_TEXT]) };
   const addedD: DetailsSpec | null = hasAdded(rec) ? {
-    title: `Added: ${tokensText(rec.added)}`,
+    title: `Added: ${recordText(rec)}`,
     body: paragraphs([...rec.why, `Added ${when(rec.at)}. Applies from the next start.`, "Undo removes exactly these, unless you changed them."]),
-    lines: [tokensText(rec.added)], linesTitle: "Added to launch options:",
+    lines: [recordText(rec)], linesTitle: "Added to launch options:",
   } : null;
   return (
     <>
@@ -210,7 +213,7 @@ export const AutoLaunchRows: FC<{ app: RunningApp; running: boolean; onWritten: 
       </WithDetails>
       {hasAdded(rec) && addedD && (
         <>
-          <Status ok label={`Added: ${tokensText(rec.added)}`} detail="Applies from the next start." details={addedD} />
+          <Status ok label={`Added: ${recordText(rec)}`} detail="Applies from the next start." details={addedD} />
           <ButtonItem layout="below" disabled={busy || running} onClick={doUndo}
             description={explainWhen("Removes what OXP3 Deck added.", EFFECTS["game.auto_undo"], running ? `Quit ${app.name} first.` : null)}>
             {busy ? "Working…" : "Undo"}

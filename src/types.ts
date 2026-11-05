@@ -142,11 +142,22 @@ export type GameLastRun = {
   xell_unsupported: boolean | null; logged_at: number | null;
   xell_builtin?: boolean | null;           // XeLL's log: "Using built-in context" (cross-vendor mode); null: no log
   fg_fullscreen?: boolean | null;          // XeSS-FG's log: exclusive fullscreen refused interpolation
+  xefg?: GameXefg | null;                  // XeSS-FG's log: frame generation refused (games.py xefg_check); null: no log
+};
+/** The tail of C:\igdext_xefg.log (written with XESS_LOG=1 or IGDEXT_XEFG_LOG=1). */
+export type GameXefg = {
+  logged_at: number; refused: boolean;
+  reason: "latency_reduction_off" | "refused" | null;   // latency_reduction_off: "Latency reduction is not enabled" + -15
+  code: number | null; call: string | null; lines: string[];
 };
 /** A known issue of one game (games.py KNOWN_ISSUES), with its source. */
 export type GameIssue = { id: string; fg_crash: boolean; fsr_risk: boolean; label: string; line: string; detail: string; source: string };
 /** A row of what the prefix or the last run shows (games.py _checks). */
-export type GameCheck = { id: string; label: string; line: string; detail: string };
+export type GameCheck = {
+  id: string; label: string; line: string; detail: string;
+  at?: number | null;                      // when the log it comes from was written (Unix seconds)
+  lines?: string[];                        // what that log says
+};
 export type GamePrefixChecks = { driverstore_capital: boolean; driverstore_capital_shimmed: boolean | null; hides_wine: boolean | null };
 export type GameInfo = {
   appid: string; install_dir: string | null; prefix: string | null;

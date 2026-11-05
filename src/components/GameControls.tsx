@@ -8,7 +8,7 @@ import { ButtonItem, DropdownItem, PanelSectionRow, ToggleField } from "@decky/u
 import { FC, useEffect, useMemo, useRef, useState } from "react";
 
 import { game_info, xess_state } from "../backend";
-import { driverPrefix, fixTypo, fsrSupported, managed, ManagedKey, parse, setManaged } from "../launchopts";
+import { driverPrefix, dx12Arg, dx12Known, fixTypo, fsrSupported, hasArg, managed, ManagedKey, parse, setArg, setManaged } from "../launchopts";
 import { effectiveOn } from "../autolaunch";
 import { getLaunchOptions, isSteamApp, RunningApp, setLaunchOptions } from "../steam";
 import { EFFECTS } from "../effects";
@@ -214,6 +214,13 @@ export const GameControls: FC<{ app: RunningApp; quick?: boolean; running?: bool
     "For a game that misbehaves on one driver only.", cur.MESA ? `MESA=${cur.MESA}` : "MESA=26.1 or 26.3");
   const vendorD = det("Compatibility mode", "Hides the Intel GPU's vendor id, so Mesa applies its own fixes for this game again. XeSS then runs on the slower DP4a path.",
     "Only for a game that needs Mesa's workaround.", "force_vk_vendor=-1");
+  const dxArg = dx12Arg(app.appid);
+  const dxKnown = dx12Known(app.appid);
+  const dxOn = hasArg(text, dxArg);
+  const dxD = det("Start in DirectX 12",
+    `Starts the game with its DirectX 12 argument (${dxArg} after %command%, as the game's last argument); turning it off takes out only that argument, the rest of your text stays.${dxKnown ? " This game's XeSS frame generation option stays on only in DirectX 12 (owner report, The Witcher 3; with --launcher-skip the launcher's own choice is skipped too). With the automatic launch options on, OXP3 Deck adds it by itself once XeSS frame generation is set here." : ""}`,
+    dxKnown ? "Frame generation also needs Xe Low Latency on in the game's graphics menu." : `Not every game knows ${dxArg}: a game that does not ignores it, or may not start. Turn it off if the game misbehaves.`,
+    dxArg);
   const logD = det("Save XeSS logs", "Writes the add-on's, XeLL's and XeSS frame generation's logs into the game's prefix (C:\\igdext_trace.log and others), for a bug report.",
     "Leave it off otherwise.", "XESS_LOG=1");
   const fsrD = det("FSR → XeSS", fsrNow?.does ?? "Set by hand; pick one of the others to replace it.",
@@ -234,10 +241,19 @@ export const GameControls: FC<{ app: RunningApp; quick?: boolean; running?: bool
     suggest: steam ? game?.suggest ?? [] : [],
     done: autoLog.data?.[app.appid]?.done ?? [],
     autoOn: effectiveOn(auto.data, app.appid), running: !!running,
+    appid: app.appid, argsDone: autoLog.data?.[app.appid]?.argsDone ?? [],
   };
+  const xf = game?.last_run?.xefg;
+  // the frame generation check (games.py xefg_check) in the last run's Details; without the log, how to turn it on
+  const xefgLine = !game?.last_run ? null
+    : xf ? (xf.refused ? `Frame generation check: refused (code ${xf.code}); see "Frame generation is refused". Log written ${when(xf.logged_at)}.`
+      : `Frame generation check: XeSS frame generation's log shows no refusal (log written ${when(xf.logged_at)}).`)
+    : game.has_fg !== false || cur.XESS_FG || cur.FSR || cur.FSR_FG
+      ? "Frame generation check: no XeSS frame generation log (C:\\igdext_xefg.log). To see whether frame generation is refused, turn on Save XeSS logs (XESS_LOG=1) and start the game."
+      : null;
   const lastD: DetailsSpec | null = game && lr ? {
     title: lr.label,
-    body: paragraphs([lr.detail, game.last_run ? `Trace log: ${game.last_run.trace ? "yes (the add-on loaded)" : "no"} · patched driver self-test: ${game.last_run.canary ? "seen" : "not seen"} · kernel compile: ${game.last_run.compile_failed ? "failed" : "ok"}${game.last_run.xell_unsupported === true ? " · XeLL: this game's version is not supported" : game.last_run.xell_unsupported === false ? " · XeLL: supported" : ""}${game.last_run.logged_at ? ` · logged ${when(game.last_run.logged_at)}` : ""}` : null]),
+    body: paragraphs([lr.detail, xefgLine, game.last_run ? `Trace log: ${game.last_run.trace ? "yes (the add-on loaded)" : "no"} · patched driver self-test: ${game.last_run.canary ? "seen" : "not seen"} · kernel compile: ${game.last_run.compile_failed ? "failed" : "ok"}${game.last_run.xell_unsupported === true ? " · XeLL: this game's version is not supported" : game.last_run.xell_unsupported === false ? " · XeLL: supported" : ""}${game.last_run.logged_at ? ` · logged ${when(game.last_run.logged_at)}` : ""}` : null]),
     lines: [
       ...(game.dlls?.length ? game.dlls.map((d) => `${d.name} ${d.version ?? "(version unknown)"}${d.link ? " (a link left by XESS=latest)" : ""}`) : ["No XeSS files found in the game."]),
       ...(game.prefix ? [`prefix: ${game.prefix}`] : []),
@@ -291,6 +307,11 @@ export const GameControls: FC<{ app: RunningApp; quick?: boolean; running?: bool
             onChange={(v) => change({ force_vk_vendor: v ? "-1" : null }, "game.vendor", "Compatibility mode")}
             description={explainWhen("Only for games that need it; XeSS slows down.", EFFECTS["game.vendor"], why)} />
         </WithDetails>
+        <WithDetails details={dxD}>
+          <ToggleField label={label("Start in DirectX 12", dxD)} checked={dxOn} disabled={disabled} bottomSeparator="none"
+            onChange={(v) => write(setArg(text, dxArg, v), { id: "game.dx12", label: "Start in DirectX 12" })}
+            description={explainWhen(dxKnown ? "This game's frame generation needs DirectX 12." : "Only for games that know it.", EFFECTS["game.dx12"], why)} />
+        </WithDetails>
         <WithDetails details={logD}>
           <ToggleField label={label("Save XeSS logs", logD)} checked={!!cur.XESS_LOG && cur.XESS_LOG !== "0"} disabled={disabled} bottomSeparator="none"
             onChange={(v) => change({ XESS_LOG: v ? "1" : null }, "game.log", "Save XeSS logs")}
@@ -311,7 +332,7 @@ export const GameControls: FC<{ app: RunningApp; quick?: boolean; running?: bool
         )}
         {busy && <Status ok={null} label="Saving…" />}
         {saved && !err && <Status ok label="Saved" detail={nextStart} />}
-        <Pending ids={["game.xess", "game.fg", "game.mesa", "game.vendor", "game.log", "game.fsr", "game.typo"]} appid={app.appid} />
+        <Pending ids={["game.xess", "game.fg", "game.mesa", "game.vendor", "game.dx12", "game.log", "game.fsr", "game.typo"]} appid={app.appid} />
         <Problem what="Launch options" error={err} />
         {writable ? (
           !quick && <Status ok={null} label="Launch options" detail={text ? "Open Details to see them." : "None"} details={optsD} />
@@ -345,7 +366,11 @@ export const GameControls: FC<{ app: RunningApp; quick?: boolean; running?: bool
               "Set Frame generation back to Game default. For a game with FSR 3.1+, FSR → XeSS can bring XeSS frame generation in, but it replaces the game's FidelityFX DLL and can crash a game with anti-tamper."]) }} />
         )}
         {steam && (game?.checks ?? []).map((c) => (
-          <Status key={`check-${c.id}`} ok={false} label={c.label} detail={c.line} details={{ title: c.label, body: c.detail }} />
+          <Status key={`check-${c.id}`} ok={false} label={c.label} detail={c.line} details={{
+            title: c.label,
+            body: paragraphs([c.detail, c.at ? `The log was written ${when(c.at)}. If that is before your last start of the game, it is from an older run.` : null]),
+            lines: c.lines?.length ? c.lines : undefined, linesTitle: "The log says:",
+          }} />
         ))}
         {(game?.advice ?? []).map((a, i) => (
           <Note key={i} label={i === 0 ? "Tip" : undefined} details={a.length > 80 ? { title: "Tip", body: a } : undefined}>{firstSentence(a)}</Note>
