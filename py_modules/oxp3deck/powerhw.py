@@ -86,7 +86,8 @@ def discover(ctx) -> dict:
     problems: list[str] = []
     rapl = _discover_rapl(ctx)
     if not rapl:
-        problems.append("no RAPL power limits found (the intel_rapl_msr and intel_rapl_mmio modules are not loaded?)")
+        problems.append("no RAPL power limits found (the intel_rapl_msr and processor_thermal_rapl modules are not "
+                        "loaded?)")
     gpu = _discover_gpu(ctx, problems)
     cpu = _discover_cpu(ctx)
     if cpu is None:

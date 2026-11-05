@@ -449,6 +449,14 @@ class Plugin:
     async def power_import_sdtdp(self):
         return await self._call("power_import_sdtdp", lambda: _mod("power").import_sdtdp(self.ctx))
 
+    async def power_fix(self, cid):
+        """Fix for me: stop and disable conflict `cid`'s whitelisted services (the frontend asks first)."""
+        return await self._call("power_fix", lambda: _mod("power").fix(self.ctx, cid))
+
+    async def power_unfix(self, cid):
+        """Undo of power_fix: enable and start again exactly what it turned off."""
+        return await self._call("power_unfix", lambda: _mod("power").unfix(self.ctx, cid))
+
     # ---- jobs and misc -------------------------------------------------------------------------------------------
 
     async def job_status(self, job_id=None):

@@ -5,8 +5,8 @@ import { FC } from "react";
 
 import { blockedBy, rebootNow, started, useAction } from "../actions";
 import { oxp3_kernel, oxp3_kernel_keep, oxp3_kernel_try } from "../backend";
-import { confirm } from "../components/confirm";
-import { explain, Note, Problem, Status } from "../components/Hint";
+import { confirm, paragraphs } from "../components/confirm";
+import { explain, INFO, Problem, Status, WithDetails } from "../components/Hint";
 import { JobView, TaskSection } from "../components/JobView";
 import { useCurrentJob, useResource } from "../store";
 import type { KernelRes, Oxp3KernelEntry } from "../types";
@@ -58,22 +58,23 @@ export const KernelTab: FC = () => {
       <TaskSection />
       <PanelSection title="Kernels">
         <PanelSectionRow>
-          {!k && kr.loading && <Status ok={null} label="Reading Limine's configuration…" />}
-          {!k && !kr.loading && running && <Status ok={null} label="Read when the running task has finished." />}
+          {!k && kr.loading && <Status ok={null} label="Reading the kernels…" />}
+          {!k && !kr.loading && running && <Status ok={null} label="Waiting for the running task" />}
           <Problem what="oxp3-tool kernel" error={kr.data && !kr.data.ok ? kr.data.error : null} />
         </PanelSectionRow>
         {k?.kernels.map((x) => (
           <PanelSectionRow key={x.package}>
-            <Status ok={x.running ? true : x.usable ? null : false} label={`${x.package} ${x.release}`}
-              detail={[x.running && "running now", x.default && "Limine's default", !x.usable && "no usable Limine entry (or its files changed)"]
-                .filter(Boolean).join(" · ") || "installed"} />
+            <Status ok={x.running ? true : x.usable ? null : false} label={x.package}
+              detail={[x.running && "Running now", x.default && "Default", !x.usable && "Can't boot"].filter(Boolean).join(" · ") || "Installed"}
+              details={{ title: x.package, body: !x.usable ? "It has no usable boot entry (or its files changed)." : "Installed.", lines: [`release ${x.release}`, ...(x.entry ? [`Limine entry: ${x.entry}`] : [])] }} />
             {!x.running && x.usable && (
-              <ButtonItem layout="below" disabled={!!act.busy || running}
-                onClick={() => act.run(`try-${x.package}`, async () => blockedBy() ?? tryKernel(x, now))}
-                description={explain(`Boots ${x.package} at the next reboot only; every later power-on boots ${now} until you keep it.`,
-                  "Takes effect at the next reboot; asks first.")}>
-                {act.busy === `try-${x.package}` ? "Working…" : "Boot it once"}
-              </ButtonItem>
+              <WithDetails details={{ title: "Try once", body: `Boots ${x.package} at the next restart only; every later power-on boots ${now} until you keep it. If it does not start, hold the power button to turn off, then power on again. Asks first.` }}>
+                <ButtonItem layout="below" disabled={!!act.busy || running}
+                  onClick={() => act.run(`try-${x.package}`, async () => blockedBy() ?? tryKernel(x, now))}
+                  description={explain("Next restart only. Hold power to go back.")}>
+                  {act.busy === `try-${x.package}` ? "Working…" : `Try once${INFO}`}
+                </ButtonItem>
+              </WithDetails>
             )}
           </PanelSectionRow>
         ))}
@@ -82,22 +83,23 @@ export const KernelTab: FC = () => {
         <PanelSection title="Next boot">
           <PanelSectionRow>
             <Status ok={null} label={`Next boot: ${k.next_boot.package ?? "unknown"}`}
-              detail={`${WHY[k.next_boot.why] ?? k.next_boot.why}${k.next_boot.then ? `; then ${k.next_boot.then}` : ""} · ${k.conf}`} />
-            {(k.notes ?? []).map((n, i) => <Note key={i}>{n}</Note>)}
+              detail={oneshot ? "One-time try" : "Default"}
+              details={{ title: "Next boot", body: paragraphs([`${WHY[k.next_boot.why] ?? k.next_boot.why}${k.next_boot.then ? `; then ${k.next_boot.then}` : ""}.`, ...(k.notes ?? [])]), lines: [k.conf] }} />
             {oneshot && (
               <ButtonItem layout="below" disabled={!!act.busy || running}
                 onClick={() => act.run("reboot", () => rebootNow(`Boots ${k.next_boot.package} once. Save your game first.`))}
-                description={explain(`Reboots into ${k.next_boot.package} now.`, "Asks first.")}>
+                description={explain(`Reboots into ${k.next_boot.package} now. Asks first.`)}>
                 Reboot now
               </ButtonItem>
             )}
             {(k.trying || oneshot) && (
-              <ButtonItem layout="below" disabled={!!act.busy || running}
-                onClick={() => act.run("keep", async () => blockedBy() ?? keepKernel(now))}
-                description={explain(`Keeps booting ${now}, the kernel running now${oneshot ? ", and cancels the pending one-time boot" : ""}.`,
-                  "Takes effect at the next reboot; asks first.")}>
-                {act.busy === "keep" ? "Working…" : `Keep ${now}`}
-              </ButtonItem>
+              <WithDetails details={{ title: "Keep this kernel", body: `Keeps booting ${now}, the kernel running now${oneshot ? ", and cancels the pending one-time boot" : ""}. Takes effect at the next reboot; asks first.` }}>
+                <ButtonItem layout="below" disabled={!!act.busy || running}
+                  onClick={() => act.run("keep", async () => blockedBy() ?? keepKernel(now))}
+                  description={explain("Always boot the kernel running now.")}>
+                  {act.busy === "keep" ? "Working…" : `Keep this kernel${INFO}`}
+                </ButtonItem>
+              </WithDetails>
             )}
             <Problem what="Kernel" error={act.error} />
           </PanelSectionRow>

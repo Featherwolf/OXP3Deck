@@ -47,7 +47,8 @@ _APPID = re.compile(r"^\d{1,10}$")
 STEAM_FIX = ("Steam's own Performance settings: in Quick Access → Performance, turn off \"TDP limit\" and "
              "\"Manual GPU clock\".")
 
-# id: (name, kind, ignorable, why, fix). Detection is in _scan.
+# id: (name, kind, ignorable, why, fix). Detection is in _scan. `fix` is the do-it-yourself guidance (the UI shows it
+# in Details); FIXABLE below is what "Fix for me" may do instead.
 CONFLICTS = {
     "simpledeckytdp": ("SimpleDeckyTDP", "blocks", False,
                        "the SimpleDeckyTDP plugin is enabled in Decky: it writes the same power limits",
@@ -57,15 +58,15 @@ CONFLICTS = {
                      "Decky → Settings → Plugins: disable or uninstall {name}"),
     "powerstation": ("PowerStation", "blocks", False,
                      "PowerStation is running: it sets the power limits (Steam's TDP slider uses it on Bazzite)",
-                     "sudo systemctl disable --now powerstation.service (Bazzite: Steam's TDP slider uses it; if it "
-                     "is back after a reboot, sudo systemctl mask powerstation.service)"),
+                     "sudo systemctl disable --now powerstation.service. On Bazzite, Steam's TDP slider uses it, and "
+                     "Bazzite's hardware setup turns it back on after a system update"),
     "thermald": ("thermald", "blocks", False,
-                 "thermald is running: on Panther Lake it rewrites PL1 within seconds",
-                 "sudo systemctl disable --now thermald: on Panther Lake it rewrites PL1 within seconds. The SoC's "
-                 "own thermal limit and the fan curve still protect the device"),
+                 "thermald is running: on this CPU it rewrites the sustained power limit (PL1) within seconds",
+                 "sudo systemctl disable --now thermald.service: on this CPU it rewrites the sustained limit within "
+                 "seconds. The CPU's own heat limit and the fan curve still protect the device"),
     "hhd": ("Handheld Daemon", "blocks", True,
             "Handheld Daemon is running: its TDP control writes the same power limits",
-            "turn off TDP control in Handheld Daemon's settings, then \"I have done that\""),
+            "turn off TDP control in Handheld Daemon's settings, then \"I've handled it\""),
     "oxp3-tdp-sync": ("oxp3-tdp-sync", "blocks", False,
                       "oxp3-tdp-sync.service is running: it copies the MMIO PL1 into MSR every 2 s",
                       "sudo systemctl disable --now oxp3-tdp-sync.service (OXP3 Deck writes both)"),
@@ -73,20 +74,36 @@ CONFLICTS = {
                   "sudo systemctl disable --now onex3-tdp.service"),
     "steamos-remote": ("Steam's TDP slider (steamos-manager)", "blocks", True,
                        "a steamos-manager remote lets Steam's TDP slider write the power limits",
-                       "Steam's TDP slider writes through it: turn Steam's \"TDP limit\" off, or remove that file"),
-    "ppd": ("power-profiles-daemon", "cpu", True, "power-profiles-daemon is running: it sets EPP and turbo",
-            "sudo systemctl disable --now power-profiles-daemon"),
-    "tuned": ("tuned", "cpu", True, "tuned is running: it sets EPP and turbo",
-              "sudo systemctl disable --now tuned tuned-ppd"),
-    "intel_lpmd": ("intel_lpmd", "cpu", True, "intel_lpmd is running: it sets EPP and parks cores",
-                   "sudo systemctl disable --now intel_lpmd (CachyOS enables it on Panther Lake; it sets EPP and "
-                   "parks cores, not RAPL)"),
+                       "Steam's TDP slider writes through it: turn Steam's \"TDP limit\" off in Quick Access → "
+                       "Performance, then \"I've handled it\""),
+    "ppd": ("power-profiles-daemon", "cpu", True,
+            "power-profiles-daemon is running: it sets the energy preference (EPP) and the platform profile",
+            "sudo systemctl disable --now power-profiles-daemon.service"),
+    "tuned": ("tuned", "cpu", True, "tuned is running: it sets the energy preference (EPP) and CPU boost",
+              "sudo systemctl disable --now tuned-ppd.service tuned.service"),
+    "intel_lpmd": ("intel_lpmd", "cpu", True, "intel_lpmd is running: it sets the energy preference (EPP) and parks "
+                   "cores", "sudo systemctl disable --now intel_lpmd.service (CachyOS enables it on this CPU; it sets "
+                   "EPP and parks cores, not the power limits)"),
 }
+# What "Fix for me" may stop and disable, per conflict id: the whole whitelist. No unit name ever comes from the
+# frontend or from a file (a record's units are checked against this when read). Never mask, never uninstall.
+FIXABLE = {
+    "powerstation": ("powerstation.service",),
+    "thermald": ("thermald.service",),
+    "oxp3-tdp-sync": ("oxp3-tdp-sync.service",),
+    "onex3-tdp": ("onex3-tdp.service",),
+    "ppd": ("power-profiles-daemon.service",),
+    "tuned": ("tuned-ppd.service", "tuned.service"),
+    "intel_lpmd": ("intel_lpmd.service",),
+}
+FIX_RECHECK_S = 10               # tick checks the conflicts again this long after a fix (a D-Bus restart)
+FIX_TIMEOUT_S = 30               # one systemctl disable / stop / enable / start
+_ACTIVE = ("active", "activating", "reloading")
 IGNORABLE = frozenset(k for k, v in CONFLICTS.items() if v[2])
 _UNITS = {
     "powerstation": re.compile(r"^powerstation\.service$"),
     "thermald": re.compile(r"^thermald\.service$"),
-    "hhd": re.compile(r"^hhd(@[^.]*)?\.service$"),
+    "hhd": re.compile(r"^hhd(_local)?(@[^.]*)?\.service$"),
     "oxp3-tdp-sync": re.compile(r"^oxp3-tdp-sync\.service$"),
     "onex3-tdp": re.compile(r"^onex3-tdp\.service$"),
     "ppd": re.compile(r"^power-profiles-daemon\.service$"),
@@ -212,7 +229,36 @@ def _norm_data(raw) -> dict:
         profiles[key] = _norm_profile(prof, key)
         count += 1
     data["profiles"] = profiles
+    data["fixed"] = _norm_fixed(raw.get("fixed"))
     return data
+
+
+def _norm_fixed(raw) -> dict:
+    """power.json `fixed` (what Fix for me turned off): only FIXABLE ids, only their own units. power.json sits in a
+    folder the user owns, so a planted record can at most enable and start a whitelisted unit."""
+    out: dict = {}
+    if not isinstance(raw, dict):
+        return out
+    for cid, rec in raw.items():
+        if not (isinstance(cid, str) and cid in FIXABLE and isinstance(rec, dict)):
+            log.warning("power.json: fixed record %r dropped", cid)
+            continue
+        units, seen = [], set()
+        for u in rec.get("units") if isinstance(rec.get("units"), list) else ():
+            if not (isinstance(u, dict) and u.get("unit") in FIXABLE[cid] and u["unit"] not in seen
+                    and isinstance(u.get("was_enabled"), str) and len(u["was_enabled"]) <= 32
+                    and isinstance(u.get("was_active"), bool)):
+                log.warning("power.json: fixed record %s: unit entry %r dropped", cid, u)
+                continue
+            seen.add(u["unit"])
+            units.append({"unit": u["unit"], "was_enabled": u["was_enabled"], "was_active": u["was_active"]})
+        at = rec.get("at")
+        boot = rec.get("boot_id")
+        if not units or isinstance(at, bool) or not isinstance(at, (int, float)):
+            log.warning("power.json: fixed record %s dropped (no valid units or time)", cid)
+            continue
+        out[cid] = {"at": at, "boot_id": boot if isinstance(boot, str) and len(boot) <= 64 else "", "units": units}
+    return out
 
 
 def _boot_id(ctx) -> str:
@@ -263,6 +309,8 @@ class _Power:
         self.blocked: str | None = None
         self.rows: list | None = None        # conflicts found by the last check (without `ignored`)
         self.rows_at: float | None = None
+        self.loaded: dict = {}               # unit: LOAD column of the last systemctl list-units
+        self.recheck_at: float | None = None   # a fix asked tick to look again then (a D-Bus restart)
         self.started = False                 # an apply happened in this process
         self.seen = False                    # tick has run once
         self.prev_susp = self.run.get("suspend_count")
@@ -376,7 +424,7 @@ def _cpu_blocked(p: _Power) -> str | None:
     if not rows:
         return None
     names = ", ".join(r["name"] for r in rows)
-    return f"{names} {'is' if len(rows) == 1 else 'are'} active: EPP and CPU boost are left to it ({rows[0]['fix']})"
+    return f"{names} {'controls' if len(rows) == 1 else 'control'} energy preference and CPU boost"
 
 
 def _resolve(ctx, p: _Power, values: dict, ac, reading: dict | None = None) -> tuple[dict, dict]:
@@ -566,21 +614,29 @@ def _homebrew(ctx) -> str:
     return os.path.dirname(os.path.dirname(ctx.settings_dir.rstrip("/")))
 
 
-def _units(ctx) -> tuple[set | None, str | None]:
-    systemctl = sysexec.which("systemctl") or "/usr/bin/systemctl"
-    r = sysexec.run([systemctl, "list-units", "--all", "--type=service", "--plain", "--no-legend", "--no-pager"],
+def _systemctl() -> str:
+    return sysexec.which("systemctl") or "/usr/bin/systemctl"
+
+
+def _last_line(r, fallback: str) -> str:
+    lines = (r.err or r.out or "").strip().splitlines()
+    return lines[-1].strip() if lines else fallback
+
+
+def _units(ctx) -> tuple[dict | None, str | None]:
+    """({unit: (LOAD, active)} of every service systemd lists, or None, and why not)."""
+    r = sysexec.run([_systemctl(), "list-units", "--all", "--type=service", "--plain", "--no-legend", "--no-pager"],
                     timeout=10)
     if r.rc != 0:
-        why = (r.err or r.out).strip().splitlines()[-1:] or [f"exit {r.rc}"]
-        return None, why[0]
-    active = set()
+        return None, _last_line(r, f"exit {r.rc}")
+    units = {}
     for line in r.out.splitlines():
         parts = line.split()
         if parts and parts[0] in ("●", "*", "○"):
             parts = parts[1:]
-        if len(parts) >= 3 and parts[2] in ("active", "activating", "reloading"):
-            active.add(parts[0])
-    return active, None
+        if len(parts) >= 3:
+            units[parts[0]] = (parts[1], parts[2] in _ACTIVE)
+    return units, None
 
 
 def _comms(ctx) -> set:
@@ -645,16 +701,34 @@ def _steamos_remote(ctx) -> str | None:
     return None
 
 
-def _row(cid: str, name: str | None = None, why: str | None = None, fix: str | None = None) -> dict:
+def _row(cid: str, name: str | None = None, why: str | None = None, fix: str | None = None,
+         loaded: dict | None = None, active: set | None = None) -> dict:
     n, kind, ignorable, w, f = CONFLICTS[cid]
     name = name or n
+    fix_units = [u for u in FIXABLE.get(cid, ()) if (loaded or {}).get(u) == "loaded"]
     return {"id": cid, "name": name, "kind": kind, "ignorable": ignorable, "why": why or w,
-            "fix": (fix or f).replace("{name}", name)}
+            "fix": (fix or f).replace("{name}", name), "fix_units": fix_units,
+            "fix_plan": _fix_plan(fix_units, active or set()) if fix_units else None}
 
 
-def _scan(ctx) -> list[dict]:
+def _fix_plan(units: list[str], active: set) -> dict | None:
+    """{disable, stop}: what fix() would run now (it disables only enabled units, stops only running ones), for the
+    confirm dialog; None when systemctl show cannot tell."""
+    disable = []
+    for u in units:
+        got, _err = _show(u)
+        if got is None or "UnitFileState" not in got:
+            return None
+        if got["UnitFileState"] == "enabled":
+            disable.append(u)
+    return {"disable": disable, "stop": [u for u in units if u in active]}
+
+
+def _scan(ctx, p: _Power) -> list[dict]:
     rows: list[dict] = []
-    active, err = _units(ctx)
+    units, err = _units(ctx)
+    p.loaded = {u: v[0] for u, v in units.items()} if units is not None else {}
+    active = {u for u, v in units.items() if v[1]} if units is not None else None
     comms = _comms(ctx)
     seen = set()
     for name, enabled in sorted(_plugins(ctx).items()):
@@ -672,15 +746,14 @@ def _scan(ctx) -> list[dict]:
             hit = True
         if hit:
             seen.add(cid)
-            rows.append(_row(cid))
+            rows.append(_row(cid, loaded=p.loaded, active=active))
     remote = _steamos_remote(ctx)
     if remote:
-        rows.append(_row("steamos-remote", why=f"{remote} lets Steam's TDP slider write the power limits",
-                         fix=f"Steam's TDP slider writes through it: turn Steam's \"TDP limit\" off, or remove "
-                             f"{remote}"))
+        rows.append(_row("steamos-remote", why=f"{remote} lets Steam's TDP slider write the power limits"))
     if active is None:
         rows.append({"id": "unknown", "name": "Unknown", "kind": "suspect", "ignorable": False,
-                     "why": f"could not list services: {err}", "fix": "check that systemd is running"})
+                     "why": f"could not list services: {err}", "fix": "check that systemd is running",
+                     "fix_units": [], "fix_plan": None})
     order = list(CONFLICTS) + ["unknown"]
     rows.sort(key=lambda r: order.index(r["id"]))
     return rows
@@ -689,14 +762,29 @@ def _scan(ctx) -> list[dict]:
 def _rows(ctx, p: _Power, force: bool = False) -> list[dict]:
     now = _monotonic()
     if force or p.rows is None or p.rows_at is None or now - p.rows_at >= CONFLICT_RECHECK_S:
-        p.rows = _scan(ctx)
+        p.rows = _scan(ctx, p)
         p.rows_at = now
     return _present(p)
 
 
 def _present(p: _Power) -> list[dict]:
     ignore = set(p.data["ignore"])
-    return [dict(r, ignored=r["ignorable"] and r["id"] in ignore) for r in (p.rows or [])]
+    return [dict(r, fix_units=list(r["fix_units"]), fix_plan=copy.deepcopy(r.get("fix_plan")),
+                 ignored=r["ignorable"] and r["id"] in ignore,
+                 fixed=_fixed_one(p, r["id"], came_back=True) if r["id"] in p.data["fixed"] else None)
+            for r in (p.rows or [])]
+
+
+def _fixed_one(p: _Power, cid: str, came_back: bool) -> dict:
+    rec = p.data["fixed"][cid]
+    return {"id": cid, "name": CONFLICTS[cid][0], "at": rec["at"], "units": copy.deepcopy(rec["units"]),
+            "came_back": came_back}
+
+
+def _fixed_all(p: _Power) -> list[dict]:
+    """PowerFixed[] of every record (also of conflicts that are gone: their Undo)."""
+    running = {r["id"] for r in (p.rows or [])}
+    return [_fixed_one(p, cid, cid in running) for cid in FIXABLE if cid in p.data["fixed"]]
 
 
 def _blockers(p: _Power) -> list[dict]:
@@ -846,6 +934,7 @@ def _state(ctx, p: _Power, reading: dict | None = None) -> dict:
         "overridden": p.run.get("overridden"),
         "blocked": p.blocked,
         "cpu_blocked": _cpu_blocked(p),
+        "cpu_blocked_by": [r["id"] for r in _cpu_rows(p)],
         "last": p.last,
     }
 
@@ -917,6 +1006,7 @@ def info(ctx, refresh: bool) -> dict:
             "options": {k: copy.deepcopy(p.data[k]) for k in ("per_game", "split_ac", "extended", "ignore")},
             "profiles": copy.deepcopy(p.data["profiles"]),
             "conflicts": rows,
+            "fixed": _fixed_all(p),
             "boot": {"taken_at": snap.get("taken_at")} if snap else None,
             "sdtdp_found": os.path.isfile(sdtdp),
             "state": _state(ctx, p),
@@ -1119,6 +1209,202 @@ def take_control(ctx) -> dict:
         return _changed(ctx, p, _apply(ctx, p))
 
 
+# ---- Fix for me, Undo (only ever from the user's call after a confirm: never from tick or an event) ---------------
+
+def _show(unit: str) -> tuple[dict | None, str | None]:
+    """({LoadState, UnitFileState, ActiveState} of `unit`, or None, and why not)."""
+    r = sysexec.run([_systemctl(), "show", "--property=LoadState,UnitFileState,ActiveState", "--", unit],
+                    timeout=10)
+    if r.rc != 0:
+        return None, f"{unit}: {_last_line(r, f'systemctl show exited {r.rc}')}"
+    got = {}
+    for line in r.out.splitlines():
+        k, sep, v = line.partition("=")
+        if sep and k in ("LoadState", "UnitFileState", "ActiveState"):
+            got[k] = v.strip()
+    return got, None
+
+
+def _systemctl_do(action: str, units: list[str]) -> tuple[bool, str | None]:
+    """systemctl --no-ask-password <action> -- <units>: (ok, the error's last line)."""
+    if not units:
+        return True, None
+    r = sysexec.run([_systemctl(), "--no-ask-password", action, "--", *units], timeout=FIX_TIMEOUT_S)
+    if r.rc == 0:
+        return True, None
+    err = _last_line(r, f"systemctl {action} exited {r.rc}")
+    log.warning("power: systemctl %s %s failed: %s", action, " ".join(units), err)
+    return False, (err if len(units) != 1 or err.startswith(units[0]) else f"{units[0]}: {err}")
+
+
+def _fix_answer(ctx, p: _Power, ok: bool, error: str | None, steps=None, notes=None, applied=None) -> dict:
+    return {"ok": ok, "error": error, "steps": steps or [], "notes": notes or [], "state": _safe_state(ctx, p),
+            "conflicts": _present(p), "fixed": _fixed_all(p), "applied": applied}
+
+
+def _systemctl_ok(p: _Power) -> str | None:
+    """Why Fix for me / Undo cannot run now (the last check could not list services), else None."""
+    bad = [r for r in p.rows or [] if r["id"] == "unknown"]
+    return bad[0]["why"] if bad else None
+
+
+def _after_change(ctx, p: _Power, apply_cpu: bool) -> dict | None:
+    """Look again after a fix or undo: a blocker that has gone lets tick apply now; a fixed "cpu" conflict makes EPP
+    and turbo ours again, written at once. tick looks again FIX_RECHECK_S later (a D-Bus restart)."""
+    now = _monotonic()
+    _rows(ctx, p, force=True)
+    if _update_blocked(ctx, p):
+        p.apply_at = now
+    p.recheck_at = now + FIX_RECHECK_S if p.data["enabled"] else None
+    if apply_cpu and _may_write(ctx, p):
+        return _apply(ctx, p)
+    return None
+
+
+def _lpmd_note(ctx) -> str | None:
+    raw = _text(ctx.sys_path("/sys/devices/system/cpu/intel_pstate/max_perf_pct"), 16)
+    if raw.isdigit() and int(raw) < 100:
+        return f"Intel's low-power daemon left the CPU's top speed at {int(raw)} %; a reboot restores it"
+    return None
+
+
+def fix(ctx, cid) -> dict:
+    """PowerFixRes: stop and disable the FIXABLE units of conflict `cid` (after the user confirmed it), recorded in
+    power.json first so Undo works even after a crash half-way. Never masks, never uninstalls."""
+    with _LOCK:
+        p = _get(ctx)
+        if not (isinstance(cid, str) and cid in FIXABLE):
+            return _fix_answer(ctx, p, False, f"power_fix: {cid!r} cannot be fixed by OXP3 Deck")
+        name = CONFLICTS[cid][0]
+        _rows(ctx, p, force=True)
+        why = _systemctl_ok(p)
+        if why:
+            return _fix_answer(ctx, p, False, why)
+        row = next((r for r in p.rows or [] if r["id"] == cid), None)
+        if row is None:
+            return _fix_answer(ctx, p, False, f"{name} is not running")
+        if not row["fix_units"]:
+            if any((p.loaded or {}).get(u) == "masked" for u in FIXABLE[cid]):
+                return _fix_answer(ctx, p, False, f"{name} is masked; OXP3 Deck does not unmask services")
+            return _fix_answer(ctx, p, False, f"{name} was not started by systemd: OXP3 Deck cannot turn it off")
+        seen: dict = {}
+        for unit in row["fix_units"]:
+            got, err = _show(unit)
+            if got is None:
+                return _fix_answer(ctx, p, False, err)
+            if got.get("LoadState") != "loaded":         # not-found, masked: nothing to do
+                continue
+            seen[unit] = got
+        if not seen:
+            return _fix_answer(ctx, p, False, f"{name}: no service of it is loaded")
+        old = {u["unit"]: u for u in (p.data["fixed"].get(cid) or {}).get("units", [])}
+        units = []
+        for unit, got in seen.items():
+            was_enabled = got.get("UnitFileState", "")[:32]
+            was_active = got.get("ActiveState") in _ACTIVE
+            if unit in old:       # Fix again: keep the state from before OXP3 Deck first touched it, but an enable
+                # that this fix is about to remove (something enabled it again) is what Undo must put back
+                if was_enabled != "enabled":
+                    was_enabled = old[unit]["was_enabled"]
+                was_active = was_active or old[unit]["was_active"]
+            units.append({"unit": unit, "was_enabled": was_enabled, "was_active": was_active})
+        for k, u in old.items():  # the record's other units: kept while they still exist (Undo has work there)
+            if k not in seen:
+                got, _err = _show(k)
+                if got is None or got.get("LoadState") == "loaded":
+                    units.append(u)
+        before = copy.deepcopy(p.data["fixed"])
+        p.data["fixed"][cid] = {"at": time.time(), "boot_id": _boot_id(ctx)[:64], "units": units}
+        err = _save(p)
+        if err:
+            p.data["fixed"] = before
+            return _fix_answer(ctx, p, False, f"nothing was changed: cannot save the record for Undo: {err}")
+        disable = [u for u, g in seen.items() if g.get("UnitFileState") == "enabled"]
+        stop = [u for u, g in seen.items() if g.get("ActiveState") in _ACTIVE]
+        log.info("power: Fix for me %s: disable %s, stop %s", cid, disable or "-", stop or "-")
+        errors = []
+        results = {}
+        for action, todo in (("disable", disable), ("stop", stop)):
+            ok, e = _systemctl_do(action, todo)
+            results[action] = (ok, e)
+            if e:
+                errors.append(e)
+        steps = []
+        for action, todo in (("disable", disable), ("stop", stop)):
+            ran_ok, ran_err = results[action]
+            for unit in todo:
+                after, show_err = _show(unit)
+                if not ran_ok:
+                    error = ran_err
+                elif after is None:
+                    error = show_err
+                elif action == "disable" and after.get("UnitFileState") == "enabled":
+                    error = f"{unit}: still enabled"
+                elif action == "stop" and after.get("ActiveState") in _ACTIVE:
+                    error = f"{unit}: running again"
+                else:
+                    error = None
+                steps.append({"unit": unit, "action": action, "ok": error is None, "error": error})
+        applied = _after_change(ctx, p, CONFLICTS[cid][1] == "cpu")
+        notes = []
+        if cid == "intel_lpmd":
+            note = _lpmd_note(ctx)
+            if note:
+                notes.append(note)
+        gone = all(r["id"] != cid for r in p.rows or [])
+        if errors:
+            return _fix_answer(ctx, p, False, errors[-1], steps, notes, applied)
+        if not gone:
+            return _fix_answer(ctx, p, False, f"{name} is still running", steps, notes, applied)
+        return _fix_answer(ctx, p, True, None, steps, notes, applied)
+
+
+def unfix(ctx, cid) -> dict:
+    """PowerFixRes: Undo of fix(): enable what was enabled, start what was running, nothing else."""
+    with _LOCK:
+        p = _get(ctx)
+        if not (isinstance(cid, str) and cid in FIXABLE and cid in p.data["fixed"]):
+            return _fix_answer(ctx, p, False, f"power_unfix: OXP3 Deck has turned nothing off for {cid!r}")
+        _rows(ctx, p, force=True)
+        why = _systemctl_ok(p)
+        if why:
+            return _fix_answer(ctx, p, False, why)
+        rec = p.data["fixed"][cid]
+        units = []
+        notes = []
+        for u in rec["units"]:
+            if u["unit"] not in FIXABLE[cid]:
+                continue
+            got, _err = _show(u["unit"])
+            if got is not None and got.get("LoadState") != "loaded":      # not-found (uninstalled) or masked
+                notes.append(f"{u['unit']} is no longer installed (or is masked); nothing to turn back on")
+                continue
+            units.append(u)
+        enable = [u["unit"] for u in units if u["was_enabled"] == "enabled"]
+        start = [u["unit"] for u in units if u["was_active"]]
+        log.info("power: Undo %s: enable %s, start %s", cid, enable or "-", start or "-")
+        failed: set = set()
+        errors = []
+        steps = []
+        for action, todo in (("enable", enable), ("start", start)):
+            ok, e = _systemctl_do(action, todo)
+            if not ok:
+                failed |= set(todo)
+                errors.append(e)
+            steps += [{"unit": u, "action": action, "ok": ok, "error": e} for u in todo]
+        applied = None
+        left = [u for u in units if u["unit"] in failed]
+        if left:
+            p.data["fixed"][cid] = dict(rec, units=left)
+        else:
+            p.data["fixed"].pop(cid, None)
+        err = _save(p)
+        if err:
+            errors.append(f"cannot save power.json: {err}")
+        _after_change(ctx, p, False)
+        return _fix_answer(ctx, p, not errors, errors[-1] if errors else None, steps, notes, applied)
+
+
 def tick(ctx) -> dict:
     """One step of the watch loop (every TICK_S): resume and AC changes, the boot apply, drift and conflicts."""
     with _LOCK:
@@ -1136,7 +1422,7 @@ def tick(ctx) -> dict:
             p.run["suspend_count"] = susp
         p.seen, p.prev_susp, p.prev_ac, p.prev_gap = True, susp, ac, gap
         if not p.data["enabled"]:
-            p.apply_at = p.grace_until = None
+            p.apply_at = p.grace_until = p.recheck_at = None
             return {"ok": True, "error": None, "did": "idle"}
         _hw(ctx, p)
         if resumed:
@@ -1148,7 +1434,9 @@ def tick(ctx) -> dict:
             p.apply_at = max(p.apply_at or 0, now + AC_DEBOUNCE_S)   # after the last change of a flapping charger
             p.grace_until = max(p.grace_until or 0, now + GRACE_S)
             p.grace_left = GRACE_REAPPLIES
-        if p.rows_at is None or now - p.rows_at >= CONFLICT_RECHECK_S:
+        recheck = p.recheck_at is not None and now >= p.recheck_at
+        if recheck or p.rows_at is None or now - p.rows_at >= CONFLICT_RECHECK_S:
+            p.recheck_at = None
             _rows(ctx, p, force=True)
             if _update_blocked(ctx, p):
                 log.info("power: the other power manager is gone; applying again")

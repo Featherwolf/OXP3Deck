@@ -217,3 +217,53 @@ class Writer:
             else:
                 out.append(os.path.basename(p))
         return out
+
+
+class Systemctl:
+    """sysexec.run's stand-in for systemctl: a table of units {name: [load, unit_file_state, active]} that
+    list-units and show answer from, and that disable / stop / enable / start change. rc[action] = (rc, stderr)
+    fails that action; restart: units that come back (active) right after a stop (a D-Bus activation)."""
+
+    def __init__(self, units: dict | None = None):
+        self.units = {k: list(v) for k, v in (units or {}).items()}
+        self.calls: list[list[str]] = []
+        self.rc: dict = {}
+        self.restart: set = set()
+        self.listing_rc = 0
+
+    def actions(self) -> list[list[str]]:
+        """The calls that change something (not list-units, not show)."""
+        return [c for c in self.calls if "list-units" not in c and "show" not in c]
+
+    def __call__(self, argv, **kw):
+        from oxp3deck import sysexec
+        argv = [str(a) for a in argv]
+        self.calls.append(argv)
+        self.kw = kw
+        if "list-units" in argv:
+            if self.listing_rc:
+                return sysexec.Result(self.listing_rc, "", "Failed to connect to bus")
+            lines = [f"{u:<40} {v[0]:<9} {'active' if v[2] else 'inactive':<8} {'running' if v[2] else 'dead'}  x"
+                     for u, v in sorted(self.units.items())]
+            return sysexec.Result(0, "\n".join(lines) + "\n", "")
+        sep = argv.index("--")
+        names = argv[sep + 1:]
+        if "show" in argv:
+            u = self.units.get(names[0], ["not-found", "", False])
+            return sysexec.Result(0, f"LoadState={u[0]}\nUnitFileState={u[1]}\n"
+                                     f"ActiveState={'active' if u[2] else 'inactive'}\n", "")
+        action = argv[sep - 1]
+        if action in self.rc:
+            rc, err = self.rc[action]
+            return sysexec.Result(rc, "", err)
+        for n in names:
+            u = self.units[n]
+            if action == "disable" and u[1] == "enabled":
+                u[1] = "disabled"
+            elif action == "enable" and u[1] == "disabled":
+                u[1] = "enabled"
+            elif action == "stop":
+                u[2] = n in self.restart
+            elif action == "start":
+                u[2] = True
+        return sysexec.Result(0, "", "")

@@ -7,32 +7,40 @@ import { rebootNow, useAction } from "../actions";
 import { useCurrentJob } from "../store";
 import type { Overview, Oxp3Status } from "../types";
 import { listText } from "../util";
-import { explain, Problem, Status } from "./Hint";
+import { explain, label, Problem, Status, WithDetails } from "./Hint";
 
 export const RebootRow: FC<{ o: Overview | null | undefined; st: Oxp3Status | null | undefined }> = ({ o, st }) => {
   const act = useAction();
   const job = useCurrentJob();
   const dnr = o?.do_not_reboot ?? st?.rebuild_unfinished ?? null;
   const waits = (st?.fixes ?? []).filter((f) => f.pending).map((f) =>
-    f.pending === "inputplumber-restart" ? `${f.title} (the controller map loads at the next reboot)` : f.title);
+    f.pending === "inputplumber-restart" ? `${f.title} (the controller layout loads at the next reboot)` : f.title);
   const pending = !!(st?.reboot_pending ?? o?.reboot_pending) || waits.length > 0;
   if (dnr) {
     return (
       <PanelSectionRow>
-        <Status ok={false} red label="Do not reboot"
-          detail={`oxp3-tool's last boot-entry rebuild did not finish (or still runs). Reboot only after "sudo ${dnr}" has run without errors in a terminal (Desktop Mode).`} />
+        <Status ok={false} red label="Do not reboot yet"
+          detail="A boot update didn't finish. Open Details before restarting."
+          details={{
+            title: "Do not reboot yet",
+            body: "The fixes tool's last update of the boot entries did not finish (or still runs), so the device may not start. In Desktop Mode, open a terminal and run the command below; reboot only after it ends without errors.",
+            lines: [`sudo ${dnr}`], linesTitle: "Run in a terminal:",
+          }} />
       </PanelSectionRow>
     );
   }
   if (!pending) return null;
   const what = listText(waits) || "the last change";
+  const details = { title: "Reboot to finish", body: `Waiting for a reboot: ${what}. Reboots right away after you confirm.` };
   return (
     <PanelSectionRow>
-      <ButtonItem layout="below" disabled={!!act.busy || job?.state === "running"}
-        onClick={() => act.run("Reboot", () => rebootNow(`This finishes ${what}. Save your game first.`))}
-        description={explain(`Waiting for a reboot: ${what}.`, "Reboots right away after you confirm.")}>
-        {act.busy ? "Rebooting…" : "Reboot to finish"}
-      </ButtonItem>
+      <WithDetails details={details}>
+        <ButtonItem layout="below" disabled={!!act.busy || job?.state === "running"}
+          onClick={() => act.run("Reboot", () => rebootNow(`This finishes ${what}. Save your game first.`))}
+          description={explain("Some changes need a restart.")}>
+          {act.busy ? "Rebooting…" : label("Reboot to finish", details)}
+        </ButtonItem>
+      </WithDetails>
       <Problem what="Reboot" error={act.error} />
     </PanelSectionRow>
   );

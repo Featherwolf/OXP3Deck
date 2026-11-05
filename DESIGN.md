@@ -42,8 +42,12 @@ patterns are adapted from it (credited in CREDITS.md, its licence in THIRD_PARTY
   `user_mkdirs`); downloads go into a root-only `mkdtemp`.
 - **`_uninstall` undoes nothing**: Decky runs it on every update of the plugin too. Uninstalling oxp3-tool or
   xess-xmx-linux is an explicit button.
-- **Every control explains itself** in its own `description` (the D-pad scrolls it into view), and every action
-  shows its result or its error in a row under the control.
+- **One line up front, the rest in Details.** Every control and status row has a one-line `description` in plain
+  words (at most about 80 characters, no acronyms, no commands, no paths). When it takes effect, risks, the
+  technical names (PL1, EPP, unit names, env variables, paths) and how to fix a problem go in its **Details** modal
+  (see "Frontend → Details"): the Options (☰) button opens it on any row that has it, A opens it too on a read-only
+  row, and such a row's label ends with " ⓘ". Every action shows its result or its error in a row under the
+  control (the error's first sentence; the full text in that row's Details).
 
 ## Layout (the repository root, shipped as `OXP3Deck/` in the zip)
 
@@ -77,7 +81,10 @@ src/                   frontend (TypeScript, @decky/ui)
                        xess.tag_key) and what its confirmation says (pure, tested under node)
   steam.ts             the running game (one shared watch: onMainAppChange), launch options through SteamClient
   power.ts             power control's serial writer and texts (pure, tested under node)
-  pages/, components/  the quick panel, the full page's tabs (pages/Power.tsx), shared rows (Hint, JobView,
+  conflicts.ts         the conflicts' friendly names, one-liners, Details and Fix / Undo dialogs (pure, node-tested)
+  text.ts              firstSentence and the one-line limit (pure, node-tested)
+  pages/, components/  the quick panel, the full page's tabs (pages/Power.tsx), shared rows (Hint: explain, Status,
+                       Note, Problem, WithDetails, label; confirm: confirm, showDetails; ConflictRow, JobView,
                        GameControls, PowerControls, ...)
 tests/                 unittest, with a stub `decky` module and fake roots; fixtures/oxp3: real oxp3-tool --json
                        output (tests/make_fixtures.py regenerates it from an OXP3-Tool-for-Bazzite checkout's
@@ -404,6 +411,217 @@ finds an old record ended cannot remove the live one a job has written since.
   XMX cores) and `compat_tool_hook` (the hook: XESS=latest/dp4a, XESS_LOG, FSR); FSR choices show when the package
   is 20261104 or newer by its tag or `features.fsr`, or when they are set already.
 
+### Details (one line up front, the rest on demand)
+
+Steam Game Mode has no mouse hover, so `ItemProps.tooltip` never shows and is not used. `ItemProps.explainer` (Steam's
+own "?" button) is typed in @decky/ui 4.16 but untested on the device; it is **not** used (it could render twice next
+to ours). One mechanism, the same on every screen:
+
+- **`showDetails(d: DetailsSpec): void`** in `components/confirm.tsx`: `showModal(<ConfirmModal bAlertDialog
+  strTitle={d.title} strDescription={body} strOKButtonText="Close" onOK onCancel />)`; `body` is `d.body` then, when
+  `d.lines` is set, a monospace block under `d.linesTitle` (same look as confirm's `lines`), all inside one
+  `maxHeight: 60vh; overflowY: auto` box so a long body scrolls with the D-pad.
+  ```ts
+  export type DetailsSpec = { title: string; body: ReactNode; lines?: string[]; linesTitle?: string };
+  ```
+- **`<WithDetails details={DetailsSpec | undefined}>{control}</WithDetails>`** in `components/Hint.tsx`, around a
+  ToggleField, SliderField, DropdownItem or ButtonItem: a `Focusable` with `onOptionsButton={() =>
+  showDetails(details)}` and `onOptionsActionDescription="Details"` (gamepad events bubble from the focused control,
+  as in Decky's ReorderableList), so the footer shows "☰ Details" while the control is focused and A still does the
+  control's job. Without `details` it renders the child alone.
+- **`label(text, details?)`** in Hint.tsx: `text` plus `INFO = " ⓘ"` when `details` is set. Every control inside
+  `WithDetails` gets its label through it, so the mark means "Details here".
+- **Read-only rows**: `Status`, `Note` and `Problem` take `details?: DetailsSpec`. When set: the label goes through
+  `label()`, the Field gets `onActivate={() => showDetails(details)}` (A), `onOKActionDescription="Details"` and the
+  same `onOptionsButton`.
+- **Hint.tsx API**: `explain(does: ReactNode)` takes one sentence (the `when` and `note` arguments are removed; that
+  text moves into the control's Details, so `pnpm typecheck` finds every old call). `Status.detail` is one line.
+  `Note`'s children are one line (`label` + one line; the old paragraph goes into `details`). `Problem` shows
+  `firstSentence(error, 100)` and puts the whole error in its Details (title "<what>: did not work").
+- **`src/text.ts`** (framework-free, tested under node): `firstSentence(s, max)` (up to the first ". " / ": " after
+  20 chars, else cut at a word before `max` with "…"); `MAX_LINE = 80`.
+- **Details body**, always in this order, each part only when it says something: what it does → when it takes
+  effect → risks / when to leave it alone → how to fix (for a problem) → "Technical:" the names (PL1, EPP, unit names,
+  env variables, paths, commands) as `lines`. Technical names appear only here.
+- **Problem rows with a fix**: a conflict, and the EPP/CPU boost controls while one blocks them, get the row pattern
+  below ("Conflict rows").
+
+### Conflict rows (`components/ConflictRow.tsx`, used by PowerControls and the Power tab)
+
+For one `PowerConflict` (texts from `src/conflicts.ts`, keyed by id, with the row's `name`/`why`/`fix` as the
+fallback for an id it does not know):
+1. `Status` ✗ (red when kind "blocks"), label `friendlyName(id)` with " ⓘ", detail `oneLine(row)`; Details:
+   `explainBody(row)` (what it is, what turning it off costs on this system, the manual way: "Do it yourself" with
+   the command of `row.fix` as a line, only when it is a `sudo …` command, cut before its reason; prose guidance the
+   body already says is not repeated).
+2. When `row.fix_units.length` and no record: ButtonItem **"Fix for me"**, description "Turns <short name> off. You can
+   undo it." → `confirm(fixConfirm(row, info.state.enabled))` → `power_fix(row.id)` (after `powerWriter.drain()`);
+   its result row under it (for a "cpu" id under Energy preference / CPU boost, the "<name> is off" row with Undo
+   takes the conflict row's place, also on the Power tab): ✓ "Turned off" / the Problem.
+3. When `row.fixed?.came_back`: the Status detail reads "It started again: <who>" and the button reads **"Fix
+   again"**; ButtonItem **"Undo"** next to it.
+4. When the row is ignorable: ButtonItem **"I've handled it"** (was "I have done that"), description "Only once it no
+   longer changes these settings." → `power_options({ignore})`.
+5. Without `fix_units`: ButtonItem **"How to fix"** → `showDetails(explainBody(row))`.
+
+Records whose conflict is gone are listed on the Power tab under "Turned off by OXP3 Deck": `Status` ✓ "<friendly
+name> is off", detail "Turned off <date>.", and ButtonItem **"Undo: turn it back on"**, description "Re-enables what
+OXP3 Deck turned off." → `confirm(undoConfirm(rec))` → `power_unfix(id)`. The quick panel shows Undo only in the row
+it just fixed (until the panel closes) and points to the Power tab otherwise.
+
+After a fix or undo: the cached `power-info` and `power-state` are replaced from the answer (`conflicts`, `fixed`,
+`state`), and `power-info` reloads once more 12 s later (after the backend's +10 s recheck), so a D-Bus restart shows
+as "came back" without a manual "Check again".
+
+`src/conflicts.ts` (pure, node-tested): `friendlyName`, `oneLine`, `explainBody` (returns `{body: string[], lines:
+string[]}`, the TSX turns it into a DetailsSpec), `fixConfirm`, `undoConfirm`, `cameBackText`.
+
+| id | Friendly name | One line (up front) | Details (what turning it off costs) |
+|---|---|---|---|
+| `ppd` | Power Profiles | Controls energy preference and CPU boost. | Sets energy preference from the desktop's power mode. Off: the Desktop Mode power mode switch stops; CachyOS's game-performance runs games without its profile and may start it again. Technical: power-profiles-daemon.service; it writes EPP/EPB and platform_profile. |
+| `tuned` | TuneD | Controls energy preference and CPU boost. | Same as Power Profiles (tuned-ppd stands in for it). Both units are needed: tuned alone keeps its profile. |
+| `intel_lpmd` | Intel low-power daemon | Controls energy preference and parks CPU cores. | CachyOS turns it on for this CPU. Off: light tasks and video use a bit more battery; games are fine. It does not touch power limits. |
+| `thermald` | Thermal daemon | Lowers the power limit on its own, so power control is paused. | On this CPU it rewrites the sustained limit within seconds. The CPU's own heat limit and the fan still protect the device. |
+| `powerstation` | PowerStation | Also changes power limits, so power control is paused. | It powers Steam's TDP slider on Bazzite; off, that slider does nothing. Bazzite may turn it back on after an update. |
+| `oxp3-tdp-sync` | TDP sync script | Also changes power limits, so power control is paused. | A community script that copies one limit into the other every 2 s; OXP3 Deck already sets both. |
+| `onex3-tdp` | onex3-tdp | Also changes power limits, so power control is paused. | Another TDP script. |
+| `simpledeckytdp` | SimpleDeckyTDP | Also changes power limits, so power control is paused. | Import its profiles first (Power tab), then Decky → Settings → Plugins → disable it. |
+| `powercontrol` | <plugin name> | Also changes power limits, so power control is paused. | Decky → Settings → Plugins → disable it. |
+| `hhd` | Handheld Daemon | Its TDP setting also changes power limits. | Turn off TDP in Handheld Daemon's settings, then "I've handled it". It may run the controller, so OXP3 Deck does not stop it. |
+| `steamos-remote` | Steam's TDP slider | Steam's TDP slider can change these limits. | Quick Access → Performance: turn off "TDP limit", then "I've handled it". |
+| `unknown` | Service check | Couldn't check other services. | The systemctl error; "Check again". |
+
+### Up-front text
+
+Labels and one-liners every screen shows (≤ 80 chars). "→ Details" is what moves into that row's Details. `<…>`
+is filled in. Rows not listed keep their text.
+
+**Quick Access panel (pages/Quick.tsx)**
+
+| Row | Label | One line | → Details |
+|---|---|---|---|
+| Device status | "ONEXPLAYER 3" ✓ / "Not a ONEXPLAYER 3" ✗ | the OS name ("CachyOS Handheld Edition") | kernel, supported systems |
+| Do not reboot (red) | "Do not reboot yet" | "A boot update didn't finish. Open Details before restarting." | why, the `sudo …` to run in Desktop Mode |
+| Reboot to finish | "Reboot to finish" | "Some changes need a restart." | what waits; "reboots at once after you confirm" |
+| Job (quick) | "<task>: running / done / failed" | "Keep the device on." while running; else the last log line | the full log, result lines, archive path |
+| oxp3-tool status | "Device fixes" | "<n> fixes applied" / "Needed for controller, sleep and screen fixes" | oxp3-tool version, minimum, path, unsupported text |
+| Install / Update oxp3-tool | "Install fixes tool" / "Update fixes tool" | "Takes a few seconds." | path, source, version |
+| Recommended fixes (one row, not one per fix) | "Recommended fixes (<n>)" ⓘ | the titles, comma-separated | per fix: summary, takes effect |
+| Apply recommended | "Apply recommended (<n>)" | "Shows what will change before anything happens." | reboot note |
+| All applied | "Fixes up to date" ✓ | — | — |
+| Fixes needing a look | "Fixes need attention (<n>)" | "Open the Fixes tab to repair them." | the titles |
+| XeSS status | "XeSS fast mode: On / Off / Log out needed" | e.g. "Log out and back in to turn it on." | driver line, what fast mode (XMX) is |
+| Install / Update / Repair XeSS | "Install XeSS fast mode" / "Update XeSS to <v>" / "Repair XeSS" | "Faster XeSS upscaling and frame generation in games." | size, repair reason, re-login |
+| Check for XeSS update | "Check for XeSS update" | "Changes nothing." / the result ("Up to date") | — |
+| This game | "<game name>" | "XeSS settings for this game" | "Saved in the game's Steam launch options" |
+| More | "All settings" | "Profiles, fixes, buttons, XeSS and more." | — |
+
+**Power (components/PowerControls.tsx, quick and Power tab)**
+
+| Row | Label | One line | → Details |
+|---|---|---|---|
+| Live status | "<pl1> W steady · <pl2> W boost" | "<profile> · on battery / plugged in" (+ " · GPU held back by power limit" when it is) | GPU clock, throttle reasons, "off = device defaults" |
+| Blocked (red) | "Power control paused" | "<friendly name> is also changing power limits." | then the conflict rows of every blocker |
+| Overridden (red) | "Something changed your power limits" | "Likely <friendly name>. Fix it, then tap Take control again." | now / set values, each suspect's guidance (Steam: its "TDP limit" and "Manual GPU clock") |
+| Take control again | "Take control again" | "Re-applies your settings." | "turn the other one off first, or it changes them back" |
+| Locked / failed lines | "Limit capped at <n> W" / "<what> didn't apply" | "The device firmware won't allow more than <n> W." / first sentence | MSR/MMIO, "the lower of the two wins", per-id errors |
+| TDP control toggle | "Power control (TDP)" | on: "Uses your profile below." / off: "Device defaults. Turn on to set power here." | re-applies after sleep, game change, charger; off and reboot restore defaults; turn it off before uninstalling OXP3 Deck |
+| First-enable confirm | title "Turn on power control?" | text: "OXP3 Deck will set power limits, GPU speed and CPU boost from your profile. Nothing changes until you move a slider. Turning it off, or rebooting, restores the defaults." + "Allowed: <range>" | the old technical paragraphs as `lines` under "Technical" |
+| Hardware problems | "Power control unavailable" ⓘ | first sentence | full text |
+| Refused enable | "Turn off <friendly name> first" | — | conflict rows (with Fix for me) under it |
+| Profile for this game | "Separate profile for <game>" | off: "Uses the default profile." / on: "Sliders edit this game's profile." | "starts as a copy of the default" |
+| Sustained power | "Sustained power" | "Steady power for CPU and GPU. Higher is faster, battery shorter." | PL1, the profile and slot it edits, "saved X, runs at Y now", device default |
+| Boost power | "Boost power" | "Short bursts above sustained power." | PL2, a few seconds, the maximum, never below sustained |
+| GPU min clock | "GPU minimum speed" | "Raise only if one game stutters from GPU dips." | idle power cost, device default |
+| GPU max clock | "GPU maximum speed" | "Lower saves battery and leaves more power for the CPU." | efficient clock, device default |
+| Energy preference | "Energy preference" | "How eagerly the CPU speeds up." / blocked: "Locked by <friendly name>." | the options, governor note, EPP; when blocked: the conflict row (Fix for me) right under it |
+| CPU boost | "CPU boost" | "Off saves battery in light games." / blocked: "Locked by <friendly name>." | turbo, "most games run slower without it" |
+| Use firmware values | "Reset to device defaults" | "Undoes every change in this profile." | which profile, applies at once |
+| A slider at null | value shown is the device's | "(device default)" replaces "(firmware value)" | — |
+
+**Power tab (pages/Power.tsx)**, beyond PowerControls
+
+| Row | Label | One line | → Details |
+|---|---|---|---|
+| Per-zone rows (merged) | "Power limits now" ⓘ | "<pl1> W steady · <pl2> W boost" (the lowest over the zones) | per interface PL1/PL2/PL4, locked marks, the AC rewrite |
+| No zones | "Power limits not available" | "This system doesn't expose power limits." | RAPL, the modules `intel_rapl_msr` and `processor_thermal_rapl` |
+| GPU row | "GPU <n> MHz" | "Held back by power limit" / "Running freely" | range, raw reasons |
+| CPU row | "CPU" | "Energy: <x> · Boost: <on/off> · <Plugged in / On battery>" | governor |
+| cpu_blocked | "Energy preference & boost: locked" | "<friendly name> controls them." | + the conflict row (Fix for me) under it |
+| Per-game profiles | "Per-game profiles" | "Games with their own profile use it." | "off keeps the saved profiles" |
+| Separate values on AC | "Different settings when plugged in" | "Each profile gets a second set for charging." | switch delay |
+| Extended | "Allow up to <x> W when plugged in" | "Needs a 65 W or stronger charger." | rated figures, battery limit, weak charger |
+| Profile dropdown | "Profile to edit" | "Active now" / "Saved; used when this game runs" | per-game off note |
+| Values for | "Edit values for" | "Battery or plugged in." | "copied at the first change" |
+| TDP-off note | — | "Power control is off: changes are saved for later." | — |
+| New / delete profile | "New profile for <game>" / "Delete profile" | "Starts as a copy of the default." / "The game uses the default profile again." | — |
+| Conflicts section | "Other power programs" | rows as above; none: "No conflicts" ✓ | — |
+| Turned off by OXP3 Deck | "<friendly name> is off" ✓ | "Turned off <date>." + Undo | the recorded units |
+| Check again | "Check again" | "Look for conflicting programs." | services, programs, Decky plugins |
+| Firmware section | "Device defaults" ⓘ | "Restored when power control is turned off." | the boot snapshot, per-zone boot values, PL1 base power, "turn off before uninstalling" |
+| GPU clock range | "GPU speed range" | "<min>–<max> MHz" | efficient clock, card, gt |
+| Allowed range | "Allowed range" | "<a>–<b> W on battery, up to <c> W plugged in" | boost max, the figures' source |
+| Import | "Import from SimpleDeckyTDP" | "Copies your SimpleDeckyTDP profiles." | the next steps |
+| Imported / skipped | "Imported <n>" ⓘ / "Skipped <n>" ⓘ | — | the names |
+
+**Fixes, Buttons, XeSS, Games, Kernel, Updates**: same rule. The labels and one-liners are the "Proposed label" and
+"One-liner" columns of the UX audit, kept with this design's build notes:
+
+| Screen | Row | Label | One line |
+|---|---|---|---|
+| Fixes | not installed | "Fixes tool not installed" | "Install it to use this page." (+ an Install button here) |
+| Fixes | refresh | "Refresh" | "Changes nothing." |
+| Fixes | can't change | "This system can't be changed" | "Only ONEXPLAYER 3 on Bazzite or CachyOS." |
+| Fixes | each fix | "<fix title>" ✓/✗ ⓘ | "Applied" / "Recommended" / "Optional" / "Needs repair" / "Not needed" / "Reboot pending" |
+| Fixes | lowest refresh rate | "Lowest refresh rate" | "Used when you tap Apply." |
+| Fixes | nvme anyway | "Apply even without the problem" | "Costs a little battery during sleep." |
+| Fixes | layout link | "Choose button layout" | "Choose what each key does." |
+| Fixes | apply / again / revert | "Apply" / "Apply again" / "Undo this fix" | "Shows what changes first." / "Puts the original files back." |
+| Buttons | status | "Custom layout active" / "Stock layout" | "Loads at next reboot" (only when pending) |
+| Buttons | each key | "<key name>" ⓘ | the action's one-line description |
+| Buttons | frame limit | "Frame limit for the key" | "Press again to turn it off." |
+| Buttons | Xbox key | "Xbox key: tap only" ⓘ | "Holding it for Steam shortcuts won't work." |
+| Buttons | restart | "Apply without reboot" | "The controller stops for a few seconds." |
+| Buttons | apply | "Apply layout" | "Shows what changes first." |
+| XeSS | status | "XeSS fast mode: …" | as in Quick |
+| XeSS | script running | "Installer still running" | "Buttons wait until it ends." |
+| XeSS | driver check | "Driver check: OK / Failed" ⓘ | failed: "Games use the slower mode." |
+| XeSS | Flatpak | "Steam is a Flatpak" ✗ | "Not supported: needs Steam from system packages." |
+| XeSS | missing tools | "Missing programs: <x>" | "Install them first." |
+| XeSS | not downloaded | "Some parts didn't download" | "Repair downloads them." |
+| XeSS | uninstall | "Uninstall" | "Log out and back in afterwards." |
+| XeSS | default driver | "Default graphics driver" | "Used by every game unless it picks its own." |
+| XeSS | Proton rows | "<proton name>" ✓/✗ | "XeSS fast mode ready" / "Needs the XeSS add-on" |
+| XeSS | add shim | "Add XeSS to system Protons (<n>)" | "Lets games on these Protons use fast mode." |
+| XeSS | lost shim | "A Proton update removed XeSS" | "Add it again above." |
+| XeSS | old folders | "Old XeSS folders" | "Remove old versions to free space." |
+| Games | no game | "No game yet" | "Start a game to see its XeSS settings here." |
+| Games | status | "<game name>" | "Changes apply next time you start it." |
+| Games | not installed | "XeSS fast mode not installed" | "These settings do nothing yet." |
+| Games | typo | "Launch options typo" (+ "Fix the typo") | "Blocks the settings below." |
+| Games | XESS | "XeSS version" | per option ≤ 60 chars ("Uses the game's XeSS." / "Newer XeSS for older games." / "For testing.") |
+| Games | XESS_FG | "Frame generation" | "Turn on frame gen in the game and set a frame limit." |
+| Games | 5x–8x | "Show 5x–8x (experimental)" | "Adds more choices above. Not supported by Intel." |
+| Games | MESA | "Graphics driver" | "Only change if this game misbehaves." |
+| Games | force_vk_vendor | "Compatibility mode" | "Only for games that need it; XeSS slows down." |
+| Games | XESS_LOG | "Save XeSS logs" | "For bug reports; leave off otherwise." |
+| Games | FSR | "FSR → XeSS" | per mode ≤ 60 chars |
+| Games | Proton | "Proton: <name>" ✓/✗ | "XeSS fast mode ready" / "Needs the XeSS add-on" / "Some settings won't work" |
+| Games | non-Steam | "Paste these launch options" ⓘ | "OXP3 Deck can't write them for this game." |
+| Games | last run | "Last run: fast mode used" / "slower mode" / "no logs" ⓘ | ≤ 60 chars (files and prefix move into its Details) |
+| Kernel | rows | "<package>" | "Running now" / "Default" / "Can't boot" |
+| Kernel | try | "Try once" | "Next restart only. Hold power to go back." |
+| Kernel | keep | "Keep this kernel" | "Always boot the kernel running now." |
+| Kernel | next boot | "Next boot: <x>" | "One-time try" / "Default" |
+| Updates | oxp3-tool | "Fixes tool <v>" | "Up to date" / "Update available" |
+| Updates | diagnose | "Save a problem report" | "Saved to your home folder. Takes up to a minute." |
+| Updates | log toggle | "Show log" / "Hide log" | (none) |
+
+Env variable names (XESS=, XESS_FG=, MESA=, FSR=, force_vk_vendor=-1, XESS_LOG=1), paths, `install.sh`, `%command%`,
+Limine and InputPlumber names leave every one-liner and appear in Details as "Adds to launch options: …" or under
+"Technical". Confirm dialogs: the first paragraph says what changes in plain words; the technical rest goes into
+`lines` (the oxp3-tool plan, commands, paths) and stays.
+
 ## Power (TDP, GPU, CPU)
 
 Power control built into OXP3 Deck: sustained (PL1) and boost (PL2) power limits, the Arc GPU's clock range, the CPU's
@@ -432,8 +650,15 @@ The facts this section rests on (kernel 7.2 source and measurements on the owner
 ### Rules
 
 - **Off by default.** Nothing is written to hardware until the user turns "TDP control" on, and turning it on is
-  refused while another power manager is active (Conflicts). The user stays the one who resolves a conflict: OXP3
-  Deck never stops, disables or masks another service and never edits another plugin's settings.
+  refused while another power manager is active (Conflicts).
+- **Another service is changed only on "Fix for me", and can be undone.** Only after the user taps "Fix for me" on a
+  conflict and confirms a dialog that says exactly what will change (the unit names and the commands) may OXP3 Deck
+  **stop and disable** that conflict's systemd units, and only the units on the `FIXABLE` whitelist (Conflicts →
+  Fix for me). It never masks a unit, never uninstalls a package, never edits another plugin's settings or files,
+  and never acts on its own: no tick, event, enable or start-up ever runs a fix or an undo. It records what it
+  changed (power.json `fixed`) and offers **Undo**, which re-enables and starts exactly what it changed. When a
+  fixed unit runs again (D-Bus activation, a system update), OXP3 Deck says so and offers the fix again; it never
+  repeats it by itself.
 - **Write only what is ours to write**: PL1 (`long_term`) and PL2 (`short_term`) of every `package-*` zone of
   `intel-rapl` and `intel-rapl-mmio`; `min_freq` / `max_freq` of the render GT; `energy_performance_preference` of
   every cpufreq policy; `intel_pstate/no_turbo`. Never PL4 (`peak_power`), never `psys`, `core`, `uncore` or `dram`
@@ -650,6 +875,7 @@ write); the frontend's writer sends at most one change at a time (Frontend), so 
 ```json
 {"version": 1,
  "enabled": false, "per_game": true, "split_ac": false, "extended": false, "ignore": [],
+ "fixed": {},
  "profiles": {
    "default": {"name": null, "main": {"pl1_w": null, "pl2_w": null, "gpu_min_mhz": null, "gpu_max_mhz": null,
                                        "epp": null, "turbo": null}, "ac": null},
@@ -673,6 +899,8 @@ write); the frontend's writer sends at most one change at a time (Frontend), so 
   `default`) is refused: profiles are created with `profile(appid, name, True)`, which copies `default` (main and ac)
   and stores `name` (≤ 128 chars); `profile(appid, None, False)` deletes; `default` cannot be deleted. More than
   `MAX_PROFILES` → refused.
+- `fixed`: what Fix for me changed, written only by `fix()` and `unfix()` (never by `options()`); its format and
+  checks are under "Conflicts → Fix for me, Undo".
 - `options(opts)`: `{per_game?: bool, split_ac?: bool, extended?: bool, ignore?: string[]}`; `ignore` only takes ids
   of conflicts whose `ignorable` is true. `enabled` changes only through `enable()`.
 
@@ -706,7 +934,7 @@ ignored when its `boot_id` is not this boot's):
      it.
   4. A due apply → apply (after resume/AC the run state's `ours` is the reference; not while overridden or blocked).
   5. Otherwise the **drift check** (below).
-  6. Every `CONFLICT_RECHECK_S`: the conflict check; a non-ignored blocker that appears while enabled → `blocked`.
+  6. Every `CONFLICT_RECHECK_S`, and once when `recheck_at` (set by fix/unfix, +10 s) is due: the conflict check; a non-ignored blocker that appears while enabled → `blocked`.
      (Built: this runs before steps 4 and 5, so a blocker stops the apply of the same tick; once a later check finds
      no blocker, `blocked` clears and the active profile is applied at once, since the other manager has left its
      own values.)
@@ -744,32 +972,146 @@ with a fresh `read(gpu=False)`; `state()` (only while a panel shows) also compar
 
 `conflicts(ctx)` runs `systemctl list-units --all --type=service --plain --no-legend --no-pager` once through
 `sysexec.run` (timeout 10 s), takes the first column and the ACTIVE column (`active`/`activating`/`reloading` =
-active), reads `/proc/*/comm` for programs started without systemd, and looks at Decky's plugins: each
+active; `_units` keeps every listed unit with its LOAD column and active flag, so a loaded but inactive unit is
+known too, and a `not-found` one is not offered), reads
+`/proc/*/comm` for programs started without systemd, and looks at Decky's plugins: each
 `<homebrew>/plugins/*/plugin.json`'s `name` (`homebrew` = the folder two above `ctx.settings_dir`, read with
 `context.read_small`), enabled unless it is in `<homebrew>/settings/loader.json`'s `disabled_plugins` list.
 
-| id | Detected by | kind | ignorable | Guidance (`fix`) |
-|---|---|---|---|---|
-| `simpledeckytdp` | Decky plugin "SimpleDeckyTDP", enabled | blocks | no | Decky → Settings → Plugins: disable or uninstall SimpleDeckyTDP (Power tab → Import first) |
-| `powercontrol` | Decky plugin "PowerControl" or "PowerTools", enabled | blocks | no | same, for that plugin |
-| `powerstation` | `powerstation.service` active, or comm `powerstation` | blocks | no | `sudo systemctl disable --now powerstation.service` (Bazzite: Steam's TDP slider uses it; if it is back after a reboot, `sudo systemctl mask powerstation.service`) |
-| `thermald` | `thermald.service` active, or comm `thermald` | blocks | no | `sudo systemctl disable --now thermald`: on Panther Lake it rewrites PL1 within seconds. The SoC's own thermal limit and the fan curve still protect the device |
-| `hhd` | `hhd@*.service` / `hhd.service` active, or comm `hhd` | blocks | **yes** | turn off TDP control in Handheld Daemon's settings, then "I have done that" (adds it to `ignore`) |
-| `oxp3-tdp-sync` | `oxp3-tdp-sync.service` active | blocks | no | `sudo systemctl disable --now oxp3-tdp-sync.service` (it copies MMIO PL1 into MSR every 2 s; OXP3 Deck writes both) |
-| `onex3-tdp` | `onex3-tdp.service` active | blocks | no | `sudo systemctl disable --now onex3-tdp.service` |
-| `steamos-remote` | a file in `/etc/steamos-manager/remotes.d/` or `/usr/share/steamos-manager/remotes.d/` containing `TdpLimit1` | blocks | yes | Steam's TDP slider writes through it: turn Steam's "TDP limit" off, or remove that file |
-| `ppd` | `power-profiles-daemon.service` active | cpu | yes | `sudo systemctl disable --now power-profiles-daemon` |
-| `tuned` | `tuned.service` or `tuned-ppd.service` active | cpu | yes | `sudo systemctl disable --now tuned tuned-ppd` |
-| `intel_lpmd` | `intel_lpmd.service` active | cpu | yes | `sudo systemctl disable --now intel_lpmd` (CachyOS enables it on Panther Lake; it sets EPP and parks cores, not RAPL) |
+| id | Detected by | kind | ignorable | Fix for me (`FIXABLE` units) | Guidance (`fix`, shown in Details as "Do it yourself") |
+|---|---|---|---|---|---|
+| `simpledeckytdp` | Decky plugin "SimpleDeckyTDP", enabled | blocks | no | no (a plugin) | Decky → Settings → Plugins: disable or uninstall SimpleDeckyTDP (Power tab → Import first) |
+| `powercontrol` | Decky plugin "PowerControl" or "PowerTools", enabled | blocks | no | no (a plugin) | same, for that plugin |
+| `powerstation` | `powerstation.service` active, or comm `powerstation` | blocks | no | `powerstation.service` | `sudo systemctl disable --now powerstation.service`. On Bazzite, Steam's TDP slider uses it, and Bazzite's hardware setup turns it back on after a system update |
+| `thermald` | `thermald.service` active, or comm `thermald` | blocks | no | `thermald.service` | `sudo systemctl disable --now thermald.service`: on this CPU it rewrites the sustained limit within seconds. The CPU's own heat limit and the fan curve still protect the device |
+| `hhd` | `hhd@*.service` / `hhd.service` / `hhd_local@*.service` active, or comm `hhd` | blocks | **yes** | no (it may run the controller) | turn off TDP control in Handheld Daemon's settings, then "I've handled it" (adds it to `ignore`) |
+| `oxp3-tdp-sync` | `oxp3-tdp-sync.service` active | blocks | no | `oxp3-tdp-sync.service` | `sudo systemctl disable --now oxp3-tdp-sync.service` (it copies MMIO PL1 into MSR every 2 s; OXP3 Deck writes both) |
+| `onex3-tdp` | `onex3-tdp.service` active | blocks | no | `onex3-tdp.service` | `sudo systemctl disable --now onex3-tdp.service` |
+| `steamos-remote` | a file in `/etc/steamos-manager/remotes.d/` or `/usr/share/steamos-manager/remotes.d/` containing `TdpLimit1` | blocks | yes | no (a file, often read-only) | Steam's TDP slider writes through it: turn Steam's "TDP limit" off in Quick Access → Performance, then "I've handled it" (no "remove the file": under `/usr/share` it cannot be) |
+| `ppd` | `power-profiles-daemon.service` active | cpu | yes | `power-profiles-daemon.service` | `sudo systemctl disable --now power-profiles-daemon.service` |
+| `tuned` | `tuned.service` or `tuned-ppd.service` active | cpu | yes | `tuned-ppd.service`, `tuned.service` | `sudo systemctl disable --now tuned-ppd.service tuned.service` |
+| `intel_lpmd` | `intel_lpmd.service` active | cpu | yes | `intel_lpmd.service` | `sudo systemctl disable --now intel_lpmd.service` (CachyOS enables it on this CPU; it sets EPP and parks cores, not the power limits) |
 
-- **blocks**: `enable(true)` answers `{ok: false, error: "another power manager is active: PowerStation", state}` and
-  writes nothing; one appearing while enabled sets `state.blocked` and writes stop (nothing is restored: the other
-  manager is in charge now). An ignored ignorable one does not block.
-- **cpu**: power limits and GPU work; EPP and turbo are not written (`state.cpu_blocked` says why, the EPP and turbo
-  controls are disabled with that text) unless the id is in `ignore`.
-- Each answer row: `{id, name, kind, ignorable, ignored, why, fix}`; only active ones are listed. A failing
-  `systemctl` gives one row `{id: "unknown", kind: "suspect", ...}` ("could not list services: ...") and blocks
-  nothing.
+- **blocks**: `enable(true)` answers `{ok: false, error: "another power manager is active: PowerStation", state,
+  conflicts}` and writes nothing; one appearing while enabled sets `state.blocked` and writes stop (nothing is
+  restored: the other manager is in charge now). An ignored ignorable one does not block.
+- **cpu**: power limits and GPU work; EPP and turbo are not written unless the id is in `ignore`. `state.cpu_blocked`
+  is the short text "<name> controls energy preference and CPU boost" and `state.cpu_blocked_by` the ids, so the EPP
+  and CPU boost controls show it and put that conflict's "Fix for me" right under them. (The `why` of `ppd` no longer
+  says "turbo": power-profiles-daemon 0.30 writes EPP/EPB and `platform_profile`; turbo stays left to it only because
+  OXP3 Deck does not split the two.)
+- Each answer row: `{id, name, kind, ignorable, ignored, why, fix, fix_units, fix_plan, fixed}` (`fix_units`: the
+  `FIXABLE` units of this id that systemd has loaded now, `[]` when Fix for me is not offered; `fix_plan`:
+  `{disable, stop}`, the units fix would disable (`UnitFileState` enabled, one `show` per unit at the scan) and stop
+  (running) now, for the confirm dialog, or null when not offered or `show` cannot tell; `fixed`: the record below, or
+  null); only active ones are listed. A failing `systemctl` gives one row `{id: "unknown", kind: "suspect", ...}`
+  ("could not list services: ...") that blocks nothing; Fix for me and Undo are then refused ("could not list
+  services").
+- Built with this: `_UNITS["hhd"]` also matches `hhd_local@*.service`; powerhw's "no RAPL power limits" problem names
+  the real modules, `intel_rapl_msr` and `processor_thermal_rapl` (not `intel_rapl_mmio`, which does not exist).
+
+#### Fix for me, Undo
+
+`FIXABLE` in power.py is the whitelist, a constant: `{"powerstation": ("powerstation.service",), "thermald":
+("thermald.service",), "oxp3-tdp-sync": ("oxp3-tdp-sync.service",), "onex3-tdp": ("onex3-tdp.service",), "ppd":
+("power-profiles-daemon.service",), "tuned": ("tuned-ppd.service", "tuned.service"), "intel_lpmd":
+("intel_lpmd.service",)}`. No unit name ever comes from the frontend or from a file: the frontend sends a conflict
+id; the record's units are checked against `FIXABLE[id]` when read.
+
+**`fix(ctx, cid)`** (`power_fix`), under `_LOCK`, in the executor (it is not a job; at most 2 systemctl runs of 30 s):
+1. `cid` must be a str key of `FIXABLE`, else `{ok: false, error: "power_fix: <cid> cannot be fixed by OXP3 Deck"}`.
+   `_rows(force=True)`: the conflict must be active now (`"<name> is not running"` otherwise) and systemctl must
+   have answered.
+2. For each unit of `FIXABLE[cid]` that systemd has loaded: `systemctl show --property=LoadState,UnitFileState,
+   ActiveState -- <unit>` (`Key=Value` lines). Skip `LoadState` other than `loaded` (not-found, masked: nothing to
+   do). Record `{unit, was_enabled: UnitFileState, was_active: ActiveState in (active, activating, reloading)}`.
+   When a record for `cid` already exists (Fix again after it came back), each unit keeps its earlier `was_enabled`
+   (the state before OXP3 Deck first touched it) unless it is `enabled` now (something enabled it again and this fix
+   disables it, so Undo must enable it); `was_active` becomes true if either says so. The record's other units stay
+   in it only while `show` still reads them `loaded` (an uninstalled or masked one is dropped).
+3. Save the record to power.json **before** running anything (`fixed[cid] = {at: time.time(), boot_id, units}`), so a
+   crash half-way still leaves an Undo.
+4. `systemctl --no-ask-password disable -- <units whose UnitFileState is enabled>` (never a static, indirect,
+   generated or alias unit: there is nothing to disable), then `systemctl --no-ask-password stop -- <units that
+   are active>`. Each through `sysexec.run` (clean env, stdin /dev/null, no shell, argv list), timeout 30 s, with
+   the absolute path `sysexec.which("systemctl") or "/usr/bin/systemctl"`.
+5. Re-read each unit (`show` again) for the answer's steps; `_rows(force=True)`; `_update_blocked`, and when it
+   cleared, `apply_at = now`; for a "cpu" id, when `_may_write`, `_apply` at once (EPP and turbo are ours again).
+   `p.recheck_at = now + FIX_RECHECK_S` (10 s): tick checks the conflicts again then (step 6 of tick also runs when
+   `recheck_at` is due), which catches a D-Bus restart.
+6. intel_lpmd only: read `/sys/devices/system/cpu/intel_pstate/max_perf_pct`; below 100 adds the note "Intel's
+   low-power daemon left the CPU's top speed at N %; a reboot restores it" (OXP3 Deck does not write it).
+7. Answer `PowerFixRes`: `ok` true when every command exited 0 and the conflict is gone; `steps` per command; `notes`;
+   `state`; `conflicts` (the fresh rows); `fixed` (all records). A failed command: `ok: false`, `error` = its last
+   stderr line ("<unit>: <text>"), the record stays (Undo still works for what did change).
+
+**`unfix(ctx, cid)`** (`power_unfix`): `cid` must be a `FIXABLE` key with a record. Each recorded unit (checked
+against `FIXABLE[cid]`) is `show`n first: one whose `LoadState` is not `loaded` (uninstalled, or masked by the user)
+is dropped from the record with the note "<unit> is no longer installed (or is masked); nothing to turn back on", so
+the record can always be cleared. Then, for the rest: `systemctl --no-ask-password enable -- <units whose
+was_enabled is "enabled">`, then `systemctl --no-ask-password start -- <units with was_active>`. Nothing else: a
+unit that was static or disabled is never enabled, one that was not running is not started. A unit whose command
+succeeded leaves the record; the record goes when it is empty. Then `_rows(force=True)` and `_update_blocked`: the
+conflict is back, so a "blocks" id blocks again (nothing is restored, as for any blocker) and a "cpu" id leaves EPP
+and turbo to it again. Answer `PowerFixRes` like fix.
+
+**Came back**: a row whose id has a record gets `fixed` with `came_back: true` (it is running again although OXP3
+Deck turned it off). The UI says who most likely did it (`ppd`, `tuned`: "the desktop's power mode switch or a game
+launcher started it again"; `powerstation`: "a Bazzite update turned it back on"; others: "something started it
+again") and offers "Fix again" (the same confirm) and Undo. A record whose units all run again and are enabled again
+(the user or the system turned them back on) is Undo's no-op case: Undo runs the same commands (harmless) and drops
+the record.
+
+**Known limit, said in the dialog**: power-profiles-daemon, tuned-ppd, thermald and intel_lpmd are D-Bus
+activated; a disabled unit still starts when a program asks for it (KDE's power applet, `powerprofilesctl`,
+CachyOS's `game-performance`). Only `mask` would stop that, and OXP3 Deck does not mask. So the ppd and tuned
+dialogs say "It may start again when the desktop or a game launcher asks for it; OXP3 Deck will tell you."
+
+**Records** (power.json `fixed`, survives a reboot so Undo works after one): `{"ppd": {"at": 1730800000.0,
+"boot_id": "…", "units": [{"unit": "power-profiles-daemon.service", "was_enabled": "enabled", "was_active":
+true}]}}`. `_norm_data` keeps only ids in `FIXABLE`, units in `FIXABLE[id]` (deduplicated), `was_enabled` a str of
+at most 32 chars, `was_active` a bool, `at` a number; anything else is dropped (power.json sits in a folder the user
+owns, so a planted record can at most enable and start a whitelisted unit). Missing = `{}`.
+
+Not offered (guidance only, in Details): the Decky plugins (Decky keeps loader.json in memory and would overwrite an
+edit by root; its `disablePlugin` route is not public API), hhd (stopping it can stop the controller), the steamos
+remote and Steam's own sliders, a locked limit, PL4 left low by another tool (reboot), an MMIO write that did not
+take, missing RAPL modules (no `modprobe`), no xe driver (Fixes tab), the `performance` governor (OXP3 Deck never
+writes the governor).
+
+Built (backend): `fix` also refuses a conflict found only by its process name (`fix_units` empty: "<name> was not
+started by systemd: OXP3 Deck cannot turn it off"; when its unit is masked: "<name> is masked; OXP3 Deck does not
+unmask services") and one whose listed units all `show` as not loaded; a failing
+`show` or a power.json that cannot be saved refuses with nothing run. A record keeps an earlier unit that is no longer
+in the listing while `show` reads it `loaded`. `ok` is false with "<name> is still running" when every command exited 0 but the conflict is still there (a
+D-Bus restart at once); the row then has `fixed.came_back`. Each step's `ok` needs its command's exit 0 and the
+re-read (`UnitFileState` no longer `enabled` after disable, `ActiveState` not active after stop). `unfix` writes
+nothing (nothing becomes OXP3 Deck's); its record keeps only the units whose command failed. `recheck_at` is set
+only while TDP control is on (a disabled tick is idle). `cpu_blocked` reads "<name> controls energy preference and
+CPU boost"; the steamos remote's file path moved from `fix` into `why`. Tests: `tests/test_power.py` `FixTest`
+with a stateful fake systemctl (`powerfake.Systemctl`).
+
+**Dialog texts** (`src/conflicts.ts`, `fixConfirm(row, powerOn)`; title, text, `lines` = the commands with
+`linesTitle` "Commands (run as root):", ok "Turn it off"). The text starts with a lead built from the row's
+`fix_plan`, so it says exactly what runs: "OXP3 Deck will stop <who> and keep it from starting at boot." (both), "OXP3
+Deck will stop <who>. It is not set to start at boot, so nothing else changes." (stop only), "OXP3 Deck will keep
+<who> from starting at boot. It is not running now." (disable only); the `lines` hold only those commands (without
+a plan: both, for every offered unit). Then "Nothing is uninstalled." ("Nothing is deleted." for the scripts); for a
+"cpu" id while power control is on, "Then OXP3 Deck can set energy preference and CPU boost."; then the rest below;
+then "Undo turns it back on."
+
+| id | Title | <who> | Rest |
+|---|---|---|---|
+| `ppd` | Turn off Power Profiles? | power-profiles-daemon | The power mode switch in Desktop Mode stops working. It may start again when the desktop or a game launcher asks for it; OXP3 Deck will tell you. |
+| `tuned` | Turn off TuneD? | TuneD (tuned-ppd and tuned) ("them") | The power mode switch in Desktop Mode stops working. It may start again when the desktop asks for it; OXP3 Deck will tell you. |
+| `intel_lpmd` | Turn off Intel's low-power daemon? | intel_lpmd | Light tasks and video may use a bit more battery; games are not affected. |
+| `thermald` | Turn off the thermal daemon? | thermald | It lowers the power limit on its own within seconds, so OXP3 Deck cannot hold yours. The CPU's own heat limit and the fan still protect the device; the case may get warmer at high power. |
+| `powerstation` | Turn off PowerStation? | PowerStation | Steam's own TDP slider stops working; OXP3 Deck's replaces it. On Bazzite, a system update may turn it back on; OXP3 Deck will tell you. |
+| `oxp3-tdp-sync`, `onex3-tdp` | Turn off <name>? | <name> | OXP3 Deck already sets these limits. |
+
+Undo confirm: title "Turn <name> back on?", text "OXP3 Deck turns back on what it turned off (<date>). Then <name>
+controls <energy preference and CPU boost | the power limits> again.", lines the enable/start commands, ok "Turn it
+back on". The Undo row's Details: "OXP3 Deck turned it off (<date>)." (`when()` gives only the time for today).
 
 ### main.py
 
@@ -790,6 +1132,8 @@ async def power_profile(self, appid, name, on)       # _mod("power").profile(sel
 async def power_game(self, appid)                    # _mod("power").game(self.ctx, appid)
 async def power_take_control(self)                   # _mod("power").take_control(self.ctx)
 async def power_import_sdtdp(self)                   # _mod("power").import_sdtdp(self.ctx)
+async def power_fix(self, cid)                       # _mod("power").fix(self.ctx, cid)
+async def power_unfix(self, cid)                     # _mod("power").unfix(self.ctx, cid)
 ```
 
 - `_main`: after the reshim check, `self._watch = asyncio.get_running_loop().create_task(self._power_watch())`
@@ -826,7 +1170,14 @@ export type PowerZone = {
 export type PowerConflict = {
   id: string; name: string; kind: "blocks" | "cpu" | "suspect";
   ignorable: boolean; ignored: boolean; why: string; fix: string;
+  fix_units: string[];                     // what Fix for me would stop and disable; [] = not offered
+  fix_plan?: { disable: string[]; stop: string[] } | null;   // what it would run now; null = cannot tell
+  fixed: PowerFixed | null;                // OXP3 Deck turned it off earlier (came_back: it runs again)
 };
+export type PowerFixedUnit = { unit: string; was_enabled: string; was_active: boolean };
+export type PowerFixed = { id: string; name: string; at: number; units: PowerFixedUnit[]; came_back: boolean };
+export type PowerFixStep = { unit: string; action: "disable" | "stop" | "enable" | "start"; ok: boolean;
+                             error: string | null };
 export type PowerOverridden = { what: string; ours: string; now: string; since: number; suspects: string[] };
 export type PowerApply = {
   ok: boolean; error: string | null; written: string[];
@@ -844,7 +1195,8 @@ export type PowerState = {
   range: PowerRange;
   overridden: PowerOverridden | null;
   blocked: string | null;                 // why nothing is written although enabled
-  cpu_blocked: string | null;             // why EPP and turbo are not written
+  cpu_blocked: string | null;             // "<name> controls energy preference and CPU boost"
+  cpu_blocked_by: string[];               // the conflict ids behind cpu_blocked (their Fix for me goes under EPP)
   last: PowerApply | null;                // the last apply
 };
 export type PowerInfo = {
@@ -854,6 +1206,7 @@ export type PowerInfo = {
   options: PowerOptions;
   profiles: Record<string, PowerProfile>;  // "default" always present
   conflicts: PowerConflict[];
+  fixed: PowerFixed[];                     // every record, also of conflicts that are gone (their Undo)
   boot: { taken_at: number } | null;
   sdtdp_found: boolean;                    // SimpleDeckyTDP's settings.json exists
   state: PowerState;
@@ -865,6 +1218,8 @@ export type PowerStateRes = Res & { state: PowerState | null };
 export type PowerChangeRes = Res & { state: PowerState | null; applied: PowerApply | null;
                                      conflicts?: PowerConflict[] };   // conflicts: a refused enable
 export type PowerImportRes = Res & { imported: string[]; skipped: string[]; state: PowerState | null };
+export type PowerFixRes = Res & { steps: PowerFixStep[]; notes: string[]; state: PowerState | null;
+                                  conflicts: PowerConflict[]; fixed: PowerFixed[]; applied: PowerApply | null };
 // Overview gains: power: PowerSummary | null
 ```
 
@@ -881,6 +1236,8 @@ export const power_profile = callable<[appid: string, name: string | null, on: b
 export const power_game = callable<[appid: string | null], PowerChangeRes>("power_game");
 export const power_take_control = callable<[], PowerChangeRes>("power_take_control");
 export const power_import_sdtdp = callable<[], PowerImportRes>("power_import_sdtdp");
+export const power_fix = callable<[cid: string], PowerFixRes>("power_fix");
+export const power_unfix = callable<[cid: string], PowerFixRes>("power_unfix");
 ```
 
 backend.ts wraps each one like the others (a failure gives `{ok: false, error, state: null, ...}`).
@@ -933,15 +1290,16 @@ SimpleDeckyTDP's files. Offered only when `sdtdp_found`.
 - **`src/components/PowerControls.tsx`**: `<PowerSection quick />` and the Power tab share it.
 
 **Quick Access panel**: a "Power" section after Status, before oxp3-tool (what is touched most in a game). Rows, all
-focusable with the D-pad, each with its description:
+focusable with the D-pad, each with its one-line description and Details (texts: "Frontend → Up-front text"):
 1. Status line: `effectiveLine` and the active profile ("Cyberpunk 2077 · on AC" / "Default · on battery").
-2. Red rows when relevant: `blocked` (with the conflict's fix), `overridden` (the drift text and a "Take control
+2. Red rows when relevant: `blocked` (with the conflict rows: Fix for me, Undo, How to fix), `overridden` (the drift text and a "Take control
    again" button), failed items of `last`, and every locked limit from `now.zones[].locked` (which lasts the boot,
-   while an apply skips a locked id): "MSR PL1 is locked by firmware at 25 W: the limit cannot go above 25 W (the
-   CPU uses the lower of the two)". The cached `power-info` (the conflict rows the fixes come from) reloads when
+   while an apply skips a locked id): "Limit capped at 25 W", one line "The device firmware won't allow more than
+   25 W.", the interface and "the lower of the two wins" in its Details. The cached `power-info` (the conflict rows the fixes come from) reloads when
    `blocked` or `overridden.since` changes.
 3. Toggle "TDP control". The first enable shows a confirm: what is written, that "off" restores the firmware values,
-   that a reboot does too. A refused enable shows each blocking conflict's name and fix under the toggle.
+   that a reboot does too. A refused enable shows each blocking conflict's row (with Fix for me) under the toggle; after a fix
+   that clears every blocker, the user taps the toggle again (the fix never turns power control on).
 4. When enabled:
    - Toggle "Profile for this game" (only while a game runs and `per_game`): on → `power_profile(appid, name, true)`
      (copy of the default), off → delete (confirm).
@@ -949,9 +1307,10 @@ focusable with the D-pad, each with its description:
    - Slider "Boost power" (PL2, `max(pl1, pl1_min)..pl2_max`, step 1 W). Moving PL1 above PL2 moves PL2 with it in
      the same change.
    - Slider "GPU max clock" (`gpu_min..gpu_max`, step 50 MHz, notch label "efficient" at `gpu_efficient`).
-   - Toggle "CPU boost" (turbo; disabled with `cpu_blocked` as its description).
+   - Toggle "CPU boost" (turbo; disabled with "Locked by <name>." while `cpu_blocked`, and the conflict row of
+     each `cpu_blocked_by` id, with its Fix for me, right under it).
    - EPP, GPU min, AC/battery split, the extended range and every profile live on the full page only.
-   - Each slider shows the firmware value while its field is null; the description says "(firmware value)".
+   - Each slider shows the firmware value while its field is null; the description says "(device default)".
 5. No "This game" changes: that section stays XeSS's.
 
 **Full page**: a "Power" tab (`MdBolt`), first in the list (the gear still opens Fixes). Sections, top to bottom:
@@ -964,8 +1323,10 @@ focusable with the D-pad, each with its description:
    (dropdown: Firmware, Performance, Balance performance, Balance power, Power saving), CPU boost (dropdown: Firmware,
    On, Off); "Use firmware values" (all null, confirm); "Delete profile" for a game. Editing a profile that is not
    active saves it without applying (the backend applies only the active key).
-4. Conflicts: every active one with its fix, Ignore for an ignorable one ("I have done that"), "Check again"
-   (`power_info(true)`).
+4. Conflicts ("Other power programs"): every active one as a conflict row (Fix for me / Fix again / Undo / How to
+   fix / "I've handled it"), then "Turned off by OXP3 Deck" (the records of conflicts that are gone, each with Undo),
+   then "Check again" (`power_info(true)`). The EPP dropdown also carries the conflict row of each `cpu_blocked_by`
+   id.
 5. Firmware: boot values per zone and the GPU range ("Turning TDP control off restores these"), PL1 base power.
 6. "Import from SimpleDeckyTDP" (when `sdtdp_found`), with the imported / skipped lines.
 
@@ -1026,11 +1387,49 @@ write (an MMIO lock) per path.
   epp) → the right profiles and skipped list; a missing file; a 2 MB file refused.
 - every public function answers a dict with `ok` and `error` on a tree with no power files at all.
 
-**`tests/test_main.py`**: the nine calls in `CALLS` (e.g. `"power_set": ("default", "main", {"pl1_w": 15})`);
+**Fix for me / Undo** (`tests/test_power.py`, `sysexec.run` patched with a recorder that answers `list-units`
+from the fixtures, `show` from a per-unit table and each command with a chosen rc):
+- `fix("ppd")` on the owner's units (fixture `units-cachyos-owner.txt`: power-profiles-daemon and thermald
+  active, powerstation not-found): records `{unit: "power-profiles-daemon.service", was_enabled: "enabled",
+  was_active: true}` in power.json **before** the first command; runs exactly `[systemctl, "--no-ask-password",
+  "disable", "--", "power-profiles-daemon.service"]` then `[..., "stop", "--", "power-profiles-daemon.service"]`;
+  every argv's first item is absolute; `env_extra` is not passed (clean env); no argv contains "mask", "--now",
+  "--runtime", "kill" or a unit outside `FIXABLE["ppd"]`; after it, `cpu_blocked` is null and EPP/turbo are
+  applied (enabled) or not written (disabled); `recheck_at` is set and the tick 10 s later re-scans.
+- `fix("tuned")` with only tuned-ppd loaded: one unit recorded and changed; a static unit is stopped but not
+  disabled; a not-found or masked unit is skipped.
+- `fix("thermald")` while enabled and blocked: `blocked` clears and `apply_at` is now; `fix("intel_lpmd")` with
+  `max_perf_pct` 60 → the note; 100 → no note.
+- refused, and nothing run: `fix("hhd")`, `fix("simpledeckytdp")`, `fix("../x")`, `fix(None)`, `fix(["ppd"])`, a
+  FIXABLE id that is not active now, systemctl `list-units` failing.
+- a failing `disable` (rc 1, stderr) → `ok: false` with that line, the record kept; `unfix` then enables only what
+  the record says.
+- `unfix("ppd")`: `enable` for `was_enabled == "enabled"` only, `start` for `was_active` only (a recorded `static` /
+  `disabled` unit is never enabled, a not-active one never started); the record goes; the conflict is back
+  (`cpu_blocked` again; a "blocks" id sets `blocked`, nothing restored). `unfix` without a record → refused.
+- came back: a record plus the unit active again → the row's `fixed.came_back` true; Fix again keeps the first
+  `was_enabled` ("enabled", not the "disabled" seen now); a unit first fixed while `disabled` and enabled again
+  later records "enabled" on Fix again, and Undo enables it.
+- Undo of a unit uninstalled or masked after the fix: no enable/start for it, the note, the record goes.
+- power.json `fixed` validation: an unknown id, a unit not in `FIXABLE[id]` (e.g. `sshd.service`, `../../x`), a
+  non-bool `was_active`, a 1000-char `was_enabled` → dropped; `options()` cannot write `fixed`.
+- no fix or undo without a call: `tick`, `enable`, `game`, AC and resume never run `disable`, `stop`, `enable` or
+  `start` (the recorder sees only `list-units` and `show`).
+- `CONFLICTS` fix texts contain no "mask"; `_UNITS["hhd"]` matches `hhd_local@jordan.service`; the no-RAPL problem
+  names `processor_thermal_rapl`.
+
+**`tests/test_main.py`**: the eleven calls in `CALLS` (with `"power_fix": ("ppd",)`, `"power_unfix": ("ppd",)`) (e.g. `"power_set": ("default", "main", {"pl1_w": 15})`);
 `Base.setUp` also sets `power` to `Raising()`; `_main` starts the watch task and `_unload` cancels it (no task left);
 a raising `tick` does not end the loop; power calls answer while a job runs; the overview answers with a raising power
 module (`power: null`). The signature test covers the `_mod("power")` calls.
 
+**`tests/js/conflicts.test.mjs`**: every id of power.py's `CONFLICTS` (read from the file) has a friendly name, a
+one-liner of at most 80 chars and no "sudo", "systemctl" or "/" in it; every FIXABLE id has a `fixConfirm` whose
+`lines` name each unit and whose text says "Undo"; ppd's and tuned's say "may start again"; no text says "mask"
+except "not masked"; `undoConfirm` lines are enable/start only. **`tests/js/text.test.mjs`**: `firstSentence`.
+**`tests/js/pages.test.mjs`** also: no `explain(` call with a second argument in `src/`; no `tooltip=` and no
+`explainer=` prop; no "sudo " in a `description=` or `explain(` string; `PowerControls.tsx` and `Power.tsx` render
+`<ConflictRow`; `power_fix(` and `power_unfix(` are each called only after a `confirm(` in the same function.
 **`tests/js/power.test.mjs`**: `makeWriter` with fake timers (trailing send, one in flight, merged pending, order,
 stale answer ignored, flush), `editSlot`, `shown`, `pl2Floor`, `clampW`, `effectiveLine`.
 **`tests/js/pages.test.mjs`**: `index.tsx` registers `onMainAppChange` and calls its stop in `onDismount`;
@@ -1040,7 +1439,10 @@ stale answer ignored, flush), `editSlot`, `shown`, `pl2Floor`, `clampW`, `effect
 
 On the device (owner, after the build): MSR and MMIO read-back under load (`act_freq` 2300 MHz at 35 W with
 `reasons` none), AC unplug and plug (MMIO reset re-applied), suspend and resume, a game switch, Steam's TDP slider
-flagged as drift, `enable(False)` back to 25/52 and 35/52 W.
+flagged as drift, `enable(False)` back to 25/52 and 35/52 W. Fix for me on power-profiles-daemon and thermald (EPP
+and CPU boost become settable; `systemctl is-enabled` reads disabled, nothing masked), Undo (both enabled and running
+again), then Fix again after starting CachyOS's game-performance (came back shown). The ☰ Details footer on a
+ToggleField, SliderField and DropdownItem, and A on a Status row with Details.
 
 ### Docs and credits
 
@@ -1048,6 +1450,9 @@ flagged as drift, `enable(False)` back to 25/52 and 35/52 W.
   `tests/powerfake.py`, `tests/test_powerhw.py`, `tests/test_power.py`, `tests/js/power.test.mjs`,
   `tests/fixtures/power/`; "State the plugin keeps" gets `power.json` and `/run/oxp3deck/power-run.json`; Frontend
   gets the Power section and tab (pointing here).
+- README (this change, done): replace "OXP3 Deck never stops, disables or masks another service" with the Fix for me
+  rule (stop and disable after a confirm, never mask or uninstall, Undo; the D-Bus "may start again" limit); the
+  conflicts table gets the Fix for me column and loses the powerstation mask advice.
 - README: "Power (TDP and GPU clocks)": what it sets and why both RAPL interfaces; "Moving from SimpleDeckyTDP"
   (Import, then disable or uninstall it in Decky, turn TDP control on); the conflicts table with the fixes above; the
   thermald trade-off; Steam's own TDP and GPU sliders off; "turning it off or rebooting gives the firmware values

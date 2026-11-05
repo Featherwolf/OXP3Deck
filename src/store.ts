@@ -6,7 +6,7 @@ import { useEffect, useReducer, useRef } from "react";
 
 import { job_status, power_set, power_state } from "./backend";
 import { makeWriter } from "./power";
-import type { Job, PowerChangeRes, PowerStateRes } from "./types";
+import type { Job, PowerChangeRes, PowerFixRes, PowerInfoRes, PowerStateRes } from "./types";
 
 type Entry = { data: unknown; inflight: Promise<unknown> | null; subs: Set<() => void>;
                loader: (() => Promise<unknown>) | null; stale: boolean };
@@ -205,6 +205,27 @@ export const notePower = (r: PowerChangeRes): string | null => {
   if (r.state) put<PowerStateRes>("power-state", { ok: true, error: null, state: r.state });
   invalidate("power-info");
   invalidate("overview");
+  return r.ok ? null : r.error || "refused";
+};
+
+/** How long after a fix or undo power-info reloads once more: after the backend's own recheck (+10 s). */
+export const FIX_RELOAD_MS = 12000;
+
+/**
+ * A Fix for me / Undo answer into the caches: the conflict rows, the records and the state from the answer at once
+ * (only when the backend answered with them), and power-info once more after FIX_RELOAD_MS, so a unit that a program
+ * started again shows as "came back" without a manual "Check again".
+ */
+export const notePowerFix = (r: PowerFixRes): string | null => {
+  if (r.state) put<PowerStateRes>("power-state", { ok: true, error: null, state: r.state });
+  const cur = peek<PowerInfoRes>("power-info");
+  if (r.state && cur?.ok && cur.info && Array.isArray(r.conflicts) && Array.isArray(r.fixed)) {
+    put<PowerInfoRes>("power-info", { ...cur, info: { ...cur.info, conflicts: r.conflicts, fixed: r.fixed, state: r.state } });
+  } else {
+    invalidate("power-info");
+  }
+  invalidate("overview");
+  setTimeout(() => invalidate("power-info"), FIX_RELOAD_MS);
   return r.ok ? null : r.error || "refused";
 };
 

@@ -2,19 +2,21 @@
 // Based on ClawDeck's QuickPanel (src/pages.tsx): the Quick Access panel.
 // Short: the state of the device, what waits for the user, and the running game's XeSS options. Everything else is
 // on the full page ("More").
-import { ButtonItem, Field, PanelSection, PanelSectionRow } from "@decky/ui";
+import { ButtonItem, PanelSection, PanelSectionRow } from "@decky/ui";
 import { FC, useEffect } from "react";
 
 import { applyFixes, blockedBy, installOxp3, installXess, useAction } from "../actions";
 import { get_overview, oxp3_status, xess_check_update, xess_state } from "../backend";
 import { GameControls } from "../components/GameControls";
-import { explain, Note, Problem, Status } from "../components/Hint";
+import { DetailsSpec, paragraphs } from "../components/confirm";
+import { explain, INFO, Note, Problem, Status, WithDetails } from "../components/Hint";
 import { JobView } from "../components/JobView";
 import { PowerSection } from "../components/PowerControls";
 import { RebootRow } from "../components/Reboot";
 import { openPage } from "../nav";
 import { useRunningApp } from "../steam";
 import { syncJob, useCurrentJob, useResource } from "../store";
+import { firstSentence, fitsOneLine } from "../text";
 import type { Overview, Oxp3Install, Oxp3Status, StatusRes, XessStateRes, XessSummary, XessUpdateCheck } from "../types";
 import { atLeast, cmpVersion, listText, platformName } from "../util";
 import { checkText, offerLabel, repairText, xessOffer } from "../xessoffer";
@@ -35,15 +37,17 @@ export const oxp3Offer = (i: Oxp3Install | null | undefined): { source: "bundled
   return null;
 };
 
-export const xessLine = (x: XessSummary | null | undefined): { ok: boolean | null; label: string; detail: string } => {
-  if (!x) return { ok: null, label: "XeSS XMX: …", detail: "" };
-  if (!x.installed) return { ok: false, label: "XeSS XMX: not installed", detail: "XeSS in games runs on DP4a, not on the XMX cores." };
-  const v = x.version ?? "";
-  if (x.relogin_needed) return { ok: null, label: `XeSS XMX ${v}: log out and in`, detail: "Installed, but Steam still runs with the old driver setting: log out and back in (or reboot)." };
-  if (x.status === "failed") return { ok: false, label: `XeSS XMX ${v}: driver failed`, detail: x.line ?? "The session check fell back to the system driver: games use DP4a." };
-  if (x.status === "unknown") return { ok: null, label: `XeSS XMX ${v}: not checked yet`, detail: "The driver check runs at the next log-in." };
-  return { ok: x.live, label: `XeSS XMX ${v}: ${x.live ? "on" : "driver ok, not live"}`,
-    detail: x.live ? (x.line ?? "The patched driver is the session's Vulkan driver.") : "The session does not use the patched driver yet: log out and back in." };
+/** The XeSS status row: label, one line up front, and the longer text for its Details. */
+export const xessLine = (x: XessSummary | null | undefined): { ok: boolean | null; label: string; detail: string; more: string } => {
+  const what = "Fast mode runs XeSS upscaling and frame generation on the GPU's XMX cores (xess-xmx-linux) instead of the slower DP4a path.";
+  if (!x) return { ok: null, label: "XeSS fast mode: …", detail: "", more: what };
+  if (!x.installed) return { ok: false, label: "XeSS fast mode: Off", detail: "Not installed. Games use the slower mode.", more: what };
+  const v = x.version ? ` (${x.version})` : "";
+  if (x.relogin_needed) return { ok: null, label: "XeSS fast mode: Log out needed", detail: "Log out and back in to turn it on.", more: `Installed${v}, but Steam still runs with the old driver setting: log out and back in (or reboot). ${what}` };
+  if (x.status === "failed") return { ok: false, label: "XeSS fast mode: Off", detail: "The fast driver failed its check.", more: `${x.line ?? "The session check fell back to the system driver: games use DP4a."}${v} ${what}` };
+  if (x.status === "unknown") return { ok: null, label: "XeSS fast mode: Not checked", detail: "Checked at the next log-in.", more: `Installed${v}. The driver check runs at the next log-in. ${what}` };
+  return x.live ? { ok: true, label: "XeSS fast mode: On", detail: `Installed${v}`, more: `${x.line ?? "The fast driver is the session's graphics driver."} ${what}` }
+    : { ok: null, label: "XeSS fast mode: Log out needed", detail: "Log out and back in to turn it on.", more: `Installed${v}; the session does not use the fast driver yet. ${what}` };
 };
 
 const StatusSection: FC<{ o: Overview | null; err: string | null; st: Oxp3Status | null }> = ({ o, err, st }) => {
@@ -52,8 +56,10 @@ const StatusSection: FC<{ o: Overview | null; err: string | null; st: Oxp3Status
     <PanelSection title="Status">
       <PanelSectionRow>
         {o && (
-          <Status ok={o.device.supported} label={o.device.supported ? (o.device.product ?? "ONEXPLAYER 3") : `${o.device.product ?? "Unknown device"}: not a ONEXPLAYER 3`}
-            detail={`${os}${o.platform ? "" : " · oxp3-tool supports Bazzite and CachyOS"}`} />
+          <Status ok={o.device.supported} label={o.device.supported ? "ONEXPLAYER 3" : "Not a ONEXPLAYER 3"}
+            detail={st?.os.name ?? platformName(o.platform)}
+            details={{ title: o.device.supported ? "ONEXPLAYER 3" : "Not a ONEXPLAYER 3", body: `${o.device.product ?? "Unknown device"} · ${os}. The fixes support the ONEXPLAYER 3 on Bazzite and CachyOS.`,
+              lines: [`vendor: ${o.device.vendor ?? "?"}`, `product: ${o.device.product ?? "?"}`] }} />
         )}
         {!o && !err && <Status ok={null} label="Reading the state…" />}
         <Problem what="Status" error={err} />
@@ -76,46 +82,66 @@ const Oxp3Section: FC<{ o: Overview; st: StatusRes | undefined; loading: boolean
   const recommended = (status?.fixes ?? []).filter((f) => f.state === "recommended");
   const attention = (status?.fixes ?? []).filter((f) => f.state === "damaged" || f.state === "incomplete");
   const applied = (status?.fixes ?? []).filter((f) => f.state === "applied").length;
+  const recD: DetailsSpec = {
+    title: `Recommended fixes (${recommended.length})`,
+    body: paragraphs(recommended.map((f) => `${f.title}: ${f.summary}. Takes effect ${f.takes_effect}.`)),
+  };
+  const applyD: DetailsSpec = {
+    title: `Apply recommended (${recommended.length})`,
+    body: `Applies ${recommended.length === 1 ? "this fix" : `these ${recommended.length} fixes`}. You see the plan first.${recommended.some((f) => /reboot/i.test(f.takes_effect)) ? " Some take effect after a reboot." : ""}`,
+  };
+  const instD: DetailsSpec | null = offer ? {
+    title: `${offer.update ? "Update" : "Install"} fixes tool`,
+    body: `The fixes tool (oxp3-tool) does the controller, sleep and screen fixes. ${offer.update ? "Updates" : "Installs"} it${offer.version ? ` to ${offer.version}` : ""} ${offer.source === "bundled" ? "from the copy in this plugin" : "from GitHub"}. Takes a few seconds; asks first.`,
+    lines: ["/usr/local/bin/oxp3-tool"],
+  } : null;
   return (
-    <PanelSection title="oxp3-tool">
+    <PanelSection title="Device fixes">
       <PanelSectionRow>
         <Status ok={usable ? true : false}
-          label={!i.installed ? "oxp3-tool is not installed" : usable ? `oxp3-tool ${i.version}` : `oxp3-tool ${i.version ?? "?"}: too old`}
-          detail={!i.installed ? "The controller, sleep and display fixes for the OXP3 come from it."
-            : !usable ? `OXP3 Deck needs ${i.min_version} or newer.`
-            : status ? `${applied} fix${applied === 1 ? "" : "es"} applied${status.can_change ? "" : " · this system is not supported, so nothing can be changed"}` : loading ? "Reading its status…" : undefined} />
+          label={!i.installed ? "Fixes tool not installed" : usable ? "Device fixes" : "Fixes tool too old"}
+          detail={!i.installed ? "Needed for controller, sleep and screen fixes"
+            : !usable ? "Update it to use the fixes."
+            : status ? `${applied} fix${applied === 1 ? "" : "es"} applied${status.can_change ? "" : " · this system is not supported"}` : loading ? "Reading…" : undefined}
+          details={{ title: "Fixes tool (oxp3-tool)", body: `OXP3 Deck needs ${i.min_version} or newer.${status && !status.can_change ? " This system is not supported, so nothing can be changed." : ""}`,
+            lines: [`installed: ${i.version ?? "none"}`, `path: ${i.path ?? "/usr/local/bin/oxp3-tool"}`] }} />
         {offer && (
-          <ButtonItem layout="below" disabled={!!inst.busy || !!act.busy || running}
-            onClick={() => inst.run("oxp3-tool", async () => blockedBy() ?? installOxp3(offer.source, offer.version, offer.update))}
-            description={explain(`${offer.update ? "Updates" : "Installs"} /usr/local/bin/oxp3-tool${offer.version ? ` to ${offer.version}` : ""} ${offer.source === "bundled" ? "from the copy in this plugin" : "from GitHub"}.`,
-              "Takes a few seconds; asks first.")}>
-            {inst.busy ? "Working…" : `${offer.update ? "Update" : "Install"} oxp3-tool`}
-          </ButtonItem>
+          <WithDetails details={instD}>
+            <ButtonItem layout="below" disabled={!!inst.busy || !!act.busy || running}
+              onClick={() => inst.run("oxp3-tool", async () => blockedBy() ?? installOxp3(offer.source, offer.version, offer.update))}
+              description={explain("Takes a few seconds.")}>
+              {inst.busy ? "Working…" : `${offer.update ? "Update" : "Install"} fixes tool${INFO}`}
+            </ButtonItem>
+          </WithDetails>
         )}
-        <Problem what={offer?.update ? "Update oxp3-tool" : "Install oxp3-tool"} error={inst.busy ? null : inst.error} />
-        {usable && st && !st.ok && <Problem what="oxp3-tool status" error={st.error} />}
+        <Problem what={offer?.update ? "Update fixes tool" : "Install fixes tool"} error={inst.busy ? null : inst.error} />
+        {usable && st && !st.ok && <Problem what="Fixes status" error={st.error} />}
       </PanelSectionRow>
       {usable && status && (
         <PanelSectionRow>
-          {status.warnings.map((w, n) => <Status key={n} ok={false} label="Warning" detail={w} />)}
-          {recommended.map((f) => (
-            <Field key={f.id} focusable bottomSeparator="none" label={f.title}
-              description={explain(f.summary, `Takes effect ${f.takes_effect}.`)} />
-          ))}
-          {recommended.length > 0 && status.can_change && (
-            <ButtonItem layout="below" disabled={!!act.busy || !!inst.busy || running}
-              onClick={() => act.run("apply", async () => blockedBy() ?? applyFixes(recommended, {}, "Apply the recommended fixes"))}
-              description={explain(`Applies ${recommended.length === 1 ? "this fix" : `these ${recommended.length} fixes`}. You see oxp3-tool's plan first.`,
-                recommended.some((f) => /reboot/i.test(f.takes_effect)) ? "Some take effect after a reboot." : undefined)}>
-              {act.busy === "apply" ? "Reading the plan…" : `Apply recommended (${recommended.length})`}
-            </ButtonItem>
+          {status.warnings.map((w, n) => <Status key={n} ok={false} label="Warning" detail={firstSentence(w)}
+            details={fitsOneLine(w) ? null : { title: "Warning", body: w }} />)}
+          {recommended.length > 0 && (
+            <Status ok={null} label={`Recommended fixes (${recommended.length})`} details={recD}
+              detail={firstSentence(recommended.map((f) => f.title).join(", "))} />
           )}
-          {recommended.length === 0 && attention.length === 0 && <Status ok label="All recommended fixes are applied" />}
+          {recommended.length > 0 && status.can_change && (
+            <WithDetails details={applyD}>
+              <ButtonItem layout="below" disabled={!!act.busy || !!inst.busy || running}
+                onClick={() => act.run("apply", async () => blockedBy() ?? applyFixes(recommended, {}, "Apply the recommended fixes"))}
+                description={explain("Shows what will change before anything happens.")}>
+                {act.busy === "apply" ? "Reading the plan…" : `Apply recommended (${recommended.length})${INFO}`}
+              </ButtonItem>
+            </WithDetails>
+          )}
+          {recommended.length === 0 && attention.length === 0 && <Status ok label="Fixes up to date" />}
           {attention.length > 0 && (
-            <ButtonItem layout="below" onClick={() => openPage("fixes")}
-              description={`${listText(attention.map((f) => f.title))}: ${attention.length === 1 ? "needs" : "need"} a look.`}>
-              Fixes needing a look ({attention.length})
-            </ButtonItem>
+            <WithDetails details={{ title: "Fixes need attention", body: listText(attention.map((f) => f.title)) }}>
+              <ButtonItem layout="below" onClick={() => openPage("fixes")}
+                description={explain("Open the Fixes tab to repair them.")}>
+                {`Fixes need attention (${attention.length})${INFO}`}
+              </ButtonItem>
+            </WithDetails>
           )}
           <Problem what="Apply" error={act.busy ? null : act.error} />
         </PanelSectionRow>
@@ -135,24 +161,24 @@ const XessSection: FC<{ o: Overview }> = ({ o }) => {
   const offer = xessOffer(o.xess.installed, o.xess.version, x, chk.data);
   const busy = !!act.busy || job?.state === "running";
   return (
-    <PanelSection title="XeSS XMX">
+    <PanelSection title="XeSS">
       <PanelSectionRow>
-        <Status ok={line.ok} label={line.label} detail={line.detail} />
+        <Status ok={line.ok} label={line.label} detail={line.detail} details={{ title: "XeSS fast mode", body: line.more, lines: o.xess.line ? [o.xess.line] : undefined }} />
         {offer.kind ? (
-          <ButtonItem layout="below" disabled={busy}
-            onClick={() => act.run("xess", async () => blockedBy() ?? installXess(offer, x, o.user))}
-            description={explain(offer.kind === "update" ? `Updates xess-xmx-linux ${o.xess.version ?? ""} to ${offer.latest}.`
-              : offer.kind === "repair" ? repairText(offer)
-              : "Installs xess-xmx-linux (XeSS super resolution and frame generation on the XMX cores) from GitHub.",
-              offer.kind === "repair" ? "Asks first." : "Then log out and back in; asks first.")}>
-            {act.busy === "xess" ? "Working…" : offerLabel(offer)}
-          </ButtonItem>
+          <WithDetails details={{ title: offerLabel(offer), body: offer.kind === "update" ? `Updates xess-xmx-linux ${o.xess.version ?? ""} to ${offer.latest}. Then log out and back in; asks first.`
+            : offer.kind === "repair" ? `${repairText(offer)} Asks first.`
+            : "Installs xess-xmx-linux (XeSS upscaling and frame generation on the XMX cores) from GitHub. Then log out and back in; asks first." }}>
+            <ButtonItem layout="below" disabled={busy}
+              onClick={() => act.run("xess", async () => blockedBy() ?? installXess(offer, x, o.user))}
+              description={explain(offer.kind === "repair" ? "Runs the installer again." : "Faster XeSS upscaling and frame generation in games.")}>
+              {act.busy === "xess" ? "Working…" : `${offer.kind === "install" ? "Install XeSS fast mode" : offerLabel(offer)}${INFO}`}
+            </ButtonItem>
+          </WithDetails>
         ) : (
           <ButtonItem layout="below" disabled={busy || chk.loading}
             onClick={() => act.run("check", async () => { const r = await chk.reload(); return r && !r.ok ? r.error : null; })}
-            description={explain("Asks GitHub for the newest xess-xmx-linux release. Changes nothing.",
-              chk.data?.ok ? `${checkText(chk.data, o.xess.installed, o.xess.version)}.` : undefined)}>
-            {chk.loading ? "Checking…" : "Check for an update"}
+            description={explain(chk.data?.ok ? firstSentence(checkText(chk.data, o.xess.installed, o.xess.version)) : "Changes nothing.")}>
+            {chk.loading ? "Checking…" : "Check for XeSS update"}
           </ButtonItem>
         )}
         <Problem what="XeSS" error={act.error} />
@@ -178,14 +204,14 @@ export const QuickPanel: FC = () => {
       {o && <XessSection o={o} />}
       {app && (
         <PanelSection title="This game">
-          <PanelSectionRow><Note label={app.name}>XeSS options for this game, written into its Steam launch options.</Note></PanelSectionRow>
+          <PanelSectionRow><Note label={app.name} details={{ title: app.name, body: "Saved in the game's Steam launch options. Changes apply the next time you start it." }}>XeSS settings for this game</Note></PanelSectionRow>
           <GameControls app={app} quick running />
         </PanelSection>
       )}
       <PanelSection>
         <PanelSectionRow>
           <ButtonItem layout="below" onClick={() => openPage(app ? "games" : "fixes")}
-            description="Power profiles, every fix, the button layout, XeSS details, games, the kernel and the logs.">More</ButtonItem>
+            description={explain("Profiles, fixes, buttons, XeSS and more.")}>All settings</ButtonItem>
         </PanelSectionRow>
       </PanelSection>
     </>

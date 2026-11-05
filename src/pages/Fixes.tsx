@@ -5,11 +5,13 @@ import { FC, useState } from "react";
 
 import { applyFixes, blockedBy, revertFixes, useAction } from "../actions";
 import { get_overview, oxp3_catalog, oxp3_status } from "../backend";
-import { explain, Note, Problem, Status } from "../components/Hint";
+import { DetailsSpec, paragraphs } from "../components/confirm";
+import { explain, label, Note, Problem, Status, WithDetails } from "../components/Hint";
 import { JobView, TaskSection } from "../components/JobView";
 import { RebootRow } from "../components/Reboot";
 import { openPage } from "../nav";
 import { useCurrentJob, useResource } from "../store";
+import { firstSentence, fitsOneLine } from "../text";
 import type { ApplyOpts, CatalogRes, FixState, Overview, Oxp3Catalog, Oxp3CatalogFix, Oxp3Fix, StatusRes } from "../types";
 import { oxp3Usable } from "./Quick";
 
@@ -23,6 +25,12 @@ const STATE_TEXT: Record<FixState, string> = {
   reverting: "reverted; a reboot finishes it",
   incomplete: "an earlier run did not finish (apply or revert it)",
   unknown: "unknown (oxp3-tool's state file could not be read)",
+};
+
+/** The one word a fix row shows up front. */
+const STATE_SHORT: Record<FixState, string> = {
+  applied: "Applied", damaged: "Needs repair", recommended: "Recommended", optional: "Optional", experimental: "Experimental",
+  "n/a": "Not needed", reverting: "Reboot pending", incomplete: "Needs repair", unknown: "Unknown",
 };
 
 const PENDING_TEXT = { reboot: "Waits for a reboot.", "inputplumber-restart": "The controller map loads at the next reboot." };
@@ -44,10 +52,11 @@ export const NeedsOxp3: FC<{ ov: Overview | undefined; err?: string | null }> = 
     <PanelSectionRow>
       {!ov ? <Status ok={null} label="Reading…" />
         : !ov.ok ? <Problem what="Overview" error={ov.error} />
-        : <Status ok={false} label={ov.oxp3.installed ? `oxp3-tool ${ov.oxp3.version ?? "?"} is too old` : "oxp3-tool is not installed"}
-            detail={`Install or update it (${ov.oxp3.min_version} or newer) in the Quick Access panel or under Updates & logs.`} />}
+        : <Status ok={false} label={ov.oxp3.installed ? "Fixes tool too old" : "Fixes tool not installed"}
+            detail="Install it to use this page."
+            details={{ title: "Fixes tool", body: `OXP3 Deck needs oxp3-tool ${ov.oxp3.min_version} or newer for the device fixes. Install or update it in the Quick Access panel or under Updates & logs.` }} />}
       <Problem what="oxp3-tool" error={err} />
-      {ov?.ok && <ButtonItem layout="below" onClick={() => openPage("updates")}>Updates & logs</ButtonItem>}
+      {ov?.ok && <ButtonItem layout="below" onClick={() => openPage("updates")} description={explain("Install the fixes tool there.")}>Updates & logs</ButtonItem>}
     </PanelSectionRow>
   </PanelSection>
 );
@@ -64,43 +73,62 @@ const FixRow: FC<{ f: Oxp3Fix; c: Oxp3CatalogFix | undefined; cat: Oxp3Catalog |
     if (f.id === "oled-profile" && minRefresh !== null) opts.min_refresh = minRefresh;
     if (f.id === "nvme-resume" && anySsd) opts.any_ssd = true;
     const disabled = !!act.busy || running;
-    const details = c?.details ? c.details.replace(/\n/g, " ") : f.summary;
+    const fixD: DetailsSpec = {
+      title: f.title,
+      body: paragraphs([
+        `${STATE_TEXT[f.state] ?? f.state}${f.applied_at ? ` (${f.applied_at})` : ""}.`,
+        c?.details ? c.details.replace(/\n/g, " ") : f.summary,
+        `Takes effect ${f.takes_effect}.`,
+        f.pending ? PENDING_TEXT[f.pending] : null,
+        ...f.notes,
+      ]),
+      lines: [`oxp3-tool fix id: ${f.id}`],
+    };
+    const short = f.pending ? "Reboot pending" : STATE_SHORT[f.state] ?? f.state;
+    const refreshD: DetailsSpec | null = cat ? { title: "Lowest refresh rate", body: `The lowest refresh rate the display profile offers Game Mode (default ${cat.min_refresh.default ?? cat.min_refresh.max} Hz; below that is untested). Takes effect the next time Game Mode starts.` } : null;
+    const ssdD: DetailsSpec = { title: "Apply even without the problem", body: "The fixes tool applies this only with the Predator GM7 SSD or a logged resume failure; this applies it anyway. Costs a little battery while asleep; takes effect after a reboot.", lines: ["--any-ssd"] };
+    const applyD: DetailsSpec = { title: appliedLike ? "Apply again" : "Apply", body: paragraphs([c?.details ? c.details.replace(/\n/g, " ") : f.summary, `Takes effect ${f.takes_effect}. You see the plan first.`]) };
+    const revertD: DetailsSpec = { title: "Undo this fix", body: `Removes what this fix installed and puts back what it replaced. Undone ${f.takes_effect}. Asks first.` };
     return (
       <>
         <PanelSectionRow>
           <Status ok={f.state === "applied" ? true : f.state === "damaged" || f.state === "incomplete" ? false : null}
-            label={f.title}
-            detail={`${STATE_TEXT[f.state] ?? f.state}${f.applied_at ? ` (${f.applied_at})` : ""}. ${f.pending ? PENDING_TEXT[f.pending] + " " : ""}${f.summary}.`} />
-          {!!f.notes.length && <Note>{f.notes.map((n, i) => <div key={i}>{n}</div>)}</Note>}
+            label={f.title} detail={short} details={fixD} />
           {f.id === "oled-profile" && cat && canApply && (
-            <SliderField label="Lowest refresh rate" value={minRefresh ?? Number(f.options?.min_refresh ?? cat.min_refresh.default ?? cat.min_refresh.max)}
-              min={cat.min_refresh.min} max={cat.min_refresh.max} step={1} showValue valueSuffix=" Hz" disabled={disabled}
-              onChange={setMinRefresh}
-              description={explain(`The lowest refresh rate the display profile offers Game Mode (default ${cat.min_refresh.default ?? cat.min_refresh.max} Hz; below that is untested).`,
-                "Used when you tap Apply below; takes effect the next time Game Mode starts.")} />
+            <WithDetails details={refreshD}>
+              <SliderField label={label("Lowest refresh rate", refreshD)} value={minRefresh ?? Number(f.options?.min_refresh ?? cat.min_refresh.default ?? cat.min_refresh.max)}
+                min={cat.min_refresh.min} max={cat.min_refresh.max} step={1} showValue valueSuffix=" Hz" disabled={disabled}
+                onChange={setMinRefresh}
+                description={explain("Used when you tap Apply.")} />
+            </WithDetails>
           )}
           {f.id === "nvme-resume" && canApply && !appliedLike && f.state !== "recommended" && (
-            <ToggleField label="Apply without signs of the problem" checked={anySsd} disabled={disabled} onChange={setAnySsd}
-              description={explain("oxp3-tool applies this only with the Predator GM7 SSD or a logged resume failure; this applies it anyway (--any-ssd).",
-                "Costs a little battery while asleep; takes effect after a reboot.")} />
+            <WithDetails details={ssdD}>
+              <ToggleField label={label("Apply even without the problem", ssdD)} checked={anySsd} disabled={disabled} onChange={setAnySsd}
+                description={explain("Costs a little battery during sleep.")} />
+            </WithDetails>
           )}
           {f.id === "buttons" && (
             <ButtonItem layout="below" onClick={() => openPage("buttons")}
-              description="Choose what each key does; Apply there applies this fix with your layout.">Button layout</ButtonItem>
+              description={explain("Choose what each key does.")}>Choose button layout</ButtonItem>
           )}
           {canApply && (
-            <ButtonItem layout="below" disabled={disabled}
-              onClick={() => act.run("apply", async () => blockedBy() ?? applyFixes([f], opts, `${appliedLike ? "Re-apply" : "Apply"}: ${f.title}`))}
-              description={explain(details, `Takes effect ${f.takes_effect}. You see oxp3-tool's plan first.`)}>
-              {act.busy === "apply" ? "Reading the plan…" : appliedLike ? "Apply again" : "Apply"}
-            </ButtonItem>
+            <WithDetails details={applyD}>
+              <ButtonItem layout="below" disabled={disabled}
+                onClick={() => act.run("apply", async () => blockedBy() ?? applyFixes([f], opts, `${appliedLike ? "Re-apply" : "Apply"}: ${f.title}`))}
+                description={explain("Shows what changes first.")}>
+                {act.busy === "apply" ? "Reading the plan…" : label(appliedLike ? "Apply again" : "Apply", applyD)}
+              </ButtonItem>
+            </WithDetails>
           )}
           {canRevert && (
-            <ButtonItem layout="below" disabled={disabled}
-              onClick={() => act.run("revert", async () => blockedBy() ?? revertFixes([f]))}
-              description={explain("Removes what this fix installed and puts back what it replaced.", `Undone ${f.takes_effect}. Asks first.`)}>
-              {act.busy === "revert" ? "Working…" : "Revert"}
-            </ButtonItem>
+            <WithDetails details={revertD}>
+              <ButtonItem layout="below" disabled={disabled}
+                onClick={() => act.run("revert", async () => blockedBy() ?? revertFixes([f]))}
+                description={explain("Puts the original files back.")}>
+                {act.busy === "revert" ? "Working…" : label("Undo this fix", revertD)}
+              </ButtonItem>
+            </WithDetails>
           )}
           <Problem what={f.title} error={act.error} />
         </PanelSectionRow>
@@ -120,18 +148,19 @@ export const FixesTab: FC = () => {
       <TaskSection />
       <PanelSection title="oxp3-tool status">
         <PanelSectionRow>
-          {!status && st.loading && <Status ok={null} label="Reading oxp3-tool status…" detail="It checks the controller, the display and the boot entries: a few seconds." />}
+          {!status && st.loading && <Status ok={null} label="Reading the device's state…" detail="A few seconds." />}
           {!status && !st.loading && running && <Status ok={null} label="The status is read when the running task has finished." />}
           <Problem what="oxp3-tool status" error={st.data && !st.data.ok ? st.data.error : null} />
           {status && !status.can_change && (
-            <Status ok={false} label="Nothing can be changed here" detail="oxp3-tool changes only a ONEXPLAYER 3 running Bazzite or CachyOS." />
+            <Status ok={false} label="This system can't be changed" detail="Only ONEXPLAYER 3 on Bazzite or CachyOS." />
           )}
-          {status?.warnings.map((w, i) => <Status key={i} ok={false} label="Warning" detail={w} />)}
-          {status?.notes.map((n, i) => <Note key={i}>{n}</Note>)}
+          {status?.warnings.map((w, i) => <Status key={i} ok={false} label="Warning" detail={firstSentence(w)}
+            details={fitsOneLine(w) ? null : { title: "Warning", body: w }} />)}
+          {status?.notes.map((n, i) => <Note key={i} details={fitsOneLine(n) ? null : { title: "Note", body: n }}>{firstSentence(n)}</Note>)}
           <ButtonItem layout="below" disabled={!!act.busy || running || st.loading}
             onClick={() => act.run("refresh", async () => { const r = await st.reload(); return r && !r.ok ? r.error : null; })}
-            description="Runs oxp3-tool status again (a few seconds). Changes nothing.">
-            {st.loading ? "Reading…" : "Read the status again"}
+            description={explain("Changes nothing.")}>
+            {st.loading ? "Reading…" : "Refresh"}
           </ButtonItem>
           <Problem what="Refresh" error={act.error} />
         </PanelSectionRow>
@@ -146,8 +175,10 @@ export const FixesTab: FC = () => {
             {group("display").map((f) => <FixRow key={f.id} f={f} c={byId.get(f.id)} cat={catalog} canChange={status.can_change} running={running} />)}
             {status.refresh && (
               <PanelSectionRow>
-                <Note label="Display refresh">{status.refresh.summary.map((l, i) => <div key={i}>{l}</div>)}</Note>
-                {status.refresh.advice.map((a, i) => <Note key={i} label={i === 0 ? "Advice" : undefined}>{a}</Note>)}
+                <Note label="Display refresh" details={{ title: "Display refresh", body: paragraphs([...status.refresh.summary, ...status.refresh.advice]) }}>
+                  {firstSentence(status.refresh.summary[0] ?? "")}</Note>
+                {status.refresh.advice.map((a, i) => <Note key={i} label={i === 0 ? "Tip" : undefined}
+                  details={fitsOneLine(a) ? null : { title: "Tip", body: a }}>{firstSentence(a)}</Note>)}
               </PanelSectionRow>
             )}
           </PanelSection>

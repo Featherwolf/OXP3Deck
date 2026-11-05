@@ -182,7 +182,14 @@ export type PowerZone = {
 export type PowerConflict = {
   id: string; name: string; kind: "blocks" | "cpu" | "suspect";
   ignorable: boolean; ignored: boolean; why: string; fix: string;
+  fix_units: string[];                     // what Fix for me would stop and disable; [] = not offered
+  fix_plan?: { disable: string[]; stop: string[] } | null;   // what it would run now; null = cannot tell
+  fixed: PowerFixed | null;                // OXP3 Deck turned it off earlier (came_back: it runs again)
 };
+export type PowerFixedUnit = { unit: string; was_enabled: string; was_active: boolean };
+export type PowerFixed = { id: string; name: string; at: number; units: PowerFixedUnit[]; came_back: boolean };
+export type PowerFixStep = { unit: string; action: "disable" | "stop" | "enable" | "start"; ok: boolean;
+                             error: string | null };
 export type PowerOverridden = { what: string; ours: string; now: string; since: number; suspects: string[] };
 export type PowerApply = {
   ok: boolean; error: string | null; written: string[];
@@ -201,7 +208,8 @@ export type PowerState = {
   range: PowerRange;
   overridden: PowerOverridden | null;
   blocked: string | null;                 // why nothing is written although enabled
-  cpu_blocked: string | null;             // why EPP and turbo are not written
+  cpu_blocked: string | null;             // "<name> controls energy preference and CPU boost"
+  cpu_blocked_by: string[];               // the conflict ids behind cpu_blocked (their Fix for me goes under EPP)
   last: PowerApply | null;                // the last apply
 };
 export type PowerInfo = {
@@ -211,6 +219,7 @@ export type PowerInfo = {
   options: PowerOptions;
   profiles: Record<string, PowerProfile>;  // "default" always present
   conflicts: PowerConflict[];
+  fixed: PowerFixed[];                     // every record, also of conflicts that are gone (their Undo)
   boot: { taken_at: number } | null;
   sdtdp_found: boolean;                    // SimpleDeckyTDP's settings.json exists
   state: PowerState;
@@ -222,3 +231,5 @@ export type PowerStateRes = Res & { state: PowerState | null };
 export type PowerChangeRes = Res & { state: PowerState | null; applied: PowerApply | null;
                                      conflicts?: PowerConflict[] };   // conflicts: a refused enable
 export type PowerImportRes = Res & { imported: string[]; skipped: string[]; state: PowerState | null };
+export type PowerFixRes = Res & { steps: PowerFixStep[]; notes: string[]; state: PowerState | null;
+                                  conflicts: PowerConflict[]; fixed: PowerFixed[]; applied: PowerApply | null };

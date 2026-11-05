@@ -11,6 +11,15 @@ export type ConfirmOpts = {
   destructive?: boolean;
 };
 
+const Lines = ({ lines, title }: { lines: string[]; title: string }) => (
+  <>
+    <div style={{ marginTop: 12, fontWeight: "bold" }}>{title}</div>
+    <div style={{ fontFamily: "monospace", fontSize: "0.85em" }}>
+      {lines.map((l, i) => <div key={i} style={{ wordBreak: "break-word" }}>{l}</div>)}
+    </div>
+  </>
+);
+
 /**
  * Ask before anything that changes the system. Resolves true only on OK; Cancel, B or closing the dialog any other
  * way gives false.
@@ -19,16 +28,9 @@ export const confirm = (o: ConfirmOpts): Promise<boolean> => new Promise((resolv
   let settled = false;
   const done = (v: boolean) => { if (!settled) { settled = true; resolve(v); } };
   const body = (
-    <div style={{ whiteSpace: "normal" }}>
+    <div style={{ whiteSpace: "normal", maxHeight: "60vh", overflowY: "auto" }}>
       {o.text}
-      {!!o.lines?.length && (
-        <>
-          <div style={{ marginTop: 12, fontWeight: "bold" }}>{o.linesTitle ?? "Planned changes:"}</div>
-          <div style={{ maxHeight: "40vh", overflowY: "auto", fontFamily: "monospace", fontSize: "0.85em" }}>
-            {o.lines.map((l, i) => <div key={i} style={{ wordBreak: "break-word" }}>{l}</div>)}
-          </div>
-        </>
-      )}
+      {!!o.lines?.length && <Lines lines={o.lines} title={o.linesTitle ?? "Planned changes:"} />}
     </div>
   );
   try {
@@ -43,3 +45,28 @@ export const confirm = (o: ConfirmOpts): Promise<boolean> => new Promise((resolv
     done(false);
   }
 });
+
+/** What a row's Details window shows: the explanation, then the technical names as monospace lines. */
+export type DetailsSpec = { title: string; body: ReactNode; lines?: string[]; linesTitle?: string };
+
+/** A paragraph per string, for a Details body built from plain texts (conflicts.ts). */
+export const paragraphs = (ps: (string | null | undefined | false)[]): ReactNode => (
+  <>{ps.filter(Boolean).map((p, i) => <div key={i} style={{ marginTop: i ? 8 : 0 }}>{p}</div>)}</>
+);
+
+/**
+ * The Details window of a row (DESIGN.md "Frontend → Details"): one "Close" button, a body that scrolls with the
+ * D-pad. Steam Game Mode has no hover, so this replaces tooltips.
+ */
+export const showDetails = (d: DetailsSpec): void => {
+  const body = (
+    <div style={{ whiteSpace: "normal", maxHeight: "60vh", overflowY: "auto" }}>
+      {d.body}
+      {!!d.lines?.length && <Lines lines={d.lines} title={d.linesTitle ?? "Technical:"} />}
+    </div>
+  );
+  try {
+    showModal(<ConfirmModal bAlertDialog strTitle={d.title} strDescription={body} strOKButtonText="Close"
+      onOK={() => undefined} onCancel={() => undefined} />);
+  } catch { /* the modal root is gone while the plugin unloads */ }
+};

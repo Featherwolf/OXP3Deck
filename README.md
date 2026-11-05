@@ -48,12 +48,18 @@ folder.
 
 ## First steps
 
+**Reading the settings.** Every row shows one short line. A label ending in **ⓘ** has more: move onto it and press
+the **☰** (Options) button for its **Details** window (on a status line, **A** opens it too). Details say when a
+setting takes effect, what to watch out for, how to fix a problem, and the technical names (PL1, EPP, service names,
+paths). Steam Game Mode has no mouse hover, so there are no tooltips.
+
 1. Open **OXP3 Deck** in Quick Access. **Status** shows the device and the system.
-2. If oxp3-tool is missing or too old (the plugin needs 0.4.1 or later), tap **Install** or **Update**. It puts
+2. If the fixes tool (oxp3-tool) is missing or too old (the plugin needs 0.4.1 or later), tap **Install fixes tool**
+   or **Update fixes tool**. It puts
    oxp3-tool at `/usr/local/bin/oxp3-tool`, where `get.sh` puts it, so `sudo oxp3-tool` keeps working in Konsole.
-3. Tap **Apply** under the recommended fixes. It shows the plan and asks first. If a fix needs a reboot, a
-   **Reboot** button appears.
-4. Close any game, then tap **Install XeSS XMX**. It downloads the newest release (about 16 MB) and runs its
+3. Tap **Apply recommended** under **Device fixes**. It shows the plan and asks first. If a fix needs a reboot,
+   **Reboot to finish** appears.
+4. Close any game, then tap **Install XeSS fast mode**. It downloads the newest release (about 16 MB) and runs its
    `install.sh` as your user. That script downloads Intel's shader compiler and XeSS SDK, a few hundred MB more, so
    this takes a while.
    - Already installed by hand, for example in `~/Documents/xess-xmx-linux-20261031`? The plugin finds it and
@@ -65,20 +71,24 @@ folder.
 
 **Quick panel** (Quick Access):
 
-- **Status:** the device and OS. A red **Do not reboot** line when oxp3-tool could not finish rebuilding the boot
-  entries. **Reboot to finish** when a change waits for a reboot. The running task and its last log line.
-- **Power:** what the power limits and the GPU clock are now, and the active profile. **TDP control** on or off,
-  then **Profile for this game**, **Sustained power**, **Boost power**, **GPU max clock** and **CPU boost**. Red
-  lines when another power manager is in the way or something changed the limits behind OXP3 Deck's back.
-- **oxp3-tool:** Install or Update when it is missing or old. The recommended fixes not applied yet, with Apply.
-- **XeSS:** the driver status (is the patched driver in use, is a re-login needed) and Install, Update or Repair.
-- **This game** (only while a game runs): the XeSS launch options as dropdowns, and advice for that game.
-- **More:** the full page, with these tabs.
+- **Status:** the device and OS. A red **Do not reboot yet** line when oxp3-tool could not finish rebuilding the
+  boot entries (its Details say what to run). **Reboot to finish** when a change waits for a reboot. The running
+  task and its last log line (the whole log in its Details).
+- **Power:** the power limits now ("15 W steady · 25 W boost") and the active profile. **Power control (TDP)** on
+  or off, then **Separate profile for <game>**, **Sustained power**, **Boost power**, **GPU maximum speed** and
+  **CPU boost**. Red lines when another power program is in the way, each with **Fix for me** where OXP3 Deck can
+  turn it off for you (see [Other power managers](#other-power-managers)).
+- **Device fixes:** Install or Update the fixes tool when it is missing or old. The recommended fixes not applied
+  yet, with **Apply recommended**.
+- **XeSS:** **XeSS fast mode: On / Off / Log out needed**, and Install, Update or Repair.
+- **This game** (only while a game runs): the XeSS settings as dropdowns, and tips for that game.
+- **All settings:** the full page, with these tabs.
 
-**Power:** the limits each RAPL interface reads now (MSR and MMIO side by side), the GPU clock and why it is
-throttled, EPP, boost and governor. The options (per-game profiles, separate values on AC, more than 40 W on AC), the
-editor for every profile (also GPU min clock, energy preference and **Use firmware values**), the other power
-managers found with how to turn each one off, the firmware's own values, and **Import from SimpleDeckyTDP**.
+**Power:** the power limits now (each interface in Details), the GPU speed, energy preference, boost and the power
+source. The options (per-game profiles, different settings when plugged in, up to 52 W when plugged in), the editor
+for every profile (also GPU minimum speed, energy preference and **Reset to device defaults**), **Other power
+programs** (each with **Fix for me**, **Undo**, **I've handled it** or **How to fix**), **Turned off by OXP3 Deck**
+(with Undo), the device's own values, and **Import from SimpleDeckyTDP**.
 
 **Fixes:** every oxp3-tool fix with its state, notes and when it takes effect. Apply and Revert for each one. Both
 show the plan first.
@@ -104,7 +114,7 @@ tasks with their logs.
 
 ## Power (TDP and GPU clocks)
 
-Off until you turn **TDP control** on (Quick Access → OXP3 Deck → Power). Then OXP3 Deck sets, from the active
+Off until you turn **Power control (TDP)** on (Quick Access → OXP3 Deck → Power). Then OXP3 Deck sets, from the active
 profile:
 
 - **Sustained power** (PL1, the long-term limit) and **Boost power** (PL2, a few seconds above it), written to
@@ -117,13 +127,14 @@ profile:
 - **Energy preference (EPP)** and **CPU boost** (turbo), on the full page; CPU boost is in Quick Access too.
 
 **Range.** Sustained 5 to 35 W on battery and up to 40 W on AC (ONEXPLAYER's own figures for the OXP3: 35 W
-sustained, "up to 40 W"). **Allow more than 40 W on AC** on the Power tab goes up to the firmware's own boost limit
+sustained, "up to 40 W"). **Allow up to 52 W when plugged in** on the Power tab goes up to the firmware's own boost limit
 (52 W): use a charger of 65 W or more, a weaker one cannot keep up. Boost is never below sustained and never above
 the firmware's boost limit. On another device the limits never go above what its firmware set.
 
-**Profiles.** The default profile starts with every value at "firmware" (the value the system booted with), so
-turning control on changes nothing until you move a slider. **Profile for this game** gives the running game its
-own copy; it is used whenever that game runs (per-game profiles on). With **Separate values on AC**, each profile
+**Profiles.** The default profile starts with every value at "device default" (the value the system booted with), so
+turning control on changes nothing until you move a slider. **Separate profile for <game>** gives the running game
+its own copy; it is used whenever that game runs (per-game profiles on). With **Different settings when plugged
+in**, each profile
 has a second set for when the charger is in. Profiles are re-applied after sleep, on a game change and on AC
 changes.
 
@@ -146,29 +157,40 @@ or a resume, when the firmware does that), it stops writing and shows a red line
 2. **Uninstall SimpleDeckyTDP first, or at least disable it**: Decky's settings (the gear) → **Plugins** → the menu
    next to SimpleDeckyTDP → **Uninstall** (or **Disable**). Two plugins setting the same limits undo each other;
    OXP3 Deck refuses to turn on while SimpleDeckyTDP (or PowerControl / PowerTools) is enabled.
-3. Turn **TDP control** on.
+3. Turn **Power control (TDP)** on.
 4. In Steam's own Quick Access → **Performance**, turn off **TDP limit** and **Manual GPU clock**: Steam then
    changes the same limits.
 
 ### Other power managers
 
-OXP3 Deck never stops, disables or masks another service: it tells you what runs and how to turn it off. Those
-marked "blocks" keep TDP control from turning on (and pause it if they start later); those marked "EPP" only leave
-the energy preference and CPU boost to them; "I have done that" on the Power tab acknowledges the ones where only
-you can tell whether they still set the limits.
+OXP3 Deck finds the other power managers that would fight it and shows each one with a short line. Those marked
+"blocks" keep TDP control from turning on (and pause it if they start later); those marked "EPP" only leave the
+energy preference and CPU boost to them. **Details** (the ☰ button) explains each one and how to turn it off
+yourself.
 
-| Found | Effect | What to do |
-|---|---|---|
-| SimpleDeckyTDP, PowerControl or PowerTools (Decky plugins) | blocks | Decky → Settings → Plugins: disable or uninstall it (import from SimpleDeckyTDP first) |
-| PowerStation (`powerstation.service`, Bazzite) | blocks | `sudo systemctl disable --now powerstation.service`; Steam's TDP slider uses it. Back after a reboot? `sudo systemctl mask powerstation.service` |
-| thermald | blocks | `sudo systemctl disable --now thermald`: on Panther Lake it rewrites PL1 within seconds |
-| Handheld Daemon (`hhd`) | blocks, can be acknowledged | turn off TDP control in Handheld Daemon's settings, then **I have done that** |
-| `oxp3-tdp-sync.service` | blocks | `sudo systemctl disable --now oxp3-tdp-sync.service` (it copies MMIO PL1 into MSR; OXP3 Deck writes both) |
-| `onex3-tdp.service` | blocks | `sudo systemctl disable --now onex3-tdp.service` |
-| a steamos-manager TDP remote (`remotes.d` file with `TdpLimit1`) | blocks, can be acknowledged | turn Steam's **TDP limit** off, or remove that file |
-| power-profiles-daemon | EPP | `sudo systemctl disable --now power-profiles-daemon` |
-| tuned / tuned-ppd | EPP | `sudo systemctl disable --now tuned tuned-ppd` |
-| intel_lpmd (CachyOS enables it on Panther Lake) | EPP | `sudo systemctl disable --now intel_lpmd` (it sets EPP and parks cores, not the power limits) |
+**Fix for me.** For the system services in the table, OXP3 Deck can turn the service off for you: tap **Fix for
+me**, read the dialog (it names the service and the exact commands), and confirm. OXP3 Deck then stops and disables
+that service (`systemctl disable` and `systemctl stop`, as root). It never masks a service, never uninstalls a
+package and never changes another Decky plugin, and it never does this on its own: only after you confirm. It
+remembers what it changed, so **Undo** turns on again exactly what it turned off (enables what was enabled, starts
+what was running), also after a reboot. Some of these services (power-profiles-daemon, tuned-ppd, thermald,
+intel_lpmd) start again when another program asks for them, for example the desktop's power mode switch or a game
+launcher, and Bazzite's update can turn PowerStation back on: OXP3 Deck then shows it as back and offers **Fix
+again**; it never repeats the fix by itself. **I've handled it** acknowledges the ones where only you can tell
+whether they still set the limits.
+
+| Found | Effect | Fix for me | Do it yourself |
+|---|---|---|---|
+| SimpleDeckyTDP, PowerControl or PowerTools (Decky plugins) | blocks | no | Decky → Settings → Plugins: disable or uninstall it (import from SimpleDeckyTDP first) |
+| PowerStation (`powerstation.service`, Bazzite) | blocks | yes | `sudo systemctl disable --now powerstation.service`; Steam's TDP slider uses it, and a Bazzite update may turn it back on |
+| thermald | blocks | yes | `sudo systemctl disable --now thermald.service`: on this CPU it rewrites the sustained limit within seconds |
+| Handheld Daemon (`hhd`) | blocks, can be acknowledged | no (it may run the controller) | turn off TDP control in Handheld Daemon's settings, then **I've handled it** |
+| `oxp3-tdp-sync.service` | blocks | yes | `sudo systemctl disable --now oxp3-tdp-sync.service` (it copies MMIO PL1 into MSR; OXP3 Deck writes both) |
+| `onex3-tdp.service` | blocks | yes | `sudo systemctl disable --now onex3-tdp.service` |
+| a steamos-manager TDP remote (`remotes.d` file with `TdpLimit1`) | blocks, can be acknowledged | no | turn Steam's **TDP limit** off in Quick Access → Performance, then **I've handled it** |
+| power-profiles-daemon | EPP | yes (may start again) | `sudo systemctl disable --now power-profiles-daemon.service` |
+| tuned / tuned-ppd | EPP | yes (may start again) | `sudo systemctl disable --now tuned-ppd.service tuned.service` |
+| intel_lpmd (CachyOS enables it on this CPU) | EPP | yes | `sudo systemctl disable --now intel_lpmd.service` (it sets EPP and parks cores, not the power limits) |
 
 **The thermald trade-off.** Disabling thermald does not leave the OXP3 unprotected: the SoC's own thermal limit
 (it throttles at its maximum temperature) and the fan curve still apply. What you lose is thermald lowering PL1
@@ -254,8 +276,9 @@ next start. No re-login is needed.
 - **Uninstalling or disabling leaves the current power limits, GPU clock range and energy preference until the
   next reboot.** Turn TDP control off first to get the firmware's values back at once (SimpleDeckyTDP cannot reset
   the xe GPU clocks if you go back to it).
-- It writes no power limit until you turn TDP control on, never PL4 or the GPU's media engine, and it never stops
-  or disables another power manager (it shows the command for you to run).
+- It writes no power limit until you turn TDP control on, never PL4 or the GPU's media engine. It stops and
+  disables another power manager's service only when you tap **Fix for me** and confirm (never masks it, never
+  uninstalls it, Undo turns it back on).
 
 ## Troubleshooting
 

@@ -245,6 +245,46 @@ export const failedLines = (last: PowerApply | null | undefined, zones?: PowerZo
   return out;
 };
 
+/** "15 W steady · 25 W boost": the up-front line of the live status (the lowest limit over both interfaces). */
+export const limitsLine = (state: Pick<PowerState, "now">): string => {
+  const n = state.now;
+  return n.pl1_w == null && n.pl2_w == null ? "Power limits unreadable" : `${watts(n.pl1_w)} steady · ${watts(n.pl2_w)} boost`;
+};
+
+/** A written id in plain words, for a label up front: "intel-rapl:0/pl1" → "Sustained power". */
+export const plainId = (id: string): string => {
+  const m = /\/(pl\d)$/.exec(id);
+  if (m) return ({ pl1: "Sustained power", pl2: "Boost power" } as Record<string, string>)[m[1]] ?? "Power limit";
+  if (id.startsWith("epp")) return "Energy preference";
+  return ({ "gpu/min": "GPU minimum speed", "gpu/max": "GPU maximum speed", turbo: "CPU boost" } as Record<string, string>)[id] ?? id;
+};
+
+/**
+ * The red rows of what did not take, one line each up front (`line` null: the first sentence of `detail`); `detail`
+ * is failedLines' full text for its Details.
+ */
+export const capRows = (last: PowerApply | null | undefined, zones?: PowerZone[] | null): { label: string; line: string | null; detail: string }[] => {
+  const full = failedLines(last, zones);
+  const out: { label: string; line: string | null; detail: string }[] = [];
+  let i = 0;
+  const lockedIds = new Set<string>();
+  for (const z of zones ?? []) {
+    for (const k of z.locked) {
+      lockedIds.add(`${z.id}/${k}`);
+      const at = k === "pl1" ? z.pl1_w : z.pl2_w;
+      out.push({ label: at == null ? "Limit capped" : `Limit capped at ${watts(at)}`,
+        line: at == null ? "The device firmware won't allow a higher limit." : `The device firmware won't allow more than ${watts(at)}.`,
+        detail: full[i++] });
+    }
+  }
+  for (const f of last?.failed ?? []) {
+    if (lockedIds.has(f.id)) continue;
+    out.push(f.locked ? { label: `${plainId(f.id)}: capped`, line: "The device firmware won't allow a higher limit.", detail: full[i++] }
+      : { label: `${plainId(f.id)} didn't apply`, line: null, detail: full[i++] });
+  }
+  return out;
+};
+
 export const STEAM_SUSPECT = { name: "Steam", fix: "Steam's own Performance settings: in Quick Access → Performance, turn off \"TDP limit\" and \"Manual GPU clock\"." };
 
 /** The suspects of a drift, with each one's guidance (from the active conflicts, or Steam's own controls). */
@@ -264,14 +304,14 @@ export const EPP_LABELS: Record<Epp, string> = {
   performance: "Performance", balance_performance: "Balance performance", balance_power: "Balance power", power: "Power saving",
 };
 
-/** The EPP dropdown: Firmware, then the choices this CPU offers, in EPP_CHOICES' order. */
+/** The EPP dropdown: Device default (the firmware's), then the choices this CPU offers, in EPP_CHOICES' order. */
 export const eppOptions = (choices: Epp[] | null | undefined): { data: Epp | null; label: string }[] => [
-  { data: null, label: "Firmware" },
+  { data: null, label: "Device default" },
   ...(Object.keys(EPP_LABELS) as Epp[]).filter((e) => !choices || choices.includes(e)).map((e) => ({ data: e, label: EPP_LABELS[e] })),
 ];
 
 export const eppText = (e: string | null | undefined): string =>
-  e == null ? "?" : e === "mixed" ? "mixed" : e === "default" ? "firmware default" : EPP_LABELS[e as Epp] ?? e;
+  e == null ? "?" : e === "mixed" ? "mixed" : e === "default" ? "device default" : EPP_LABELS[e as Epp] ?? e;
 
 /** The game profiles in the editor's order: Default, the running game, then the others by name. */
 export const profileOrder = (profiles: Record<string, { name: string | null }>, running: string | null | undefined): { key: string; label: string }[] => {

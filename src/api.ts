@@ -6,8 +6,8 @@ import { callable } from "@decky/api";
 
 import type {
   ApplyOpts, CatalogRes, DriversRes, GameInfoRes, JobListRes, JobRes, JobStart, KernelRes, Overview, Oxp3UpdateCheck,
-  PlanRes, PowerChangeRes, PowerImportRes, PowerInfoRes, PowerOptions, PowerStateRes, PowerValues, Res, ShimRes,
-  StatusRes, XessStateRes, XessUpdateCheck,
+  PlanRes, PowerChangeRes, PowerFixRes, PowerImportRes, PowerInfoRes, PowerOptions, PowerStateRes, PowerValues, Res,
+  ShimRes, StatusRes, XessStateRes, XessUpdateCheck,
 } from "./types";
 
 // ---- overview ----------------------------------------------------------------------------------------------------
@@ -48,6 +48,8 @@ export const power_profile = callable<[appid: string, name: string | null, on: b
 export const power_game = callable<[appid: string | null], PowerChangeRes>("power_game");
 export const power_take_control = callable<[], PowerChangeRes>("power_take_control");
 export const power_import_sdtdp = callable<[], PowerImportRes>("power_import_sdtdp");
+export const power_fix = callable<[cid: string], PowerFixRes>("power_fix");
+export const power_unfix = callable<[cid: string], PowerFixRes>("power_unfix");
 
 // ---- jobs and misc -----------------------------------------------------------------------------------------------
 export const job_status = callable<[id: string | null], JobRes>("job_status");

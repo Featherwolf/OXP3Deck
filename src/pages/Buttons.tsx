@@ -5,7 +5,9 @@ import { ButtonItem, DropdownItem, PanelSection, PanelSectionRow, SliderField, T
 import { FC, useMemo, useState } from "react";
 
 import { applyFixes, blockedBy, useAction } from "../actions";
-import { explain, Note, Problem, Status } from "../components/Hint";
+import { DetailsSpec, paragraphs } from "../components/confirm";
+import { explain, label, Note, Problem, Status, WithDetails } from "../components/Hint";
+import { firstSentence } from "../text";
 import { JobView, TaskSection } from "../components/JobView";
 import type { ApplyOpts, ButtonKey, Oxp3Fix } from "../types";
 import { NeedsOxp3, useOxp3 } from "./Fixes";
@@ -50,7 +52,7 @@ export const ButtonsTab: FC = () => {
     return (
       <PanelSection title="Buttons">
         <PanelSectionRow>
-          <Status ok={null} label={running ? "The layout is read when the running task has finished." : "Reading oxp3-tool's status…"} />
+          <Status ok={null} label={running ? "Waiting for the running task" : "Reading the layout…"} />
           <Problem what="oxp3-tool" error={(st.data && !st.data.ok ? st.data.error : null)} />
         </PanelSectionRow>
       </PanelSection>
@@ -66,44 +68,55 @@ export const ButtonsTab: FC = () => {
     if (!restart) opts.no_restart = true;
     return applyFixes(helper && xboxFix ? [buttons, xboxFix] : [buttons], opts, "Apply the button layout");
   });
+  const fpsD: DetailsSpec = { title: "Frame limit for the key", body: `What the Frame limit key switches Steam's frame limit to (default ${catalog.fps_limit.default}); a second press turns it off. Changes when you tap Apply layout.` };
+  const restartD: DetailsSpec = { title: "Apply without reboot", body: "On: the controller service restarts and the layout works at once (the controller stops for a few seconds). Off: the layout loads at the next reboot. If the buttons act like an Xbox controller afterwards, reboot.", lines: ["systemctl restart inputplumber"] };
+  const applyD: DetailsSpec = { title: "Apply layout", body: `Applies the button layout${helper ? " and the Xbox key helper" : ""} with the choices above. You see the plan first. Takes effect ${buttons.takes_effect}.`, lines: [helper ? "oxp3-tool apply buttons xbox-key" : "oxp3-tool apply buttons"] };
   return (
     <>
       <TaskSection onDone={() => { setPick({}); setFps(null); }} />
       <PanelSection title="Buttons">
         <PanelSectionRow>
-          <Status ok={applied ? true : null} label={applied ? "oxp3-tool's layout is applied" : "Stock layout (the buttons fix is not applied)"}
-            detail={buttons.pending === "inputplumber-restart" ? "The last layout loads at the next reboot (InputPlumber was not restarted)." : buttons.summary} />
-          {!!buttons.notes.length && <Note>{buttons.notes.map((n, i) => <div key={i}>{n}</div>)}</Note>}
-          {!changeable && <Status ok={false} label="The layout cannot be changed here" detail={buttons.notes[0] ?? "oxp3-tool does not support this system."} />}
+          <Status ok={applied ? true : null} label={applied ? "Custom layout active" : "Stock layout"}
+            detail={buttons.pending === "inputplumber-restart" ? "Loads at next reboot" : undefined}
+            details={{ title: applied ? "Custom layout active" : "Stock layout", body: paragraphs([buttons.summary,
+              buttons.pending === "inputplumber-restart" ? "The last layout loads at the next reboot (the controller service was not restarted)." : null, ...buttons.notes]),
+              lines: ["oxp3-tool fix: buttons (InputPlumber profile)"] }} />
+          {!changeable && <Status ok={false} label="The layout can't be changed here" detail={firstSentence(buttons.notes[0] ?? "This system is not supported.")} />}
         </PanelSectionRow>
         <PanelSectionRow>
           {keys.map((k) => {
             const meta = catalog.button_keys[k];
             const v = value(k);
             const now = applied ? actionLabel(saved[k] ?? meta.default) : `${actionLabel(meta.stock)} (stock)`;
+            const keyD: DetailsSpec = { title: KEY_LABEL[k] ?? meta.label, body: paragraphs([`${meta.label}: ${catalog.button_actions[v] ?? v}.`,
+              `Now: ${now}. Default: ${actionLabel(meta.default)}.`, "Changes when you tap Apply layout."]) };
             return (
-              <DropdownItem key={`${k}-${loaded}`} label={KEY_LABEL[k] ?? meta.label} menuLabel={KEY_LABEL[k] ?? meta.label}
-                layout="below" childrenContainerWidth="max" bottomSeparator="none" disabled={!changeable || running}
-                rgOptions={options} selectedOption={v} onChange={(o) => setPick((p) => ({ ...p, [k]: o.data }))}
-                description={explain(`${meta.label}: ${catalog.button_actions[v] ?? v}.`,
-                  `Now: ${now} · oxp3-tool's default: ${actionLabel(meta.default)}. Changes when you tap Apply layout.`)} />
+              <WithDetails key={`${k}-${loaded}`} details={keyD}>
+                <DropdownItem label={label(KEY_LABEL[k] ?? meta.label, keyD)} menuLabel={KEY_LABEL[k] ?? meta.label}
+                  layout="below" childrenContainerWidth="max" bottomSeparator="none" disabled={!changeable || running}
+                  rgOptions={options} selectedOption={v} onChange={(o) => setPick((p) => ({ ...p, [k]: o.data }))}
+                  description={explain(firstSentence(catalog.button_actions[v] ?? actionLabel(v)))} />
+              </WithDetails>
             );
           })}
           {usesFps && (
-            <SliderField label="Frame limit" value={fpsValue} min={catalog.fps_limit.min} max={catalog.fps_limit.max} step={1}
-              showValue valueSuffix=" fps" disabled={!changeable || running} onChange={setFps}
-              description={explain(`What the Frame limit key switches Steam's frame limit to (default ${catalog.fps_limit.default}); a second press turns it off.`,
-                "Changes when you tap Apply layout.")} />
+            <WithDetails details={fpsD}>
+              <SliderField label={label("Frame limit for the key", fpsD)} value={fpsValue} min={catalog.fps_limit.min} max={catalog.fps_limit.max} step={1}
+                showValue valueSuffix=" fps" disabled={!changeable || running} onChange={setFps}
+                description={explain("Press again to turn it off.")} />
+            </WithDetails>
           )}
           {xboxNote(helper, value("xbox"))}
-          <ToggleField label="Restart the controller now" checked={restart} disabled={!changeable || running} onChange={setRestart}
-            description={explain("On: InputPlumber restarts and the layout works at once (the controller stops for a few seconds). Off: the layout loads at the next reboot.",
-              "If the buttons act like an Xbox controller afterwards, reboot.")} />
-          <ButtonItem layout="below" disabled={!changeable || running || !!act.busy} onClick={apply}
-            description={explain(`Applies the buttons fix${helper ? " and the Xbox key helper (xbox-key)" : ""} with the layout above. You see oxp3-tool's plan first.`,
-              `Takes effect ${buttons.takes_effect}.`)}>
-            {act.busy ? "Reading the plan…" : "Apply layout"}
-          </ButtonItem>
+          <WithDetails details={restartD}>
+            <ToggleField label={label("Apply without reboot", restartD)} checked={restart} disabled={!changeable || running} onChange={setRestart}
+              description={explain("The controller stops for a few seconds.")} />
+          </WithDetails>
+          <WithDetails details={applyD}>
+            <ButtonItem layout="below" disabled={!changeable || running || !!act.busy} onClick={apply}
+              description={explain("Shows what changes first.")}>
+              {act.busy ? "Reading the plan…" : label("Apply layout", applyD)}
+            </ButtonItem>
+          </WithDetails>
           <Problem what="Apply layout" error={act.error} />
         </PanelSectionRow>
         {act.job && <JobView job={act.job} lines={6} onDone={() => { setPick({}); setFps(null); }} />}
@@ -114,8 +127,7 @@ export const ButtonsTab: FC = () => {
 
 /** Why the Xbox key goes through a helper on this unit (and what that cannot do). */
 const xboxNote = (helper: boolean, xbox: string) => helper ? (
-  <Note label="Xbox key">
-    On this unit InputPlumber cannot read the Xbox key, so oxp3-tool's xbox-key helper does what you choose for it; Apply layout
-    applies xbox-key too. The helper can only tap: holding the key for Steam shortcuts does not work{xbox === "guide" ? " (keep Steam menu on Home for those)" : ""}.
+  <Note label="Xbox key: tap only" details={{ title: "Xbox key: tap only", body: `On this unit the controller service cannot read the Xbox key, so a small helper does what you choose for it; Apply layout installs it too. The helper can only tap: holding the key for Steam shortcuts does not work${xbox === "guide" ? " (keep Steam menu on Home for those)" : ""}.`, lines: ["oxp3-tool fix: xbox-key"] }}>
+    Holding it for Steam shortcuts won't work.
   </Note>
 ) : null;

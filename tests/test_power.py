@@ -508,11 +508,17 @@ class ConflictTest(Base):
         self.assertEqual(sorted(rows), ["powerstation", "thermald", "tuned"])
         self.assertEqual(rows["tuned"]["kind"], "cpu")
         self.assertIn("systemctl disable --now powerstation.service", rows["powerstation"]["fix"])
-        self.assertEqual(set(rows["thermald"]), {"id", "name", "kind", "ignorable", "ignored", "why", "fix"})
+        self.assertEqual(set(rows["thermald"]), {"id", "name", "kind", "ignorable", "ignored", "why", "fix",
+                                                 "fix_units", "fix_plan", "fixed"})
+        self.assertEqual(rows["tuned"]["fix_units"], ["tuned-ppd.service", "tuned.service"])
+        self.assertIsNone(rows["thermald"]["fixed"])
         self.assertEqual(self.runs[0][1:], ["list-units", "--all", "--type=service", "--plain", "--no-legend",
                                             "--no-pager"])
+        self.assertEqual(sum("list-units" in r for r in self.runs), 1)
+        self.assertTrue(all("show" in r for r in self.runs[1:]), self.runs)     # fix_plan: read-only show
+        n = len(self.runs)
         power.conflicts(self.ctx)
-        self.assertEqual(len(self.runs), 1)                 # cached
+        self.assertEqual(len(self.runs), n)                 # cached
         self.units = units("cachyos-lpmd")
         self.t += power.CONFLICT_RECHECK_S
         self.assertEqual([r["id"] for r in power.conflicts(self.ctx)], ["intel_lpmd"])
@@ -534,7 +540,10 @@ class ConflictTest(Base):
         rows = {r["id"]: r for r in power.conflicts(self.ctx)}
         self.assertEqual(sorted(rows), ["steamos-remote", "thermald"])
         self.assertTrue(rows["steamos-remote"]["ignorable"])
-        self.assertIn("remotes.d/powerstation.toml", rows["steamos-remote"]["fix"])
+        self.assertIn("remotes.d/powerstation.toml", rows["steamos-remote"]["why"])
+        self.assertNotIn("remove", rows["steamos-remote"]["fix"])          # under /usr/share it cannot be
+        self.assertEqual(rows["thermald"]["fix_units"], [])                # not started by systemd
+        self.assertFalse(power.fix(self.ctx, "thermald")["ok"])
 
     def test_systemctl_failing(self):
         self.systemctl_rc = 1
@@ -720,6 +729,387 @@ class ReviewTest(Base):
         self.assertEqual(len(self.w.calls), n)
 
 
+OWNER = {   # the owner's CachyOS units (tests/fixtures/power/units-cachyos-owner.txt), as [load, file state, active]
+    "inputplumber.service": ["loaded", "enabled", True],
+    "intel_lpmd.service": ["loaded", "disabled", False],
+    "power-profiles-daemon.service": ["loaded", "enabled", True],
+    "powerstation.service": ["not-found", "", False],
+    "thermald.service": ["loaded", "enabled", True],
+    "tuned.service": ["loaded", "disabled", False],
+    "tuned-ppd.service": ["loaded", "disabled", False],
+}
+PPD = "power-profiles-daemon.service"
+FORBIDDEN = ("mask", "--now", "--runtime", "kill", "unmask", "--force")
+
+
+class FixTest(Base):
+    """Fix for me / Undo against a stateful fake systemctl (tests/powerfake.py Systemctl)."""
+
+    def setUp(self):
+        super().setUp()
+        self.sc = pf.Systemctl(OWNER)
+        p = mock.patch.object(sysexec, "run", self.sc)
+        p.start()
+        self.addCleanup(p.stop)
+
+    def record(self):
+        path = os.path.join(self.ctx.settings_dir, "power.json")
+        with open(path) as f:
+            return json.load(f).get("fixed", {})
+
+    def only(self, *names):
+        """Keep only these units of the table (plus inputplumber)."""
+        for u in list(self.sc.units):
+            if u not in names and u != "inputplumber.service":
+                del self.sc.units[u]
+
+    def check_safe(self, cid):
+        for argv in self.sc.calls:
+            self.assertTrue(argv[0].startswith("/"), argv)
+            self.assertFalse(any(f in a for a in argv for f in FORBIDDEN), argv)
+            if "list-units" not in argv:
+                units = argv[argv.index("--") + 1:]
+                allowed = {u for us in power.FIXABLE.values() for u in us} if "show" in argv else power.FIXABLE[cid]
+                self.assertTrue(set(units) <= set(allowed), argv)     # show only reads (the dialog's fix_plan)
+        self.assertNotIn("env_extra", self.sc.kw)
+
+    def test_fix_ppd_on_the_owners_device(self):
+        seen = []
+        real = self.sc.__call__
+
+        def spy(argv, **kw):          # the record is on disk before the first command that changes something
+            if "--no-ask-password" in argv and not seen:
+                seen.append(self.record())
+            return real(argv, **kw)
+
+        with mock.patch.object(sysexec, "run", spy):
+            res = power.fix(self.ctx, "ppd")
+        self.assertTrue(res["ok"], res)
+        self.assertEqual(seen[0]["ppd"]["units"], [{"unit": PPD, "was_enabled": "enabled", "was_active": True}])
+        self.assertEqual(self.sc.actions(), [["/usr/bin/systemctl", "--no-ask-password", "disable", "--", PPD],
+                                             ["/usr/bin/systemctl", "--no-ask-password", "stop", "--", PPD]])
+        self.check_safe("ppd")
+        self.assertEqual([(s["action"], s["ok"]) for s in res["steps"]], [("disable", True), ("stop", True)])
+        self.assertEqual(self.sc.units[PPD], ["loaded", "disabled", False])      # disabled, not masked
+        self.assertEqual(self.sc.units["thermald.service"], ["loaded", "enabled", True])   # untouched
+        self.assertIsNone(res["state"]["cpu_blocked"])
+        self.assertEqual(res["state"]["cpu_blocked_by"], [])
+        self.assertEqual([r["id"] for r in res["conflicts"]], ["thermald"])
+        self.assertEqual([(f["id"], f["came_back"]) for f in res["fixed"]], [("ppd", False)])
+        self.assertIsNone(res["applied"])                                       # TDP control is off
+        self.assertEqual(self.w.calls, [])
+        self.assertEqual(self.record()["ppd"]["boot_id"], "boot-1")
+
+    def test_fix_ppd_while_enabled_sets_epp_and_turbo_at_once(self):
+        self.only(PPD)
+        self.on()
+        self.set(pl1_w=15, epp="power", turbo=False)
+        self.assertEqual(pf.get(pf.epp_path(self.ctx)), "balance_performance")    # left to ppd
+        self.assertEqual(power.state(self.ctx)["state"]["cpu_blocked_by"], ["ppd"])
+        self.assertEqual(power.state(self.ctx)["state"]["cpu_blocked"],
+                         "power-profiles-daemon controls energy preference and CPU boost")
+        res = power.fix(self.ctx, "ppd")
+        self.assertTrue(res["ok"], res)
+        self.assertEqual(pf.get(pf.epp_path(self.ctx)), "power")
+        self.assertEqual(pf.get(pf.no_turbo_path(self.ctx)), "1")
+        self.assertTrue(res["applied"]["ok"])
+        p = power._get(self.ctx)
+        self.assertEqual(p.recheck_at, self.t + power.FIX_RECHECK_S)
+        n = sum("list-units" in c for c in self.sc.calls)
+        self.tick(4)
+        self.assertEqual(sum("list-units" in c for c in self.sc.calls), n)
+        self.tick(power.FIX_RECHECK_S - 4)                                      # 10 s after: looks again
+        self.assertEqual(sum("list-units" in c for c in self.sc.calls), n + 1)
+        self.assertIsNone(p.recheck_at)
+        self.assertEqual(self.sc.actions()[2:], [])
+
+    def test_came_back_and_fix_again_keeps_the_first_state(self):
+        self.only(PPD)
+        self.assertTrue(power.fix(self.ctx, "ppd")["ok"])
+        self.sc.units[PPD][2] = True                         # D-Bus activation: running again, still disabled
+        rows = power.info(self.ctx, True)["info"]
+        row = {r["id"]: r for r in rows["conflicts"]}["ppd"]
+        self.assertTrue(row["fixed"]["came_back"])
+        self.assertEqual(row["fix_units"], [PPD])
+        self.assertEqual([(f["id"], f["came_back"]) for f in rows["fixed"]], [("ppd", True)])
+        self.sc.calls.clear()
+        res = power.fix(self.ctx, "ppd")
+        self.assertTrue(res["ok"], res)
+        self.assertEqual(self.sc.actions(), [["/usr/bin/systemctl", "--no-ask-password", "stop", "--", PPD]])
+        self.assertEqual(self.record()["ppd"]["units"],
+                         [{"unit": PPD, "was_enabled": "enabled", "was_active": True}])   # not "disabled"
+        self.assertTrue(power.unfix(self.ctx, "ppd")["ok"])
+        self.assertEqual(self.sc.units[PPD], ["loaded", "enabled", True])
+
+    def test_fix_again_after_something_enabled_it_records_enabled(self):
+        self.only(PPD)
+        self.sc.units[PPD] = ["loaded", "disabled", True]    # running only because something asked over D-Bus
+        self.assertTrue(power.fix(self.ctx, "ppd")["ok"])
+        self.assertEqual(self.record()["ppd"]["units"][0]["was_enabled"], "disabled")
+        self.sc.units[PPD] = ["loaded", "enabled", True]     # e.g. an update enabled it again
+        power._get(self.ctx).rows = None
+        self.sc.calls.clear()
+        self.assertTrue(power.fix(self.ctx, "ppd")["ok"])
+        self.assertEqual(self.sc.actions(), [["/usr/bin/systemctl", "--no-ask-password", "disable", "--", PPD],
+                                             ["/usr/bin/systemctl", "--no-ask-password", "stop", "--", PPD]])
+        self.assertEqual(self.record()["ppd"]["units"], [{"unit": PPD, "was_enabled": "enabled", "was_active": True}])
+        self.assertTrue(power.unfix(self.ctx, "ppd")["ok"])
+        self.assertEqual(self.sc.units[PPD], ["loaded", "enabled", True])   # the enable it removed is back
+
+    def test_undo_of_a_unit_uninstalled_or_masked_since_clears_the_record(self):
+        for state in (None, ["masked", "masked", False]):
+            with self.subTest(state=state):
+                self.only(PPD)
+                self.sc.units[PPD] = ["loaded", "enabled", True]
+                self.assertTrue(power.fix(self.ctx, "ppd")["ok"])
+                if state is None:
+                    del self.sc.units[PPD]                   # package removed
+                else:
+                    self.sc.units[PPD] = state               # the user masked it
+                self.sc.calls.clear()
+                res = power.unfix(self.ctx, "ppd")
+                self.assertTrue(res["ok"], res)
+                self.assertEqual(self.sc.actions(), [])          # no enable / start of a missing or masked unit
+                self.assertEqual(res["notes"], [f"{PPD} is no longer installed (or is masked); nothing to turn "
+                                                "back on"])
+                self.assertNotIn("ppd", self.record())
+                self.assertEqual(res["fixed"], [])
+                self.assertFalse(power.unfix(self.ctx, "ppd")["ok"])     # nothing left to undo
+
+    def test_fix_again_drops_a_recorded_unit_that_is_gone(self):
+        self.only("tuned-ppd.service", "tuned.service")
+        self.sc.units["tuned-ppd.service"] = ["loaded", "enabled", True]
+        self.sc.units["tuned.service"] = ["loaded", "enabled", True]
+        self.assertTrue(power.fix(self.ctx, "tuned")["ok"])
+        del self.sc.units["tuned.service"]                     # uninstalled
+        self.sc.units["tuned-ppd.service"][2] = True           # came back
+        power._get(self.ctx).rows = None
+        self.assertTrue(power.fix(self.ctx, "tuned")["ok"])
+        self.assertEqual([u["unit"] for u in self.record()["tuned"]["units"]], ["tuned-ppd.service"])
+
+    def test_fix_of_a_masked_but_running_unit_says_masked(self):
+        self.only()
+        self.sc.units["thermald.service"] = ["masked", "masked", True]
+        row = {r["id"]: r for r in power.conflicts(self.ctx)}["thermald"]
+        self.assertEqual((row["fix_units"], row["fix_plan"]), ([], None))
+        res = power.fix(self.ctx, "thermald")
+        self.assertFalse(res["ok"])
+        self.assertEqual(res["error"], "thermald is masked; OXP3 Deck does not unmask services")
+        self.assertEqual(self.sc.actions(), [])
+
+    def test_fix_plan_is_what_fix_runs(self):
+        self.only("tuned-ppd.service", "tuned.service")
+        self.sc.units["tuned-ppd.service"] = ["loaded", "static", True]
+        self.sc.units["tuned.service"] = ["loaded", "enabled", False]
+        row = {r["id"]: r for r in power.conflicts(self.ctx)}["tuned"]
+        self.assertEqual(row["fix_plan"], {"disable": ["tuned.service"], "stop": ["tuned-ppd.service"]})
+        self.assertTrue(power.fix(self.ctx, "tuned")["ok"])
+        self.assertEqual(self.sc.actions(), [["/usr/bin/systemctl", "--no-ask-password", "disable", "--",
+                                              "tuned.service"],
+                                             ["/usr/bin/systemctl", "--no-ask-password", "stop", "--",
+                                              "tuned-ppd.service"]])
+        self.assertEqual({r["id"]: r for r in power.conflicts(self.ctx)}.get("ppd", {}).get("fix_plan"), None)
+
+    def test_a_restart_right_away_is_not_ok(self):
+        self.only(PPD)
+        self.sc.restart = {PPD}
+        res = power.fix(self.ctx, "ppd")
+        self.assertFalse(res["ok"])
+        self.assertEqual(res["error"], "power-profiles-daemon is still running")
+        self.assertEqual([s["ok"] for s in res["steps"]], [True, False])
+        self.assertTrue(res["conflicts"][0]["fixed"]["came_back"])
+        self.assertIn("ppd", self.record())                  # Undo still offered
+
+    def test_tuned_static_masked_and_not_found(self):
+        self.only("tuned-ppd.service")
+        self.sc.units["tuned-ppd.service"] = ["loaded", "enabled", True]
+        res = power.fix(self.ctx, "tuned")
+        self.assertTrue(res["ok"], res)
+        self.assertEqual([u["unit"] for u in self.record()["tuned"]["units"]], ["tuned-ppd.service"])
+        self.assertEqual(len(self.sc.actions()), 2)
+        power.unfix(self.ctx, "tuned")
+        self.sc.calls.clear()
+        self.sc.units["tuned-ppd.service"] = ["loaded", "static", True]
+        self.sc.units["tuned.service"] = ["masked", "masked", False]
+        power.conflicts(self.ctx)
+        power._get(self.ctx).rows = None
+        res = power.fix(self.ctx, "tuned")
+        self.assertTrue(res["ok"], res)
+        self.assertEqual(self.sc.actions(), [["/usr/bin/systemctl", "--no-ask-password", "stop", "--",
+                                              "tuned-ppd.service"]])          # static: nothing to disable
+        self.assertFalse(any("tuned.service" in c for c in self.sc.calls))    # masked: not touched
+        self.sc.calls.clear()
+        res = power.unfix(self.ctx, "tuned")
+        self.assertEqual(self.sc.actions(), [["/usr/bin/systemctl", "--no-ask-password", "start", "--",
+                                              "tuned-ppd.service"]])          # a static unit is never enabled
+        self.check_safe("tuned")
+
+    def test_fix_thermald_while_blocked(self):
+        self.only()
+        self.on()
+        self.set(pl1_w=15)
+        self.tick()
+        self.sc.units["thermald.service"] = ["loaded", "enabled", True]
+        self.assertEqual(self.tick(power.CONFLICT_RECHECK_S), "blocked")
+        res = power.fix(self.ctx, "thermald")
+        self.assertTrue(res["ok"], res)
+        self.assertIsNone(res["state"]["blocked"])
+        self.assertEqual(power._get(self.ctx).apply_at, self.t)
+        pf.set_watts(self.ctx, MSR, "long_term", 25)          # what thermald did meanwhile
+        self.assertEqual(self.tick(), "applied")
+        self.assertEqual(self.watts(MSR), 15)
+        res = power.unfix(self.ctx, "thermald")
+        self.assertTrue(res["ok"], res)
+        self.assertIn("thermald", res["state"]["blocked"])    # blocks again, nothing restored
+        self.assertEqual(self.watts(MSR), 15)
+
+    def test_intel_lpmd_note(self):
+        self.only("intel_lpmd.service")
+        self.sc.units["intel_lpmd.service"] = ["loaded", "enabled", True]
+        path = self.ctx.sys_path("/sys/devices/system/cpu/intel_pstate/max_perf_pct")
+        pf.put(path, 60)
+        res = power.fix(self.ctx, "intel_lpmd")
+        self.assertTrue(res["ok"], res)
+        self.assertEqual(res["notes"], ["Intel's low-power daemon left the CPU's top speed at 60 %; a reboot "
+                                        "restores it"])
+        self.assertEqual(pf.get(path), "60")                  # not written
+        power.unfix(self.ctx, "intel_lpmd")
+        pf.put(path, 100)
+        self.assertEqual(power.fix(self.ctx, "intel_lpmd")["notes"], [])
+
+    def test_refused_with_nothing_run(self):
+        pf.plugins(self.ctx, {"SimpleDeckyTDP": True})
+        self.sc.units["hhd@jordan.service"] = ["loaded", "enabled", True]
+        for cid in ("hhd", "simpledeckytdp", "steamos-remote", "../x", None, ["ppd"], {"a": 1}, 3, "tuned",
+                    "intel_lpmd", "powerstation"):
+            res = power.fix(self.ctx, cid)
+            self.assertFalse(res["ok"], cid)
+            self.assertTrue(res["error"], cid)
+            json.dumps(res)
+        self.assertIn("cannot be fixed", power.fix(self.ctx, "hhd")["error"])
+        self.assertEqual(power.fix(self.ctx, "tuned")["error"], "tuned is not running")
+        self.sc.listing_rc = 1
+        res = power.fix(self.ctx, "ppd")
+        self.assertIn("could not list services", res["error"])
+        self.assertEqual(self.sc.actions(), [])
+        self.assertEqual(self.record() if os.path.exists(os.path.join(self.ctx.settings_dir, "power.json"))
+                         else {}, {})
+
+    def test_a_failing_disable_keeps_the_record(self):
+        self.only(PPD)
+        self.sc.rc["disable"] = (1, "Failed to disable unit: Access denied")
+        res = power.fix(self.ctx, "ppd")
+        self.assertFalse(res["ok"])
+        self.assertEqual(res["error"], f"{PPD}: Failed to disable unit: Access denied")
+        self.assertEqual([(s["action"], s["ok"]) for s in res["steps"]], [("disable", False), ("stop", True)])
+        self.assertIn("ppd", self.record())
+        del self.sc.rc["disable"]
+        self.sc.calls.clear()
+        res = power.unfix(self.ctx, "ppd")
+        self.assertTrue(res["ok"], res)
+        self.assertEqual(self.sc.actions(), [["/usr/bin/systemctl", "--no-ask-password", "enable", "--", PPD],
+                                             ["/usr/bin/systemctl", "--no-ask-password", "start", "--", PPD]])
+
+    def test_unfix(self):
+        self.only(PPD)
+        self.on()
+        self.assertTrue(power.fix(self.ctx, "ppd")["ok"])
+        self.sc.calls.clear()
+        res = power.unfix(self.ctx, "ppd")
+        self.assertTrue(res["ok"], res)
+        self.assertEqual([(s["action"], s["unit"], s["ok"]) for s in res["steps"]],
+                         [("enable", PPD, True), ("start", PPD, True)])
+        self.assertNotIn("ppd", self.record())
+        self.assertEqual(res["fixed"], [])
+        self.assertEqual(res["state"]["cpu_blocked_by"], ["ppd"])
+        self.assertIsNone(res["state"]["blocked"])
+        self.check_safe("ppd")
+        self.assertFalse(power.unfix(self.ctx, "ppd")["ok"])          # no record
+        for cid in (None, "../x", ["ppd"], "hhd"):
+            self.assertFalse(power.unfix(self.ctx, cid)["ok"], cid)
+        self.assertEqual(len(self.sc.actions()), 2)
+
+    def test_unfix_does_only_what_the_record_says(self):
+        path = os.path.join(self.ctx.settings_dir, "power.json")
+        pf.put(path, json.dumps({"fixed": {"tuned": {"at": 1.0, "boot_id": "b", "units": [
+            {"unit": "tuned-ppd.service", "was_enabled": "static", "was_active": True},
+            {"unit": "tuned.service", "was_enabled": "disabled", "was_active": False}]}}}))
+        self.restart()
+        res = power.unfix(self.ctx, "tuned")
+        self.assertTrue(res["ok"], res)
+        self.assertEqual(self.sc.actions(), [["/usr/bin/systemctl", "--no-ask-password", "start", "--",
+                                              "tuned-ppd.service"]])
+
+    def test_records_are_checked_when_read(self):
+        path = os.path.join(self.ctx.settings_dir, "power.json")
+        good = {"unit": PPD, "was_enabled": "enabled", "was_active": True}
+        pf.put(path, json.dumps({"fixed": {
+            "ppd": {"at": 5, "boot_id": "b", "units": [
+                good, dict(good), {"unit": "sshd.service", "was_enabled": "enabled", "was_active": True},
+                {"unit": "../../x", "was_enabled": "enabled", "was_active": True}]},
+            "tuned": {"at": 5, "units": [{"unit": "tuned.service", "was_enabled": "enabled", "was_active": "yes"}]},
+            "intel_lpmd": {"at": 5, "units": [{"unit": "intel_lpmd.service", "was_enabled": "x" * 1000,
+                                                "was_active": True}]},
+            "thermald": {"at": "now", "units": [{"unit": "thermald.service", "was_enabled": "enabled",
+                                                  "was_active": True}]},
+            "hhd": {"at": 5, "units": [{"unit": "hhd.service", "was_enabled": "enabled", "was_active": True}]},
+            "sshd": {"at": 5, "units": [{"unit": "sshd.service", "was_enabled": "enabled", "was_active": True}]},
+        }}))
+        self.restart()
+        fixed = power._get(self.ctx).data["fixed"]
+        self.assertEqual(fixed, {"ppd": {"at": 5, "boot_id": "b", "units": [good]}})
+        self.assertFalse(power.options(self.ctx, {"fixed": {}})["ok"])
+        self.assertEqual(power._get(self.ctx).data["fixed"], fixed)
+        pf.put(path, json.dumps({"fixed": ["ppd"]}))
+        self.restart()
+        self.assertEqual(power._get(self.ctx).data["fixed"], {})
+
+    def test_nothing_fixes_or_undoes_without_a_call(self):
+        self.only(PPD, "thermald.service")
+        self.sc.units["thermald.service"] = ["loaded", "enabled", False]
+        self.on()
+        path = os.path.join(self.ctx.settings_dir, "power.json")
+        data = json.loads(pf.get(path))      # a record of an earlier fix whose unit came back
+        data["fixed"] = {"thermald": {"at": 1.0, "boot_id": "b", "units": [
+            {"unit": "thermald.service", "was_enabled": "enabled", "was_active": True}]}}
+        pf.put(path, json.dumps(data))
+        self.restart()
+        power.profile(self.ctx, "1", None, True)
+        for _ in range(3):
+            self.tick()
+        power.game(self.ctx, "1")
+        self.plug(True)
+        self.tick()
+        pf.suspend(self.ctx, 1)
+        self.tick(power.CONFLICT_RECHECK_S)
+        self.sc.units["thermald.service"][2] = True          # came back: blocks, is not fixed again
+        self.assertEqual(self.tick(power.CONFLICT_RECHECK_S), "blocked")
+        power.enable(self.ctx, False)
+        power.enable(self.ctx, True)
+        power.info(self.ctx, True)
+        power.state(self.ctx)
+        power.take_control(self.ctx)
+        self.assertEqual(self.sc.actions(), [])
+        self.assertIn("thermald", self.record())
+
+    def test_texts_and_detection(self):
+        for cid, (_n, _k, _i, why, fix) in power.CONFLICTS.items():
+            self.assertNotIn("mask", fix, cid)
+            self.assertNotIn("mask", why, cid)
+        self.assertNotIn("turbo", power.CONFLICTS["ppd"][3])
+        self.assertTrue(set(power.FIXABLE) <= set(power.CONFLICTS))
+        self.assertFalse({"hhd", "simpledeckytdp", "powercontrol", "steamos-remote"} & set(power.FIXABLE))
+        self.assertTrue(power._UNITS["hhd"].match("hhd_local@jordan.service"))
+        self.assertTrue(power._UNITS["hhd"].match("hhd@jordan.service"))
+        self.only()
+        self.sc.units["hhd_local@jordan.service"] = ["loaded", "enabled", True]
+        rows = power.conflicts(self.ctx)
+        self.assertEqual([(r["id"], r["fix_units"]) for r in rows], [("hhd", [])])
+        hw = powerhw.discover(stub_decky.make_ctx(os.path.join(self.tmp.name, "empty")))
+        self.assertTrue(any("processor_thermal_rapl" in x for x in hw["problems"]))
+        self.assertFalse(any("intel_rapl_mmio" in x for x in hw["problems"]))
+
+
 class NothingThereTest(Base):
     oxp3 = False
 
@@ -727,7 +1117,7 @@ class NothingThereTest(Base):
         calls = [("info", (True,)), ("state", ()), ("enable", (True,)), ("options", ({"split_ac": True},)),
                  ("set_values", ("default", "main", {"pl1_w": 15})), ("profile", ("1", "A", True)),
                  ("game", ("1",)), ("take_control", ()), ("import_sdtdp", ()), ("tick", ()), ("summary", ()),
-                 ("enable", (False,))]
+                 ("enable", (False,)), ("fix", ("ppd",)), ("unfix", ("ppd",))]
         for name, args in calls:
             res = getattr(power, name)(self.ctx, *args)
             self.assertIsInstance(res, dict, name)
@@ -751,6 +1141,12 @@ class NothingThereTest(Base):
         res = power.enable(self.ctx, True)
         self.assertEqual(set(res) - {"conflicts"}, ts_fields("PowerChangeRes") - {"conflicts"})
         self.assertEqual(set(res["applied"]), ts_fields("PowerApply"))
+        self.assertEqual(set(power.fix(self.ctx, "ppd")), ts_fields("PowerFixRes") | {"ok", "error"})
+        self.units = units("bazzite")
+        rows = power.info(self.ctx, True)["info"]["conflicts"]
+        self.assertTrue(rows)
+        for r in rows:
+            self.assertEqual(set(r), ts_fields("PowerConflict"))
 
 
 if __name__ == "__main__":

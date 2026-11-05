@@ -7,6 +7,8 @@ import { isClaimed, noteJob, useClaim, useCurrentJob, useJobEnded, useJobPolling
 import type { Job } from "../types";
 import { when } from "../util";
 import { jobNext } from "../xessoffer";
+import { firstSentence } from "../text";
+import type { DetailsSpec } from "./confirm";
 import { Code, Note, Problem, Status } from "./Hint";
 
 // @decky/api has it only with loader API 2 (Decky 3.3); older loaders get @decky/ui's copy. Chosen once, so the
@@ -66,12 +68,20 @@ export const JobView: FC<{ job?: Job | null; quick?: boolean; lines?: number; on
     const next = shown.state === "done" ? jobNext(shown.kind, shown.result) : null;
     const path = shown.state === "done" && typeof shown.result?.path === "string" ? shown.result.path as string : null;
     const time = shown.state === "running" ? `since ${when(shown.started)}` : when(shown.ended ?? shown.started);
+    const last = lines.length ? firstSentence(lines[lines.length - 1]) : "";
+    // the whole log and the result's lines, for the quick panel's one line
+    const details: DetailsSpec = {
+      title: shown.title,
+      body: `${shown.state === "running" ? `Running ${time}. Keep the device on; the task goes on if you close this.` : `Ended ${time}.`}${path ? ` Saved as ${path}.` : ""}`,
+      lines: [...lines, ...extra], linesTitle: "Log:",
+    };
     return (
       <PanelSectionRow>
         <Status ok={shown.state === "running" ? null : shown.state === "done"}
           label={`${shown.title}: ${STATE[shown.state] ?? shown.state}`}
-          detail={`${time}${shown.state === "running" ? " · keep the device on; the task goes on if you close this" : ""}`} />
-        {!!tail.length && (
+          detail={shown.state === "running" ? "Keep the device on." : (quick ? last : time) || time}
+          details={details} />
+        {!quick && !!tail.length && (
           <Field focusable bottomSeparator="none" description={
             <Code>{(lines.length > tail.length ? "…\n" : "") + tail.join("\n")}</Code>} />
         )}

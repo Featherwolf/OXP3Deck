@@ -5,7 +5,7 @@
 // One game's xess-xmx-linux options, written straight into its Steam launch options (before %command%), plus what
 // the backend found about the game (its XeSS DLLs, its Proton, the last run's logs).
 import { ButtonItem, DropdownItem, PanelSectionRow, ToggleField } from "@decky/ui";
-import { FC, ReactNode, useEffect, useMemo, useRef, useState } from "react";
+import { FC, useEffect, useMemo, useRef, useState } from "react";
 
 import { game_info, xess_state } from "../backend";
 import { driverPrefix, fixTypo, fsrSupported, managed, ManagedKey, parse, setManaged } from "../launchopts";
@@ -13,18 +13,20 @@ import { getLaunchOptions, isSteamApp, RunningApp, setLaunchOptions } from "../s
 import { useResource } from "../store";
 import type { GameInfo, GameInfoRes, XessDriver, XessStateRes } from "../types";
 import { remember, when } from "../util";
-import { Code, explain, Note, Problem, Status } from "./Hint";
+import { firstSentence } from "../text";
+import { DetailsSpec, paragraphs } from "./confirm";
+import { Code, explain, label, Note, Problem, Status, WithDetails } from "./Hint";
 
 type Opt = { data: string; label: string };
 
 /** The FSR=/FSR_FG= pair as one choice (docs/fsr-frame-generation.md in xess-xmx-linux 20261104). */
-const FSR_MODES: { data: string; label: string; set: { FSR: string | null; FSR_FG: string | null }; does: string }[] = [
-  { data: "", label: "Game's own FSR", set: { FSR: null, FSR_FG: null }, does: "The game's FSR stays as it is." },
-  { data: "all", label: "FSR on XeSS", set: { FSR: "xess", FSR_FG: null },
+const FSR_MODES: { data: string; label: string; set: { FSR: string | null; FSR_FG: string | null }; line: string; does: string }[] = [
+  { data: "", label: "Game's own FSR", set: { FSR: null, FSR_FG: null }, line: "Uses the game's own FSR.", does: "The game's FSR stays as it is." },
+  { data: "all", label: "FSR on XeSS", set: { FSR: "xess", FSR_FG: null }, line: "FSR upscaling and frame gen run on XeSS.",
     does: "FSR=xess: the game's FSR 3.1+ upscaling runs on XeSS super resolution and its FSR frame generation on XeSS frame generation (with the frame generation choice above: multi-frame). Only for games with FSR 3.1+ and no XeSS; choose FSR in the game." },
-  { data: "fg", label: "FSR frame gen on XeSS", set: { FSR: null, FSR_FG: "xess" },
+  { data: "fg", label: "FSR frame gen on XeSS", set: { FSR: null, FSR_FG: "xess" }, line: "Only FSR frame gen runs on XeSS.",
     does: "FSR_FG=xess: only the game's FSR 3.1+ frame generation runs on XeSS frame generation; the game's FSR upscaling stays." },
-  { data: "inject", label: "Add XeSS frame gen", set: { FSR: "xess", FSR_FG: "inject" },
+  { data: "inject", label: "Add XeSS frame gen", set: { FSR: "xess", FSR_FG: "inject" }, line: "Adds XeSS frame gen to FSR upscaling.",
     does: "FSR=xess FSR_FG=inject: XeSS frame generation for a game with FSR 3.1+ upscaling but no FSR frame generation (Forza Horizon 6). Choose FSR upscaling in the game; the HUD is interpolated too." },
 ];
 
@@ -46,13 +48,19 @@ const driverOptions = (drivers: XessDriver[]): Opt[] => {
   return [...seen.entries()].map(([p, versions]) => ({ data: p, label: `Mesa ${versions.join(" / ")}` }));
 };
 
-const lastRunLine = (lr: NonNullable<GameInfoRes["game"]>["last_run"]): { ok: boolean | null; label: string; detail: string } => {
-  if (!lr) return { ok: null, label: "Last run: no logs", detail: "Nothing from xess-xmx-linux in this game's prefix yet: start it once (with Logs on for the details)." };
-  if (lr.fallback) return { ok: false, label: "Last run: XeSS fell back to DP4a", detail: lr.fallback };
-  if (lr.compile_failed) return { ok: false, label: "Last run: a kernel did not compile", detail: "The patched driver could not build one of XeSS's kernels; ~/.cache/xess-xmx/compile.log has the line." };
-  if (lr.canary) return { ok: true, label: "Last run: XeSS on the XMX cores", detail: "The patched driver saw XeSS's self-test in this game." };
-  return { ok: null, label: "Last run: no sign of XMX", detail: lr.trace ? "The shim was loaded (trace log), but the patched driver saw no XeSS self-test: the game may not have used XeSS." : "No trace log: turn Logs on and start the game to see whether the shim loads." };
+const lastRunLine = (lr: NonNullable<GameInfoRes["game"]>["last_run"]): { ok: boolean | null; label: string; line: string; detail: string } => {
+  if (!lr) return { ok: null, label: "Last run: no logs", line: "Start the game once to see how XeSS ran.", detail: "Nothing from xess-xmx-linux in this game's prefix yet: start it once (with \"Save XeSS logs\" on for the details)." };
+  if (lr.fallback) return { ok: false, label: "Last run: slower mode", line: "XeSS fell back to the slower mode.", detail: `XeSS fell back to DP4a: ${lr.fallback}` };
+  if (lr.compile_failed) return { ok: false, label: "Last run: slower mode", line: "The fast driver couldn't prepare XeSS.", detail: "The patched driver could not build one of XeSS's kernels; ~/.cache/xess-xmx/compile.log has the line." };
+  if (lr.canary) return { ok: true, label: "Last run: fast mode used", line: "XeSS ran on the fast cores.", detail: "The patched driver saw XeSS's self-test in this game (XeSS on the XMX cores)." };
+  return { ok: null, label: "Last run: no sign of fast mode", line: "The game may not have used XeSS.", detail: lr.trace ? "The shim was loaded (trace log), but the patched driver saw no XeSS self-test: the game may not have used XeSS." : "No trace log: turn \"Save XeSS logs\" on and start the game to see whether the shim loads." };
 };
+
+/** The Proton's one line up front: ready, needs the add-on, or partly. */
+const protonShort = (g: GameInfo): string =>
+  g.compat_tool_shimmed === false ? "Needs the XeSS add-on"
+    : g.compat_tool_shimmed === true ? (g.compat_tool_hook === false ? "Some settings won't work" : "XeSS fast mode ready")
+    : "Unknown";
 
 const toolName = (g: GameInfo): string =>
   g.compat_tool ?? (g.default_compat_tool ? `${g.default_compat_tool} (Steam's default)` : "Steam's default");
@@ -146,96 +154,124 @@ export const GameControls: FC<{ app: RunningApp; quick?: boolean; running?: bool
 
   const key = `${app.appid}-${rev}-${opts === undefined ? "reading" : "read"}-${drivers.length}`;
   const below = { layout: "below" as const, childrenContainerWidth: "max" as const, bottomSeparator: "none" as const };
-  const desc = (does: ReactNode, note?: ReactNode) => explain(does, nextStart, quick ? undefined : note);
+  /** A choice's Details: what it does, when it applies, its note, and what it adds to the launch options. */
+  const det = (title: string, does: string, note?: string, adds?: string | null): DetailsSpec => ({
+    title, body: paragraphs([does, nextStart, note]),
+    lines: adds ? [adds] : undefined, linesTitle: "Adds to launch options:",
+  });
   const fgN = Number(cur.XESS_FG);
   const game = gi.data?.game ?? null;
   const lr = game ? lastRunLine(game.last_run) : null;
+  const fsrNow = FSR_MODES.find((f) => f.data === mode);
+
+  const xessD = det("XeSS version", cur.XESS === "latest" ? "Intel's newest XeSS libraries from the package replace the game's older ones while it runs; the game's own files are back when it exits. For XeSS older than 2.0.2.68."
+    : cur.XESS === "dp4a" ? "XeSS without Intel's extension (super resolution on the slower DP4a path, frame generation 2x only). For comparing, or ruling the fast path out."
+    : "The game's own XeSS libraries, on the fast XMX cores through the patched driver.",
+  "Needs the xess-xmx-linux hook in the game's Proton.", cur.XESS ? `XESS=${cur.XESS}` : "XESS=latest or XESS=dp4a");
+  const fgD = det("Frame generation", cur.XESS_FG ? `XeSS frame generation makes ${cur.XESS_FG}x, whatever the game's menu says. Turn frame generation on in the game and keep a frame limit on.${fgN > 4 ? " Experimental: beyond what Intel supports; 7x and 8x add latency." : ""}`
+    : "The game's own frame generation choice.", "Needs XeSS frame generation 1.2 or newer in the game (else also \"Newer XeSS\" above).", cur.XESS_FG ? `XESS_FG=${cur.XESS_FG}` : "XESS_FG=2..4");
+  const expD: DetailsSpec = { title: "Show 5x–8x (experimental)", body: "Offers 5x to 8x in the frame generation list: the add-on raises the number inside Intel's library, which Intel does not support. 7x and 8x are not recommended (latency). Only changes the list; nothing is written." };
+  const mesaD = det("Graphics driver", cur.MESA ? `This game uses the package's Mesa ${cur.MESA} driver.` : "The package's default driver (the XeSS tab sets it for all games).",
+    "For a game that misbehaves on one driver only.", cur.MESA ? `MESA=${cur.MESA}` : "MESA=26.1 or 26.3");
+  const vendorD = det("Compatibility mode", "Hides the Intel GPU's vendor id, so Mesa applies its own fixes for this game again. XeSS then runs on the slower DP4a path.",
+    "Only for a game that needs Mesa's workaround.", "force_vk_vendor=-1");
+  const logD = det("Save XeSS logs", "Writes the add-on's, XeLL's and XeSS frame generation's logs into the game's prefix (C:\\igdext_trace.log and others), for a bug report.",
+    "Leave it off otherwise.", "XESS_LOG=1");
+  const fsrD = det("FSR → XeSS", fsrNow?.does ?? "Set by hand; pick one of the others to replace it.",
+    "Needs xess-xmx-linux 20261104 or newer and its hook in the game's Proton.", mode === "" ? "FSR=xess / FSR_FG=xess / FSR_FG=inject" : null);
+  const typoD: DetailsSpec = { title: "Launch options typo", body: "The launch options have \"%command\" without its closing \"%\". Steam then passes everything as game arguments, so no setting reaches the game. \"Fix the typo\" changes it to %command% and leaves the rest as it is." };
+  const optsD: DetailsSpec = { title: "Launch options", body: <Code>{text || "(none)"}</Code> };
+  const pasteD: DetailsSpec = {
+    title: "Paste these launch options",
+    body: <>{steam ? "Steam did not return this game's launch options, so OXP3 Deck does not write them (that would replace yours). " : "OXP3 Deck does not change a non-Steam game's launch options. "}
+      Paste this into the game's Properties → Launch options{text ? ":" : " once you picked something above."}
+      {text && <><br /><Code>{text}</Code></>}</>,
+  };
+  const lastD: DetailsSpec | null = game && lr ? {
+    title: lr.label,
+    body: paragraphs([lr.detail, game.last_run ? `Trace log: ${game.last_run.trace ? "yes (the add-on loaded)" : "no"} · patched driver self-test: ${game.last_run.canary ? "seen" : "not seen"} · kernel compile: ${game.last_run.compile_failed ? "failed" : "ok"}${game.last_run.xell_unsupported === true ? " · XeLL: this game's version is not supported" : game.last_run.xell_unsupported === false ? " · XeLL: supported" : ""}${game.last_run.logged_at ? ` · logged ${when(game.last_run.logged_at)}` : ""}` : null]),
+    lines: [
+      ...(game.dlls?.length ? game.dlls.map((d) => `${d.name} ${d.version ?? "(version unknown)"}${d.link ? " (a link left by XESS=latest)" : ""}`) : ["No XeSS files found in the game."]),
+      ...(game.prefix ? [`prefix: ${game.prefix}`] : []),
+    ],
+    linesTitle: "Files:",
+  } : null;
 
   return (
     <>
       {xs.data?.ok && !x?.installed && (
-        <PanelSectionRow><Note>xess-xmx-linux is not installed: these options do nothing until it is (XeSS above, or the XeSS tab).</Note></PanelSectionRow>
+        <PanelSectionRow><Status ok={false} label="XeSS fast mode not installed" detail="These settings do nothing yet." /></PanelSectionRow>
       )}
       {blocked && (
         <PanelSectionRow>
-          <Status ok={false} red label="Launch options: %command is missing its closing %"
-            detail="Steam then passes everything as game arguments, so no variable reaches the game. Fix it to use the options below." />
+          <Status ok={false} red label="Launch options typo" detail="Blocks the settings below." details={typoD} />
           <ButtonItem layout="below" disabled={busy || opts === undefined} onClick={() => write(fixTypo(text))}
-            description={explain("Changes %command to %command% and leaves the rest as it is.", nextStart)}>
-            Fix: %command%
+            description={explain(nextStart)}>
+            Fix the typo
           </ButtonItem>
         </PanelSectionRow>
       )}
       <PanelSectionRow>
-        <DropdownItem key={`xess-${key}`} {...below} label="XeSS libraries" menuLabel="XeSS libraries" disabled={disabled}
-          rgOptions={xessOpts} selectedOption={cur.XESS ?? ""} onChange={(o) => change({ XESS: o.data || null })}
-          description={desc(cur.XESS === "latest" ? "XESS=latest: Intel's newest XeSS libraries from the package replace the game's older ones while it runs; its own files are back when it exits. For XeSS older than 2.0.2.68."
-            : cur.XESS === "dp4a" ? "XESS=dp4a: XeSS without Intel's extension (super resolution on DP4a, frame generation 2x only). For comparing, or ruling the XMX path out."
-            : "The game's own XeSS libraries, on the XMX cores through the patched driver.",
-          "Needs the xess-xmx-linux hook in the game's Proton.")} />
-        <DropdownItem key={`fg-${key}-${experimental}`} {...below} label="Frame generation" menuLabel="XeSS frame generation"
-          disabled={disabled} rgOptions={fgOpts} selectedOption={cur.XESS_FG ?? ""} onChange={(o) => change({ XESS_FG: o.data || null })}
-          description={desc(cur.XESS_FG ? `XESS_FG=${cur.XESS_FG}: XeSS frame generation makes ${cur.XESS_FG}x, whatever the game's menu says. Turn frame generation on in the game and keep a frame limit on.${fgN > 4 ? " Experimental: beyond what Intel supports; 7x and 8x add latency." : ""}`
-            : "The game's own frame generation choice.",
-          "Needs XeSS frame generation 1.2 or newer in the game (else also Latest above).")} />
-        <ToggleField label="5x to 8x (experimental)" checked={experimental} bottomSeparator="none"
-          onChange={(v) => { setExperimental(v); remember.set("fgExperimental", v ? "1" : "0"); }}
-          description={explain("Offers 5x to 8x in the list above: the shim raises the number inside Intel's library, which Intel does not support. 7x and 8x are not recommended (latency).", "Only changes the list; nothing is written.")} />
-        <DropdownItem key={`mesa-${key}`} {...below} label="Mesa driver" menuLabel="Mesa driver" disabled={disabled}
-          rgOptions={mesaOpts} selectedOption={cur.MESA ?? ""} onChange={(o) => change({ MESA: o.data || null })}
-          description={desc(cur.MESA ? `MESA=${cur.MESA}: this game uses the package's Mesa ${cur.MESA} driver.` : "The package's default driver (the XeSS tab sets it for all games).",
-            "For a game that misbehaves on one driver only.")} />
-        <ToggleField label="Hide the Intel GPU" checked={cur.force_vk_vendor === "-1"} disabled={disabled} bottomSeparator="none"
-          onChange={(v) => change({ force_vk_vendor: v ? "-1" : null })}
-          description={desc("force_vk_vendor=-1: Mesa's own profile for this game again (the Intel vendor id is hidden). XeSS then runs on DP4a.",
-            "Only for a game that needs Mesa's workaround.")} />
-        <ToggleField label="Logs" checked={!!cur.XESS_LOG && cur.XESS_LOG !== "0"} disabled={disabled} bottomSeparator="none"
-          onChange={(v) => change({ XESS_LOG: v ? "1" : null })}
-          description={desc("XESS_LOG=1: the shim's, XeLL's and XeSS frame generation's logs in the game's prefix (C:\\igdext_trace.log and others), for a bug report.",
-            "Leave it off otherwise.")} />
+        <WithDetails details={xessD}>
+          <DropdownItem key={`xess-${key}`} {...below} label={label("XeSS version", xessD)} menuLabel="XeSS version" disabled={disabled}
+            rgOptions={xessOpts} selectedOption={cur.XESS ?? ""} onChange={(o) => change({ XESS: o.data || null })}
+            description={explain(cur.XESS === "latest" ? "Newer XeSS for older games." : cur.XESS === "dp4a" ? "For testing." : "Uses the game's XeSS.")} />
+        </WithDetails>
+        <WithDetails details={fgD}>
+          <DropdownItem key={`fg-${key}-${experimental}`} {...below} label={label("Frame generation", fgD)} menuLabel="XeSS frame generation"
+            disabled={disabled} rgOptions={fgOpts} selectedOption={cur.XESS_FG ?? ""} onChange={(o) => change({ XESS_FG: o.data || null })}
+            description={explain(cur.XESS_FG ? "Turn on frame gen in the game and set a frame limit." : "Uses the game's own choice.")} />
+        </WithDetails>
+        <WithDetails details={expD}>
+          <ToggleField label={label("Show 5x–8x (experimental)", expD)} checked={experimental} bottomSeparator="none"
+            onChange={(v) => { setExperimental(v); remember.set("fgExperimental", v ? "1" : "0"); }}
+            description={explain("Adds more choices above. Not supported by Intel.")} />
+        </WithDetails>
+        <WithDetails details={mesaD}>
+          <DropdownItem key={`mesa-${key}`} {...below} label={label("Graphics driver", mesaD)} menuLabel="Graphics driver" disabled={disabled}
+            rgOptions={mesaOpts} selectedOption={cur.MESA ?? ""} onChange={(o) => change({ MESA: o.data || null })}
+            description={explain("Only change if this game misbehaves.")} />
+        </WithDetails>
+        <WithDetails details={vendorD}>
+          <ToggleField label={label("Compatibility mode", vendorD)} checked={cur.force_vk_vendor === "-1"} disabled={disabled} bottomSeparator="none"
+            onChange={(v) => change({ force_vk_vendor: v ? "-1" : null })}
+            description={explain("Only for games that need it; XeSS slows down.")} />
+        </WithDetails>
+        <WithDetails details={logD}>
+          <ToggleField label={label("Save XeSS logs", logD)} checked={!!cur.XESS_LOG && cur.XESS_LOG !== "0"} disabled={disabled} bottomSeparator="none"
+            onChange={(v) => change({ XESS_LOG: v ? "1" : null })}
+            description={explain("For bug reports; leave off otherwise.")} />
+        </WithDetails>
         {showFsr && (
-          <DropdownItem key={`fsr-${key}`} {...below} label="FSR" menuLabel="FSR on XeSS" disabled={disabled}
-            rgOptions={fsrOpts} selectedOption={mode}
-            onChange={(o) => { const m = FSR_MODES.find((f) => f.data === o.data); if (m) change(m.set); }}
-            description={desc(FSR_MODES.find((f) => f.data === mode)?.does ?? "Set by hand; pick one of the others to replace it.",
-              "Needs xess-xmx-linux 20261104 or newer and its hook in the game's Proton.")} />
+          <WithDetails details={fsrD}>
+            <DropdownItem key={`fsr-${key}`} {...below} label={label("FSR → XeSS", fsrD)} menuLabel="FSR on XeSS" disabled={disabled}
+              rgOptions={fsrOpts} selectedOption={mode}
+              onChange={(o) => { const m = FSR_MODES.find((f) => f.data === o.data); if (m) change(m.set); }}
+              description={explain(fsrNow?.line ?? "Set by hand.")} />
+          </WithDetails>
         )}
-        {busy && <Status ok={null} label="Writing the launch options…" />}
+        {busy && <Status ok={null} label="Saving…" />}
         {saved && !err && <Status ok label="Saved" detail={nextStart} />}
         <Problem what="Launch options" error={err} />
         {writable ? (
-          <Note label="Launch options"><Code>{text || "(none)"}</Code></Note>
+          !quick && <Status ok={null} label="Launch options" detail={text ? "Open Details to see them." : "None"} details={optsD} />
         ) : opts === undefined ? (
-          <Note label="Launch options">Reading them from Steam…</Note>
+          <Status ok={null} label="Reading the launch options…" />
         ) : (
           <>
-            <Note label={steam ? "Steam did not return this game's launch options" : "Non-Steam game"}>
-              {steam ? "So OXP3 Deck does not write them (that would replace yours). " : "OXP3 Deck does not change a shortcut's launch options. "}
-              Paste this into the game's Properties → Launch options{text ? ":" : " once you picked something above."}
-              {text && <><br /><Code>{text}</Code></>}
-            </Note>
-            {steam && <ButtonItem layout="below" onClick={read} description="Asks Steam for this game's launch options again.">Read again</ButtonItem>}
+            <Status ok={null} label="Paste these launch options" detail="OXP3 Deck can't write them for this game." details={pasteD} />
+            {steam && <ButtonItem layout="below" onClick={read} description={explain("Asks Steam again.")}>Read again</ButtonItem>}
           </>
         )}
       </PanelSectionRow>
       <PanelSectionRow>
         <Problem what="Game check" error={gi.data && !gi.data.ok ? gi.data.error : null} />
-        {game && <Status ok={game.compat_tool_shimmed} label={`Proton: ${toolName(game)}`} detail={protonLine(game)} />}
-        {(game?.advice ?? []).map((a, i) => <Note key={i} label={i === 0 ? "Advice" : undefined}>{a}</Note>)}
-        {lr && <Status ok={lr.ok} label={lr.label} detail={quick ? undefined : lr.detail} />}
-        {!quick && game?.last_run && (
-          <Note label="Last run details">
-            {`Trace log: ${game.last_run.trace ? "yes (the shim loaded)" : "no"} · patched driver self-test: ${game.last_run.canary ? "seen" : "not seen"} · kernel compile: ${game.last_run.compile_failed ? "failed" : "ok"}`}
-            {game.last_run.xell_unsupported === true ? " · XeLL: this game's version is not supported" : game.last_run.xell_unsupported === false ? " · XeLL: supported" : ""}
-            {game.last_run.logged_at ? ` · logged ${when(game.last_run.logged_at)}` : ""}
-          </Note>
-        )}
-        {!quick && game && (
-          <Note label="XeSS files in the game">
-            {game.dlls?.length ? game.dlls.map((d) => `${d.name} ${d.version ?? "(version unknown)"}${d.link ? " (a link left by XESS=latest)" : ""}`).join(" · ") : "None found (the game may not use XeSS, or keeps it elsewhere)."}
-          </Note>
-        )}
-        {!quick && game?.prefix && <Note label="Prefix"><Code>{game.prefix}</Code></Note>}
+        {game && <Status ok={game.compat_tool_shimmed} label={`Proton: ${toolName(game)}`} detail={protonShort(game)}
+          details={{ title: `Proton: ${toolName(game)}`, body: protonLine(game) }} />}
+        {(game?.advice ?? []).map((a, i) => (
+          <Note key={i} label={i === 0 ? "Tip" : undefined} details={a.length > 80 ? { title: "Tip", body: a } : undefined}>{firstSentence(a)}</Note>
+        ))}
+        {lr && <Status ok={lr.ok} label={lr.label} detail={lr.line} details={lastD} />}
       </PanelSectionRow>
     </>
   );

@@ -53,7 +53,7 @@ export const xessOffer = (installed: boolean, version: string | null, x: XessSta
 
 /** The button's label. */
 export const offerLabel = (o: XessOffer): string =>
-  o.kind === "update" ? `Update to ${o.latest}` : o.kind === "repair" ? `Repair ${o.version ?? "XeSS XMX"}` : "Install XeSS XMX";
+  o.kind === "update" ? `Update XeSS to ${o.latest}` : o.kind === "repair" ? "Repair XeSS" : "Install XeSS fast mode";
 
 const sentence = (s: string) => {
   const t = s.trim();

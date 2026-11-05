@@ -5,13 +5,14 @@ import { FC, useMemo, useState } from "react";
 
 import { blockedBy, installXess, uninstallXess, useAction } from "../actions";
 import { get_overview, xess_check_update, xess_remove_folder, xess_set_driver, xess_shim_system_protons, xess_state } from "../backend";
-import { confirm } from "../components/confirm";
-import { Code, explain, Note, Problem, Status } from "../components/Hint";
+import { confirm, DetailsSpec, paragraphs } from "../components/confirm";
+import { Code, explain, INFO, Note, Problem, Status, WithDetails } from "../components/Hint";
 import { JobView, TaskSection } from "../components/JobView";
 import { driverPrefix } from "../launchopts";
 import { invalidate, useCurrentJob, useResource } from "../store";
+import { firstSentence, fitsOneLine } from "../text";
 import type { Overview, XessDriver, XessStateRes, XessUpdateCheck } from "../types";
-import { listText, toast, when } from "../util";
+import { listText, toast } from "../util";
 import { checkText, offerLabel, pieceText, repairText, xessOffer } from "../xessoffer";
 import { xessLine } from "./Quick";
 
@@ -34,7 +35,7 @@ const OldFolder: FC<{ path: string; disabled: boolean }> = ({ path, disabled }) 
           if (r.ok) { toast("Old folder removed"); invalidate("xess"); }
           return r.ok ? null : r.error;
         })}
-        description={explain(<Code>{path}</Code>, "Only after a re-login: until then Steam may still use it.")}>
+        description={explain(path.split("/").pop() ?? path)}>
         {act.busy ? "Removing…" : "Remove old folder"}
       </ButtonItem>
       <Problem what="Remove" error={act.error} />
@@ -68,76 +69,70 @@ export const XessTab: FC = () => {
     live: x.live, relogin_needed: x.relogin_needed } : ov.data?.ok ? ov.data.xess : null);
   const unshimmed = (x?.system_protons ?? []).filter((p) => !p.shimmed);
   const busy = running || !!inst.busy;
+  const drvD: DetailsSpec | null = x ? { title: "Default graphics driver", body: `The package's fast driver every game uses unless its own settings pick another. Applies at each game's next start; no re-login.${x.preferred_driver ? ` Kept across updates: ${x.preferred_driver}.` : ""}`, lines: ["tools/switch-driver.sh", "per game: MESA=…"] } : null;
 
   return (
     <>
       <TaskSection />
-      <PanelSection title="xess-xmx-linux">
+      <PanelSection title="XeSS fast mode">
         <PanelSectionRow>
           {!xs.data && <Status ok={null} label="Reading…" />}
           <Problem what="XeSS state" error={xs.data && !xs.data.ok ? xs.data.error : null} />
-          <Status ok={line.ok} label={line.label} detail={line.detail} />
+          <Status ok={line.ok} label={line.label} detail={line.detail} details={{
+            title: "XeSS fast mode", body: paragraphs([line.more, x && !x.installed && x.package_dir ? "The package OXP3 Deck installed last is no longer set up (uninstalled). Install sets it up again." : null,
+              x?.installed ? (x.managed ? "Installed by OXP3 Deck." : "Installed by hand; Update moves it to a folder OXP3 Deck manages.") : null]),
+            lines: x ? [...(x.package_dir ? [`package: ${x.package_dir}`] : []), `driver check at log-in: ${x.units.check ?? "not set up"}`, `prefix watcher: ${x.units.watcher ?? "not set up"}`] : undefined,
+          }} />
           {x?.script_running && (
-            <Status ok={null} label="A package script is still running"
-              detail={<><Code>{x.script_running}</Code><div>It started before the plugin restarted (a Decky or plugin
-                update) and runs to its end. Install, Uninstall, the driver switch, the shim and removing old folders wait
-                until it has ended; open this page again then.</div></>} />
-          )}
-          {x && !x.installed && x.package_dir && (
-            <Note label="Not set up">{`${x.package_dir} is the package OXP3 Deck installed last, but its install.sh files are gone (uninstalled). Install sets it up again.`}</Note>
-          )}
-          {x?.installed && (
-            <Note label="Package">
-              <Code>{x.package_dir ?? "?"}</Code>
-              {x.managed ? " (installed by OXP3 Deck)" : " (installed by hand; Update moves it to a folder OXP3 Deck manages)"}
-            </Note>
+            <Status ok={null} label="Installer still running" detail="Buttons wait until it ends."
+              details={{ title: "Installer still running", body: "A package script started before the plugin restarted (a Decky or plugin update) and runs to its end. Install, Uninstall, the driver switch, the add-on and removing old folders wait until it has ended; open this page again then.", lines: [x.script_running] }} />
           )}
           {x?.installed && (
             <Status ok={x.status.state === "ok" ? true : x.status.state === "failed" ? false : null}
-              label={`Driver check: ${x.status.state}${x.status.driver ? ` · ${x.status.driver}` : ""}`}
-              detail={<>{x.status.line && <Code>{x.status.line}</Code>}{(x.status.notes ?? []).map((n, i) => <div key={i}>{n}</div>)}</>} />
-          )}
-          {x?.installed && (
-            <Note label="Services">
-              {`Driver check at log-in: ${x.units.check ?? "not set up"} · prefix watcher: ${x.units.watcher ?? "not set up"}`}
-            </Note>
+              label={`Driver check: ${x.status.state === "ok" ? "OK" : x.status.state === "failed" ? "Failed" : "Not run yet"}`}
+              detail={x.status.state === "failed" ? "Games use the slower mode." : x.status.driver ?? undefined}
+              details={{ title: "Driver check", body: paragraphs(["Checks at each log-in that the fast driver works; if not, games fall back to the slower mode.", ...(x.status.notes ?? [])]),
+                lines: x.status.line ? [x.status.line] : undefined }} />
           )}
           {x?.flatpak_steam && (
-            <Status ok={false} label="Steam is a Flatpak" detail="xess-xmx-linux works with Steam installed from the system's packages; the Flatpak's Vulkan driver and Protons are separate." />
+            <Status ok={false} label="Steam is a Flatpak" detail="Not supported: needs Steam from system packages."
+              details={{ title: "Steam is a Flatpak", body: "XeSS fast mode works with Steam installed from the system's packages; the Flatpak's graphics driver and Protons are separate." }} />
           )}
           {!!x?.missing_tools?.length && (
-            <Status ok={false} label={`Missing: ${listText(x.missing_tools)}`}
-              detail="install.sh needs these programs; install them with the system's package manager first." />
+            <Status ok={false} label={`Missing programs: ${listText(x.missing_tools)}`} detail="Install them first."
+              details={{ title: "Missing programs", body: "The installer needs these programs; install them with the system's package manager first.", lines: x.missing_tools }} />
           )}
           {x?.installed && !!x.missing_downloads?.length && (
-            <Status ok={false} label={`Not downloaded: ${listText(x.missing_downloads.map((p) => `${p}/`))}`}
-              detail={<>{x.missing_downloads.map((p) => <div key={p}>{pieceText(p)}</div>)}
-                <div>{x.repair ? "Repair (below) runs install.sh again, which downloads them." : "install.sh downloads them when it runs again (the next update)."}</div></>} />
+            <Status ok={false} label="Some parts didn't download" detail={x.repair ? "Repair downloads them." : "The next update downloads them."}
+              details={{ title: "Some parts didn't download", body: paragraphs([...x.missing_downloads.map((p) => pieceText(p)),
+                x.repair ? "Repair (below) runs the installer again, which downloads them." : "The installer downloads them when it runs again (the next update)."]),
+                lines: x.missing_downloads.map((p) => `${p}/`) }} />
           )}
         </PanelSectionRow>
         <PanelSectionRow>
           {offer.kind && (
-            <ButtonItem layout="below" disabled={busy || !xs.data || (!x && !sum)}
-              onClick={() => inst.run("install", async () => blockedBy() ?? installXess(offer, x, user))}
-              description={explain(offer.kind === "update" ? `Updates ${version ?? ""} to ${offer.latest} in a new folder; the old one is uninstalled first.`
-                : offer.kind === "repair" ? repairText(offer)
-                : "Downloads the newest release and runs its install.sh as your user.",
-                offer.kind === "repair" ? "Asks first." : "Then log out and back in; asks first.")}>
-              {inst.busy === "install" ? "Working…" : offerLabel(offer)}
-            </ButtonItem>
+            <WithDetails details={{ title: offerLabel(offer), body: offer.kind === "update" ? `Updates ${version ?? ""} to ${offer.latest} in a new folder; the old one is uninstalled first. Then log out and back in; asks first.`
+              : offer.kind === "repair" ? `${repairText(offer)} Asks first.` : "Downloads the newest release of xess-xmx-linux and runs its installer as your user. Then log out and back in; asks first." }}>
+              <ButtonItem layout="below" disabled={busy || !xs.data || (!x && !sum)}
+                onClick={() => inst.run("install", async () => blockedBy() ?? installXess(offer, x, user))}
+                description={explain(offer.kind === "repair" ? "Runs the installer again." : "Faster XeSS upscaling and frame generation in games.")}>
+                {inst.busy === "install" ? "Working…" : `${offerLabel(offer)}${INFO}`}
+              </ButtonItem>
+            </WithDetails>
           )}
           <ButtonItem layout="below" disabled={busy || chk.loading}
             onClick={() => inst.run("check", async () => { const r = await chk.reload(); return r && !r.ok ? r.error : null; })}
-            description={explain("Asks GitHub for the newest xess-xmx-linux release. Changes nothing.",
-              chk.data?.ok ? `${checkText(chk.data, installed, version)} (checked ${when(chk.data.checked_at)}).${chk.data.note ? ` ${chk.data.note}` : ""}` : undefined)}>
+            description={explain(chk.data?.ok ? firstSentence(checkText(chk.data, installed, version)) : "Changes nothing.")}>
             {chk.loading ? "Checking…" : "Check for an update"}
           </ButtonItem>
           {x?.installed && (
-            <ButtonItem layout="below" disabled={busy}
-              onClick={() => inst.run("uninstall", async () => blockedBy() ?? uninstallXess(x))}
-              description={explain("Runs the package's uninstall.sh as your user; the folder stays.", "Log out and back in afterwards; asks first.")}>
-              {inst.busy === "uninstall" ? "Working…" : "Uninstall"}
-            </ButtonItem>
+            <WithDetails details={{ title: "Uninstall", body: "Runs the package's uninstaller as your user; the folder stays. Log out and back in afterwards; asks first." }}>
+              <ButtonItem layout="below" disabled={busy}
+                onClick={() => inst.run("uninstall", async () => blockedBy() ?? uninstallXess(x))}
+                description={explain("Log out and back in afterwards.")}>
+                {inst.busy === "uninstall" ? "Working…" : `Uninstall${INFO}`}
+              </ButtonItem>
+            </WithDetails>
           )}
           <Problem what="xess-xmx-linux" error={inst.error} />
         </PanelSectionRow>
@@ -146,7 +141,8 @@ export const XessTab: FC = () => {
       {x?.installed && drivers.length > 0 && (
         <PanelSection title="Default driver">
           <PanelSectionRow>
-            <DropdownItem key={`drv-${current?.version ?? ""}-${drivers.length}-${drvRev}`} label="Mesa driver for all games" menuLabel="Default Mesa driver"
+            <WithDetails details={drvD}>
+            <DropdownItem key={`drv-${current?.version ?? ""}-${drivers.length}-${drvRev}`} label={`Default graphics driver${INFO}`} menuLabel="Default graphics driver"
               layout="below" childrenContainerWidth="max" bottomSeparator="none" disabled={running || !!drv.busy}
               rgOptions={driverOpts} selectedOption={current?.version ?? null}
               onChange={(o) => drv.run("driver", async () => {
@@ -161,8 +157,8 @@ export const XessTab: FC = () => {
                 invalidate("xess");
                 return r.ok ? null : r.error;
               })}
-              description={explain(`The package's patched driver games use unless their launch options say MESA=… (tools/switch-driver.sh). ${x.preferred_driver ? `Kept across updates: ${x.preferred_driver}.` : ""}`,
-                "Applies at each game's next start; no re-login.")} />
+              description={explain("Used by every game unless it picks its own.")} />
+            </WithDetails>
             {drv.busy && <Status ok={null} label="Testing and switching the driver…" />}
             <Problem what="Default driver" error={drv.error} />
           </PanelSectionRow>
@@ -173,7 +169,7 @@ export const XessTab: FC = () => {
           <PanelSectionRow>
             {(x.system_protons ?? []).map((p) => (
               <Status key={p.path} ok={p.shimmed} label={p.name}
-                detail={p.shimmed ? "System Proton with the XMX shim." : "System Proton without the shim: XeSS in games on it stays on DP4a."} />
+                detail={p.shimmed ? "XeSS fast mode ready" : "Needs the XeSS add-on"} />
             ))}
             {unshimmed.length > 0 && (
               <ButtonItem layout="below" disabled={running || !!shim.busy}
@@ -189,31 +185,33 @@ export const XessTab: FC = () => {
                   if (r.ok && r.done?.length) toast(`Shim added to ${r.done.length} system Proton${r.done.length === 1 ? "" : "s"}`);
                   return r.ok ? (r.failed?.length ? `not done: ${listText(r.failed)}` : null) : r.error;
                 })}
-                description={explain("Gives games on CachyOS's system Protons (proton-cachyos-*) XeSS on the XMX cores.", "Applies at each game's next start; asks first.")}>
-                {shim.busy ? "Working…" : `Add the shim (${unshimmed.length})`}
+                description={explain("Lets games on these Protons use fast mode.")}>
+                {shim.busy ? "Working…" : `Add XeSS to system Protons (${unshimmed.length})`}
               </ButtonItem>
             )}
             {x.system_protons_need_shim && (
-              <Status ok={false} label="A system Proton lost the shim"
-                detail="A package update of it put the stock igdext64.dll back; add the shim again." />
+              <Status ok={false} label="A Proton update removed XeSS" detail="Add it again above."
+                details={{ title: "A Proton update removed XeSS", body: "A package update of a system Proton put its stock file back. Add the XeSS add-on again with the button above.", lines: ["igdext64.dll"] }} />
             )}
             <Problem what="System Protons" error={shim.error} />
-            {shimNotes.map((n, i) => <Note key={i}>{n}</Note>)}
+            {shimNotes.map((n, i) => <Note key={i} details={fitsOneLine(n) ? null : { title: "Note", body: n }}>{firstSentence(n)}</Note>)}
             {(x.user_protons ?? []).length > 0 && (
-              <Note label="Your Protons">
-                {(x.user_protons ?? []).map((p) => `${p.name}: ${p.shimmed ? "shim" : "no shim"}, ${p.hook ? "hook" : "no hook"}`).join(" · ")}
+              <Note label="Your Protons" details={{ title: "Your Protons", body: "Protons in your own Steam folder, as the installer set them up.",
+                lines: (x.user_protons ?? []).map((p) => `${p.name}: ${p.shimmed ? "shim" : "no shim"}, ${p.hook ? "hook" : "no hook"}`) }}>
+                {`${(x.user_protons ?? []).filter((p) => p.shimmed).length} of ${(x.user_protons ?? []).length} ready for fast mode`}
               </Note>
             )}
           </PanelSectionRow>
         </PanelSection>
       )}
       {x && (x.old_folders.length > 0 || (x.old_folders_kept ?? []).length > 0) && (
-        <PanelSection title="Old package folders">
+        <PanelSection title="Old XeSS folders">
           <PanelSectionRow>
-            {x.relogin_needed && x.old_folders.length > 0 && <Note>Log out and back in first: Steam still runs with the old folder's driver.</Note>}
+            <Note>Remove old versions to free space.</Note>
+            {x.relogin_needed && x.old_folders.length > 0 && <Note>Log out and back in first.</Note>}
             {/* RC-2: the ones xess_remove_folder always refuses get no Remove button */}
             {(x.old_folders_kept ?? []).map((k) => (
-              <Note key={k.path} label="Left to you"><Code>{k.path}</Code> {k.why}.</Note>
+              <Note key={k.path} label="Left to you" details={{ title: "Left to you", body: `This folder ${k.why}.`, lines: [k.path] }}>{k.path.split("/").pop()}</Note>
             ))}
           </PanelSectionRow>
           {x.old_folders.map((p) => <PanelSectionRow key={p}><OldFolder path={p} disabled={running || x.relogin_needed} /></PanelSectionRow>)}

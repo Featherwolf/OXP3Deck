@@ -1,23 +1,27 @@
 // Power control (DESIGN.md "Power (TDP, GPU, CPU)", Frontend): the rows the quick panel's Power section and the full
 // page's Power tab share. Profile values go through the store's one writer (powerWriter), never straight to
-// power_set, so a slider drag reaches the backend in order and a late answer cannot move a slider back.
+// power_set, so a slider drag reaches the backend in order and a late answer cannot move a slider back. Every row
+// shows one plain line; the rest is in its Details (☰).
 import { ButtonItem, DropdownItem, PanelSection, PanelSectionRow, SliderField, ToggleField } from "@decky/ui";
 import { FC, useEffect, useMemo, useRef, useState } from "react";
 
 import { useAction } from "../actions";
 import { power_enable, power_info, power_profile, power_take_control } from "../backend";
+import { friendlyName, lockedLine } from "../conflicts";
 import {
-  blockers, clampW, editSlot, EMPTY, eppOptions, failedLines, fwValues, gpuNotches, pl1Change, pl2Floor, overriddenText,
-  profileLine, effectiveLine, shown, Slot, suspects,
+  blockers, capRows, clampW, editSlot, EMPTY, eppOptions, fwValues, gpuNotches, limitsLine, pl1Change, pl2Floor,
+  profileLine, reasonText, shown, Slot, suspects, watts,
 } from "../power";
 import { RunningApp } from "../steam";
 import { invalidate, notePower, powerWriter, usePowerErrors, usePowerState, useResource } from "../store";
+import { firstSentence } from "../text";
 import type {
   Epp, PowerChangeRes, PowerConflict, PowerInfo, PowerInfoRes, PowerState, PowerValues,
 } from "../types";
-import { remember } from "../util";
-import { confirm } from "./confirm";
-import { explain, Note, Problem, Status } from "./Hint";
+import { listText, remember } from "../util";
+import { clearRecentFixes, ConflictRows, FixedRows } from "./ConflictRow";
+import { confirm, DetailsSpec, paragraphs } from "./confirm";
+import { explain, label, Problem, Status, WithDetails } from "./Hint";
 import { useQuickAccessVisible } from "./JobView";
 
 /** The cached power info and the live state (polled only while `active`): the state of power_state, else info's. */
@@ -27,7 +31,7 @@ export const usePower = (active: boolean) => {
   const i = info.data?.ok ? info.data.info : null;
   const state = (live.data?.ok ? live.data.state : null) ?? i?.state ?? null;
   // the conflict rows the guidance is built from: reload them when a blocker or an override shows up (or leaves)
-  const watch = `${state?.blocked ?? ""}|${state?.overridden?.since ?? ""}`;
+  const watch = `${state?.blocked ?? ""}|${state?.overridden?.since ?? ""}|${(state?.cpu_blocked_by ?? []).join(",")}`;
   const seen = useRef(watch);
   useEffect(() => {
     if (seen.current === watch) return;
@@ -40,75 +44,133 @@ export const usePower = (active: boolean) => {
 /** A change call's answer into the caches; its error text (or null). */
 export const settle = (r: PowerChangeRes): string | null => notePower(r);
 
-const fixRows = (cs: PowerConflict[]) => cs.map((c) => (
-  <Status key={c.id} ok={false} red label={c.name} detail={explain(c.why, c.fix ? <>Fix: {c.fix}</> : undefined)} />
-));
+const names = (cs: PowerConflict[]) => listText(cs.map((c) => friendlyName(c.id, c.name)));
+
+/** The conflicts behind cpu_blocked (cpu_blocked_by; an older backend: every cpu conflict not handled). */
+export const cpuBlockers = (state: PowerState, info: PowerInfo | null): PowerConflict[] => {
+  if (!state.cpu_blocked) return [];
+  const all = info?.conflicts ?? [];
+  const by = state.cpu_blocked_by ?? [];
+  return by.length ? all.filter((c) => by.includes(c.id)) : all.filter((c) => c.kind === "cpu" && !c.ignored);
+};
+
+const statusDetails = (state: PowerState): DetailsSpec => {
+  const n = state.now;
+  const why = reasonText(n.gpu?.reasons);
+  return {
+    title: "Power now",
+    body: paragraphs([
+      "Steady is the power the CPU and GPU share for as long as a game runs; boost is the short burst above it.",
+      n.gpu ? `GPU at ${n.gpu.act ?? "?"} MHz (allowed ${n.gpu.min ?? "?"}–${n.gpu.max ?? "?"} MHz)${why ? `, ${why}` : ", running freely"}.` : null,
+      state.enabled ? `Profile: ${profileLine(state)}.` : "Power control is off: these are the device's own limits.",
+    ]),
+    lines: [
+      ...n.zones.map((z) => `${z.iface.toUpperCase()} ${z.name}: PL1 ${watts(z.pl1_w)} · PL2 ${watts(z.pl2_w)} · PL4 ${watts(z.pl4_w)}${z.locked.length ? ` (locked: ${z.locked.join(", ")})` : ""}`),
+      ...(n.gpu?.reasons.length ? [`GPU throttle reasons: ${n.gpu.reasons.join(", ")}`] : []),
+    ],
+  };
+};
+
+const TAKE_D: DetailsSpec = {
+  title: "Take control again",
+  body: "Writes this profile's values again and watches them as before. Turn the other program off first, or it changes them back.",
+};
 
 /** The status line and the red rows: blocked, overridden (with "Take control again"), what did not take. */
-export const PowerStatusRows: FC<{ info: PowerInfo | null; state: PowerState }> = ({ info, state }) => {
+export const PowerStatusRows: FC<{ info: PowerInfo | null; state: PowerState; quick?: boolean }> = ({ info, state, quick }) => {
   const act = useAction();
   const o = state.overridden;
-  const fails = failedLines(state.last, state.now.zones);
+  const caps = capRows(state.last, state.now.zones);
+  const blocking = blockers(info?.conflicts);
+  const gpuHeld = state.enabled && (state.now.gpu?.reasons ?? []).some((r) => /^(pl\d|power|vr_tdc)$/.test(r));
+  const sus = o ? suspects(o, info?.conflicts) : [];
+  const susNames = (o?.suspects ?? []).map((id) => (id === "steam" ? "Steam's own sliders"
+    : friendlyName(id, info?.conflicts.find((c) => c.id === id)?.name)));
   return (
     <>
       <PanelSectionRow>
         <Status ok={!state.enabled ? null : !o && !state.blocked}
-          label={effectiveLine(state)}
-          detail={`${profileLine(state)}${state.enabled ? "" : " · TDP control is off: these are the firmware's limits"}`} />
+          label={limitsLine(state)} details={statusDetails(state)}
+          detail={state.enabled ? `${profileLine(state)}${gpuHeld ? " · GPU held back by power limit" : ""}` : "Device defaults"} />
       </PanelSectionRow>
       {state.enabled && state.blocked && (
         <PanelSectionRow>
-          <Status ok={false} red label="TDP control is paused" detail={`${state.blocked} OXP3 Deck writes nothing while it runs.`} />
-          {fixRows(blockers(info?.conflicts))}
+          <Status ok={false} red label="Power control paused"
+            detail={`${names(blocking) || "Another program"} is also changing power limits.`}
+            details={{ title: "Power control paused", body: paragraphs([state.blocked, "OXP3 Deck writes nothing while another program changes the power limits. Turn it off (Fix for me where offered), and power control picks up again."]) }} />
+          <ConflictRows rows={blocking} info={info} quick={quick} />
         </PanelSectionRow>
       )}
       {state.enabled && o && (
         <PanelSectionRow>
-          <Status ok={false} red label="Power limits overridden" detail={overriddenText(o, info?.conflicts)} />
-          {suspects(o, info?.conflicts).filter((s) => s.fix).map((s) => <Note key={s.name} label={s.name}>{s.fix}</Note>)}
-          <ButtonItem layout="below" disabled={!!act.busy}
-            onClick={() => act.run("take", async () => { await powerWriter.drain(); return settle(await power_take_control()); })}
-            description={explain("Writes this profile's values again and watches them as before.",
-              "Turn the other power manager's control off first, or it changes them back.")}>
-            {act.busy ? "Working…" : "Take control again"}
-          </ButtonItem>
+          <Status ok={false} red label="Something changed your power limits"
+            detail={susNames.length ? `Likely ${listText(susNames)}. Fix it, then tap Take control again.` : "Fix it, then tap Take control again."}
+            details={{
+              title: "Something changed your power limits",
+              body: paragraphs([`Now ${o.now}; OXP3 Deck set ${o.ours}. OXP3 Deck stops writing instead of fighting the other program.`,
+                ...sus.filter((s) => s.fix).map((s) => `${s.name}: ${s.fix}`)]),
+            }} />
+          <WithDetails details={TAKE_D}>
+            <ButtonItem layout="below" disabled={!!act.busy}
+              onClick={() => act.run("take", async () => { await powerWriter.drain(); return settle(await power_take_control()); })}
+              description={explain("Re-applies your settings.")}>
+              {act.busy ? "Working…" : label("Take control again", TAKE_D)}
+            </ButtonItem>
+          </WithDetails>
           <Problem what="Take control" error={act.error} />
         </PanelSectionRow>
       )}
-      {state.enabled && fails.length > 0 && (
+      {state.enabled && caps.length > 0 && (
         <PanelSectionRow>
-          {fails.map((f, n) => <Status key={n} ok={false} label="Not applied" detail={f} />)}
+          {caps.map((c, n) => (
+            <Status key={n} ok={false} label={c.label} detail={c.line ?? firstSentence(c.detail)}
+              details={{ title: c.label, body: paragraphs([c.detail, "The CPU uses the lower of its two power-limit interfaces, so a capped one sets the limit."]) }} />
+          ))}
         </PanelSectionRow>
       )}
+      {/* the Power tab lists every record under "Other power programs"; the quick panel only what it just fixed */}
+      {quick && <PanelSectionRow><FixedRows info={info} quick /></PanelSectionRow>}
     </>
   );
 };
 
 const ENABLE_SEEN = "powerEnableConfirmed";
 
-/** The "TDP control" toggle: the first enable asks first; a refused one lists each blocking conflict and its fix. */
-export const EnableToggle: FC<{ state: PowerState; info: PowerInfo | null }> = ({ state, info }) => {
+const ENABLE_DETAILS: DetailsSpec = {
+  title: "Power control (TDP)",
+  body: paragraphs([
+    "On: OXP3 Deck sets the power limits, GPU speed and CPU boost from the active profile, and sets them again after sleep, when a game starts and when the charger is plugged in or out.",
+    "Off: the device's own limits apply. Turning it off, or rebooting, restores them.",
+    "Turn it off before you disable or uninstall OXP3 Deck: otherwise the GPU speed range and energy preference it set stay until a reboot.",
+  ]),
+  lines: ["RAPL PL1 (long_term) and PL2 (short_term), MSR and MMIO", "xe render GT min_freq / max_freq",
+    "cpufreq energy_performance_preference, intel_pstate no_turbo"],
+};
+
+/** The "Power control (TDP)" toggle: the first enable asks first; a refused one lists each blocking conflict and its fix. */
+export const EnableToggle: FC<{ state: PowerState; info: PowerInfo | null; quick?: boolean }> = ({ state, info, quick }) => {
   const act = useAction();
   const [refused, setRefused] = useState<PowerConflict[]>([]);
   const r = state.range;
   const rangeText = r.spec === "oxp3"
-    ? `${r.pl1_min}–${r.pl1_max_battery} W on battery, up to ${r.pl1_max_ac} W on AC`
-    : `${r.pl1_min}–${r.pl1_max} W (this device's firmware limits)`;
+    ? `${r.pl1_min}–${r.pl1_max_battery} W on battery, up to ${r.pl1_max_ac} W plugged in`
+    : `${r.pl1_min}–${r.pl1_max} W (this device's own limits)`;
   const toggle = (on: boolean) => act.run("enable", async () => {
     setRefused([]);
     if (on && remember.get(ENABLE_SEEN) !== "1") {
       const ok = await confirm({
-        title: "Turn TDP control on", ok: "Turn on",
+        title: "Turn on power control?", ok: "Turn on",
         text: (
           <>
-            <div>OXP3 Deck then writes the sustained (PL1) and boost (PL2) power limits to both of the CPU's RAPL interfaces
-              (MSR and MMIO), the Arc GPU's clock range and the CPU's energy preference and boost, as the active profile says.
-              Fields left at "firmware" keep the values the system booted with: the default profile starts that way, so nothing
-              changes until you move a slider.</div>
-            <div style={{ marginTop: 8 }}>Range: {rangeText}. Profiles follow the running game and, if you want, AC power.</div>
-            <div style={{ marginTop: 8 }}>Turning TDP control off writes the firmware values back; a reboot gives them back too.</div>
+            <div>OXP3 Deck will set power limits, GPU speed and CPU boost from your profile. Nothing changes until you move a
+              slider. Turning it off, or rebooting, restores the defaults.</div>
+            <div style={{ marginTop: 8 }}>Allowed: {rangeText}.</div>
           </>
         ),
+        linesTitle: "Technical:",
+        lines: ["Writes PL1 (sustained) and PL2 (boost) to both RAPL interfaces (MSR and MMIO).",
+          "Writes the Arc GPU's min/max clock and the CPU's EPP and turbo.",
+          "Fields left at \"device default\" keep the values the system booted with."],
       });
       if (!ok) return null;
       remember.set(ENABLE_SEEN, "1");
@@ -119,18 +181,24 @@ export const EnableToggle: FC<{ state: PowerState; info: PowerInfo | null }> = (
     return settle(res);
   });
   const problems = info?.hw.problems ?? [];
+  // a refused enable: the rows from the fresh power-info once it has them (a fix there updates them), else the answer's
+  const live = refused.map((c) => info?.conflicts.find((x) => x.id === c.id) ?? c)
+    .filter((c) => info?.conflicts.some((x) => x.id === c.id) || !(info?.fixed ?? []).some((f) => f.id === c.id));
   return (
     <PanelSectionRow>
-      <ToggleField label="TDP control" checked={state.enabled} disabled={!!act.busy || (!state.enabled && info !== null && !info.hw.rapl && !info.hw.mmio)}
-        onChange={toggle}
-        description={explain(state.enabled
-          ? "On: OXP3 Deck sets the power limits, GPU clocks and CPU energy preference from the active profile, again after sleep, on a game change and on AC changes."
-          : "Off: the firmware's own limits apply. Turn on to set the power limits (TDP), GPU clocks and CPU boost here instead of SimpleDeckyTDP.",
-          state.enabled ? "Turning it off writes the firmware values back at once." : "Takes effect at once; asks first the first time.")} />
-      {problems.map((p, n) => <Note key={n}>{p}</Note>)}
-      {refused.length > 0 && <Status ok={false} red label="Another power manager is active" detail="Turn it off first; OXP3 Deck does not fight it:" />}
-      {fixRows(refused)}
-      <Problem what="TDP control" error={act.error} />
+      <WithDetails details={ENABLE_DETAILS}>
+        <ToggleField label={label("Power control (TDP)", ENABLE_DETAILS)} checked={state.enabled}
+          disabled={!!act.busy || (!state.enabled && info !== null && !info.hw.rapl && !info.hw.mmio)}
+          onChange={toggle}
+          description={explain(state.enabled ? "Uses your profile below." : "Device defaults. Turn on to set power here.")} />
+      </WithDetails>
+      {problems.length > 0 && (
+        <Status ok={false} label="Power control unavailable" detail={firstSentence(problems[0])}
+          details={{ title: "Power control unavailable", body: paragraphs(problems) }} />
+      )}
+      {live.length > 0 && <Status ok={false} red label={`Turn off ${names(live)} first`} />}
+      <ConflictRows rows={live} info={info} quick={quick} />
+      <Problem what="Power control" error={act.error} />
     </PanelSectionRow>
   );
 };
@@ -156,9 +224,13 @@ const useDraft = (key: string, slot: Slot, stored: PowerValues) => {
   return { values: { ...stored, ...draft } as PowerValues, write, error, clearError: () => setError(null) };
 };
 
-const fw = (isNull: boolean) => (isNull ? " (firmware value)" : "");
+const dflt = (isNull: boolean) => (isNull ? " (device default)" : "");
 
-const TURBO_OPTIONS = [{ data: "fw", label: "Firmware" }, { data: "on", label: "On" }, { data: "off", label: "Off" }];
+const TURBO_OPTIONS = [{ data: "fw", label: "Device default" }, { data: "on", label: "On" }, { data: "off", label: "Off" }];
+
+/** Details of one slider or choice: the plain body, then its technical name. */
+const det = (title: string, body: (string | null | undefined | false)[], lines?: string[]): DetailsSpec =>
+  ({ title, body: paragraphs(body), lines });
 
 /**
  * The sliders and choices of one profile slot. quick: sustained, boost, GPU max and CPU boost only. `active`: the
@@ -167,7 +239,7 @@ const TURBO_OPTIONS = [{ data: "fw", label: "Firmware" }, { data: "on", label: "
 export const ValuesEditor: FC<{
   state: PowerState; info: PowerInfo | null; profileKey: string; slot: Slot; stored: PowerValues; active: boolean;
   label: string; quick?: boolean;
-}> = ({ state, info, profileKey, slot, stored, active, label, quick }) => {
+}> = ({ state, info, profileKey, slot, stored, active, label: what, quick }) => {
   const d = useDraft(profileKey, slot, stored);
   const v = d.values;
   const r = state.range;
@@ -177,80 +249,113 @@ export const ValuesEditor: FC<{
   const pl2Max = Math.max(pl2Min, Math.floor(r.pl2_max));
   const pl2 = Math.min(pl2Max, Math.max(pl2Min, Math.round(sh.pl2_w ?? pl2Max)));
   const gpu = r.gpu_min != null && r.gpu_max != null && r.gpu_max > r.gpu_min ? { lo: r.gpu_min, hi: r.gpu_max } : null;
-  const gpuClamp = (x: number | null, dflt: number) => (gpu ? Math.min(gpu.hi, Math.max(gpu.lo, x ?? dflt)) : 0);
+  const gpuClamp = (x: number | null, dd: number) => (gpu ? Math.min(gpu.hi, Math.max(gpu.lo, x ?? dd)) : 0);
   const gmax = gpuClamp(sh.gpu_max_mhz, gpu?.hi ?? 0);
   const gmin = gpuClamp(sh.gpu_min_mhz, gpu?.lo ?? 0);
   const notches = useMemo(() => gpuNotches(r), [r.gpu_min, r.gpu_max, r.gpu_efficient]);
   const cpu = info?.hw.cpu ?? null;
+  const lockers = cpuBlockers(state, info);
   const cpuOff = state.cpu_blocked;
-  const where = `Edits ${label}.${active ? "" : " Saved now; applied when this profile is active."}`;
-  const over = v.pl1_w != null && v.pl1_w > r.pl1_max ? ` Saved ${v.pl1_w} W; runs at ${r.pl1_max} W now (the limit ${state.active.ac ? "on AC" : "on battery"}).` : "";
+  const lockText = lockedLine(lockers.map((c) => friendlyName(c.id, c.name)));
+  const where = `Edits ${what}.${active ? "" : " Saved now; used when this profile is active."}`;
+  const over = v.pl1_w != null && v.pl1_w > r.pl1_max ? `Saved ${v.pl1_w} W; runs at ${r.pl1_max} W now (the limit ${state.active.ac ? "plugged in" : "on battery"}).` : null;
+  const fwv = fwValues(state);
+  const pl1D = det("Sustained power", ["The power the CPU and GPU share for as long as a game runs. Higher is faster; the battery lasts less.", where, over,
+    fwv.pl1_w != null ? `Device default: ${watts(fwv.pl1_w)}.` : null], ["PL1 (RAPL long_term), MSR and MMIO"]);
+  const pl2D = det("Boost power", [`A short burst above sustained power, for a few seconds. Up to ${r.pl2_max} W; never below sustained power.`,
+    fwv.pl2_w != null ? `Device default: ${watts(fwv.pl2_w)}.` : null], ["PL2 (RAPL short_term), MSR and MMIO"]);
+  const gminD = det("GPU minimum speed", ["The graphics chip never runs slower than this. Higher costs battery even when idle; useful only if one game stutters from speed dips.",
+    gpu ? `Device default: ${gpu.lo} MHz.` : null], ["xe render GT min_freq"]);
+  const gmaxD = det("GPU maximum speed", ["The graphics chip never runs faster than this. Lower saves battery and leaves more of the power to the CPU.",
+    r.gpu_efficient ? `${r.gpu_efficient} MHz is its most efficient speed.` : null, gpu ? `Device default: ${gpu.hi} MHz.` : null], ["xe render GT max_freq"]);
+  const eppD = det("Energy preference", [
+    "How eagerly the CPU speeds up: Performance is fastest, Power saving makes the battery last longest. Device default: as it booted.",
+    state.now.governor === "performance" ? "The CPU's speed policy is set to performance, so energy preference cannot change. OXP3 Deck does not change that policy." : null,
+    cpuOff ? lockText : null,
+  ], ["energy_performance_preference (EPP), every cpufreq policy"]);
+  const turboD = det("CPU boost", ["Lets the CPU run above its base speed. Off saves battery in light games; most games run slower without it.",
+    cpuOff ? lockText : null], ["intel_pstate no_turbo"]);
+  // the lockers with their Fix for me; once fixed, its "… is off" + Undo right here (the quick panel lists those below)
+  const cpuRows = cpuOff && lockers.length > 0 ? <ConflictRows rows={lockers} info={info} quick={quick} />
+    : !quick ? <FixedRows info={info} quick cpu /> : null;
+  const resetD = det("Reset to device defaults", [`Every value of ${what} goes back to the device's own.`, active ? "Applies at once." : "Saved now; used when this profile is active."]);
   return (
     <>
       <PanelSectionRow>
-        <SliderField label="Sustained power" value={pl1} min={r.pl1_min} max={Math.max(r.pl1_min, r.pl1_max)} step={1}
-          showValue valueSuffix=" W" editableValue={!quick}
-          onChange={(x) => d.write(pl1Change(clampW(x, r), pl2))}
-          description={explain(`PL1: the power the CPU and GPU share for as long as a game runs${fw(v.pl1_w === null)}.`, `${where}${over}`)} />
+        <WithDetails details={pl1D}>
+          <SliderField label={label("Sustained power", pl1D)} value={pl1} min={r.pl1_min} max={Math.max(r.pl1_min, r.pl1_max)} step={1}
+            showValue valueSuffix=" W" editableValue={!quick}
+            onChange={(x) => d.write(pl1Change(clampW(x, r), pl2))}
+            description={explain(`Steady power for CPU and GPU. Higher is faster, battery shorter.${dflt(v.pl1_w === null)}`)} />
+        </WithDetails>
       </PanelSectionRow>
       <PanelSectionRow>
-        <SliderField label="Boost power" value={pl2} min={pl2Min} max={pl2Max} step={1} disabled={pl2Max <= pl2Min}
-          showValue valueSuffix=" W" editableValue={!quick}
-          onChange={(x) => d.write({ pl2_w: Math.min(pl2Max, Math.max(pl2Min, Math.round(x))) })}
-          description={explain(`PL2: the short boost above it (a few seconds), never below sustained${fw(v.pl2_w === null)}.`,
-            `Up to ${r.pl2_max} W, the firmware's own boost limit.`)} />
+        <WithDetails details={pl2D}>
+          <SliderField label={label("Boost power", pl2D)} value={pl2} min={pl2Min} max={pl2Max} step={1} disabled={pl2Max <= pl2Min}
+            showValue valueSuffix=" W" editableValue={!quick}
+            onChange={(x) => d.write({ pl2_w: Math.min(pl2Max, Math.max(pl2Min, Math.round(x))) })}
+            description={explain(`Short bursts above sustained power.${dflt(v.pl2_w === null)}`)} />
+        </WithDetails>
       </PanelSectionRow>
       {gpu && !quick && (
         <PanelSectionRow>
-          <SliderField label="GPU min clock" value={gmin} min={gpu.lo} max={gpu.hi} step={50} showValue valueSuffix=" MHz"
-            {...notches} notchTicksVisible={false}
-            onChange={(x) => d.write(x > gmax ? { gpu_min_mhz: x, gpu_max_mhz: x } : { gpu_min_mhz: x })}
-            description={explain(`The Arc GPU never clocks below this${fw(v.gpu_min_mhz === null)}.`,
-              "Higher costs power at idle; useful only against clock dips in one game.")} />
+          <WithDetails details={gminD}>
+            <SliderField label={label("GPU minimum speed", gminD)} value={gmin} min={gpu.lo} max={gpu.hi} step={50} showValue valueSuffix=" MHz"
+              {...notches} notchTicksVisible={false}
+              onChange={(x) => d.write(x > gmax ? { gpu_min_mhz: x, gpu_max_mhz: x } : { gpu_min_mhz: x })}
+              description={explain(`Raise only if one game stutters from GPU dips.${dflt(v.gpu_min_mhz === null)}`)} />
+          </WithDetails>
         </PanelSectionRow>
       )}
       {gpu && (
         <PanelSectionRow>
-          <SliderField label="GPU max clock" value={gmax} min={gpu.lo} max={gpu.hi} step={50} showValue valueSuffix=" MHz"
-            {...notches} notchTicksVisible={false}
-            onChange={(x) => d.write(x < gmin ? { gpu_max_mhz: x, gpu_min_mhz: x } : { gpu_max_mhz: x })}
-            description={explain(`The Arc GPU never clocks above this${fw(v.gpu_max_mhz === null)}.`,
-              `A lower cap leaves more of the power to the CPU and saves battery${r.gpu_efficient ? `; ${r.gpu_efficient} MHz is its most efficient clock` : ""}.`)} />
+          <WithDetails details={gmaxD}>
+            <SliderField label={label("GPU maximum speed", gmaxD)} value={gmax} min={gpu.lo} max={gpu.hi} step={50} showValue valueSuffix=" MHz"
+              {...notches} notchTicksVisible={false}
+              onChange={(x) => d.write(x < gmin ? { gpu_max_mhz: x, gpu_min_mhz: x } : { gpu_max_mhz: x })}
+              description={explain(`Lower saves battery and leaves more power for the CPU.${dflt(v.gpu_max_mhz === null)}`)} />
+          </WithDetails>
         </PanelSectionRow>
       )}
       {!quick && cpu && cpu.epp_choices.length > 0 && (
         <PanelSectionRow>
-          <DropdownItem label="Energy preference (EPP)" disabled={!!cpuOff}
-            rgOptions={eppOptions(cpu.epp_choices)} selectedOption={v.epp}
-            onChange={(o) => d.write({ epp: o.data as Epp | null })}
-            description={explain(cpuOff ?? "How eagerly the CPU clocks up: Performance is fastest, Power saving the most frugal. Firmware: as it booted.",
-              state.now.governor === "performance" ? "The CPU governor is performance: EPP cannot change." : undefined)} />
+          <WithDetails details={eppD}>
+            <DropdownItem label={label("Energy preference", eppD)} disabled={!!cpuOff}
+              rgOptions={eppOptions(cpu.epp_choices)} selectedOption={v.epp}
+              onChange={(o) => d.write({ epp: o.data as Epp | null })}
+              description={explain(cpuOff ? lockText : "How eagerly the CPU speeds up.")} />
+          </WithDetails>
+          {cpuRows}
         </PanelSectionRow>
       )}
       {cpu?.turbo && (
         <PanelSectionRow>
-          {quick ? (
-            <ToggleField label="CPU boost" disabled={!!cpuOff} checked={sh.turbo ?? state.now.turbo ?? true}
-              onChange={(c) => d.write({ turbo: c })}
-              description={explain(cpuOff ?? `Turbo clocks above the CPU's base clock${fw(v.turbo === null)}.`,
-                cpuOff ? undefined : "Off saves power in light games; most games run slower without it.")} />
-          ) : (
-            <DropdownItem label="CPU boost" disabled={!!cpuOff} rgOptions={TURBO_OPTIONS}
-              selectedOption={v.turbo === null ? "fw" : v.turbo ? "on" : "off"}
-              onChange={(o) => d.write({ turbo: o.data === "fw" ? null : o.data === "on" })}
-              description={explain(cpuOff ?? "Turbo clocks above the CPU's base clock. Off saves power in light games.")} />
-          )}
+          <WithDetails details={turboD}>
+            {quick ? (
+              <ToggleField label={label("CPU boost", turboD)} disabled={!!cpuOff} checked={sh.turbo ?? state.now.turbo ?? true}
+                onChange={(c) => d.write({ turbo: c })}
+                description={explain(cpuOff ? lockText : `Off saves battery in light games.${dflt(v.turbo === null)}`)} />
+            ) : (
+              <DropdownItem label={label("CPU boost", turboD)} disabled={!!cpuOff} rgOptions={TURBO_OPTIONS}
+                selectedOption={v.turbo === null ? "fw" : v.turbo ? "on" : "off"}
+                onChange={(o) => d.write({ turbo: o.data === "fw" ? null : o.data === "on" })}
+                description={explain(cpuOff ? lockText : "Off saves battery in light games.")} />
+            )}
+          </WithDetails>
+          {(quick || !(cpu && cpu.epp_choices.length > 0)) && cpuRows}
         </PanelSectionRow>
       )}
       {!quick && (
         <PanelSectionRow>
-          <ButtonItem layout="below" onClick={async () => {
-            const ok = await confirm({ title: "Use firmware values", ok: "Reset",
-              text: `Every value of ${label} goes back to "firmware": the limits the system booted with.` });
-            if (ok) { d.write({ ...EMPTY }); powerWriter.flush(); }
-          }} description={explain(`Sets every value of ${label} back to the firmware's.`, active ? "Applies at once; asks first." : "Asks first.")}>
-            Use firmware values
-          </ButtonItem>
+          <WithDetails details={resetD}>
+            <ButtonItem layout="below" onClick={async () => {
+              const ok = await confirm({ title: "Reset to device defaults?", ok: "Reset",
+                text: `Every value of ${what} goes back to the device's own.` });
+              if (ok) { d.write({ ...EMPTY }); powerWriter.flush(); }
+            }} description={explain("Undoes every change in this profile.")}>
+              {label("Reset to device defaults", resetD)}
+            </ButtonItem>
+          </WithDetails>
         </PanelSectionRow>
       )}
       <PanelSectionRow><Problem what="Power" error={d.error} /></PanelSectionRow>
@@ -258,7 +363,7 @@ export const ValuesEditor: FC<{
   );
 };
 
-/** "Profile for this game": a copy of the default for the running game, or back to the default (asks first). */
+/** "Separate profile for <game>": a copy of the default for the running game, or back to the default (asks first). */
 export const GameProfileToggle: FC<{ app: RunningApp; info: PowerInfo }> = ({ app, info }) => {
   const act = useAction();
   const has = !!info.profiles[app.appid];
@@ -270,17 +375,20 @@ export const GameProfileToggle: FC<{ app: RunningApp; info: PowerInfo }> = ({ ap
     named.current = app.appid;
     power_profile(app.appid, app.name.slice(0, 128), true).then(settle, () => undefined);
   }, [unnamed, app.appid]);
+  const details = det(`Separate profile for ${app.name}`, ["On: this game gets its own values, starting as a copy of the default profile; the sliders then edit them.",
+    "Off: the game's profile is deleted (asks first) and it uses the default profile again."]);
   return (
     <PanelSectionRow>
-      <ToggleField label="Profile for this game" checked={has} disabled={!!act.busy}
-        onChange={(on) => act.run("profile", async () => {
-          if (!on && !(await confirm({ title: `Delete the profile of ${app.name}`, ok: "Delete", destructive: true,
-            text: `${app.name} then runs with the default profile.` }))) return null;
-          await powerWriter.drain();     // a slider change just made lands on the profile it was made on
-          return settle(await power_profile(app.appid, on ? app.name : null, on));
-        })}
-        description={explain(has ? `${app.name} has its own values: the sliders below edit them.`
-          : `${app.name} runs with the default profile. On: it gets its own, starting as a copy of the default.`)} />
+      <WithDetails details={details}>
+        <ToggleField label={label(`Separate profile for ${app.name}`, details)} checked={has} disabled={!!act.busy}
+          onChange={(on) => act.run("profile", async () => {
+            if (!on && !(await confirm({ title: `Delete the profile of ${app.name}?`, ok: "Delete", destructive: true,
+              text: `${app.name} then uses the default profile.` }))) return null;
+            await powerWriter.drain();     // a slider change just made lands on the profile it was made on
+            return settle(await power_profile(app.appid, on ? app.name : null, on));
+          })}
+          description={explain(has ? "Sliders edit this game's profile." : "Uses the default profile.")} />
+      </WithDetails>
       <Problem what="Game profile" error={act.error} />
     </PanelSectionRow>
   );
@@ -290,6 +398,7 @@ export const GameProfileToggle: FC<{ app: RunningApp; info: PowerInfo }> = ({ ap
 export const PowerSection: FC<{ quick?: boolean; app?: RunningApp | null }> = ({ quick, app }) => {
   const visible = useQuickAccessVisible();
   const p = usePower(!quick || visible);
+  useEffect(() => { if (quick && !visible) clearRecentFixes(); }, [quick, visible]);
   const s = p.state;
   const profiles = p.info?.profiles;
   const slot = s ? editSlot(s, p.info?.options) : "main";
@@ -303,12 +412,12 @@ export const PowerSection: FC<{ quick?: boolean; app?: RunningApp | null }> = ({
           <Problem what="Power" error={p.error} />
         </PanelSectionRow>
       )}
-      {s && <PowerStatusRows info={p.info} state={s} />}
-      {s && <EnableToggle state={s} info={p.info} />}
+      {s && <PowerStatusRows info={p.info} state={s} quick={quick} />}
+      {s && <EnableToggle state={s} info={p.info} quick={quick} />}
       {s && s.enabled && app && p.info?.options.per_game && <GameProfileToggle app={app} info={p.info} />}
       {s && s.enabled && (
         <ValuesEditor state={s} info={p.info} profileKey={s.active.key} slot={slot} stored={stored} active quick={quick}
-          label={`${s.active.key === "default" ? "the default profile" : `the profile of ${s.active.name || `app ${s.active.key}`}`}${p.info?.options.split_ac ? (slot === "ac" ? " (AC values)" : " (battery values)") : ""}`} />
+          label={`${s.active.key === "default" ? "the default profile" : `the profile of ${s.active.name || `app ${s.active.key}`}`}${p.info?.options.split_ac ? (slot === "ac" ? " (plugged-in values)" : " (battery values)") : ""}`} />
       )}
     </PanelSection>
   );

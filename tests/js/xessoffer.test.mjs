@@ -55,7 +55,7 @@ test("xessOffer: install, update, nothing", () => {
   assert.equal(xessOffer(false, null, state({ installed: false, latest: "20261104" })).latest, "20261104");
   const up = xessOffer(true, "20261031", state({ latest: "20261104", update_available: true }));
   assert.equal(up.kind, "update");
-  assert.equal(offerLabel(up), "Update to 20261104");
+  assert.equal(offerLabel(up), "Update XeSS to 20261104");
   assert.equal(xessOffer(true, "20261031", state()).kind, null);
   assert.equal(xessOffer(true, "20261031", null).kind, null);                    // xess_state not read (yet)
   assert.equal(xessOffer(true, "20261031", null, check()).kind, "update");       // a check tapped in this session
@@ -81,7 +81,7 @@ test("xessOffer: repair when the backend asks for install.sh again", () => {
   const o = xessOffer(true, "20261104", x);
   assert.equal(o.kind, "repair");
   assert.equal(o.reason, "the compiler (igc/) was not downloaded");
-  assert.equal(offerLabel(o), "Repair 20261104");
+  assert.equal(offerLabel(o), "Repair XeSS");
   assert.equal(installTitle(o), "Repair xess-xmx-linux?");
   const text = installLines(o, x, "jordan").join("\n");
   assert.match(text, /^The compiler \(igc\/\) was not downloaded\. Runs install\.sh of 20261104 again in \/home\/jordan\/Documents\/xess-xmx-linux-20261031 as jordan/);

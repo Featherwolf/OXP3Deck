@@ -35,6 +35,7 @@ CALLS = {
     "power_info": (False,), "power_state": (), "power_enable": (True,), "power_options": ({"split_ac": True},),
     "power_set": ("default", "main", {"pl1_w": 15}), "power_profile": ("1091500", "Cyberpunk 2077", True),
     "power_game": ("1091500",), "power_take_control": (), "power_import_sdtdp": (),
+    "power_fix": ("ppd",), "power_unfix": ("ppd",),
 }
 
 

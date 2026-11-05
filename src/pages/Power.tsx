@@ -1,48 +1,68 @@
 // The full page's Power tab (DESIGN.md "Power (TDP, GPU, CPU)", Frontend): the live state per RAPL zone, the options,
 // the profile editor for every profile, the other power managers found, the firmware values and the import from
 // SimpleDeckyTDP.
-import { ButtonItem, DropdownItem, Field, PanelSection, PanelSectionRow, ToggleField } from "@decky/ui";
+import { ButtonItem, DropdownItem, PanelSection, PanelSectionRow, ToggleField } from "@decky/ui";
 import { FC, useEffect, useState } from "react";
 
 import { useAction } from "../actions";
 import { power_import_sdtdp, power_info, power_options, power_profile } from "../backend";
-import { confirm } from "../components/confirm";
-import { explain, Note, Problem, Status } from "../components/Hint";
-import { EnableToggle, PowerStatusRows, settle, usePower, ValuesEditor } from "../components/PowerControls";
-import { eppText, profileOrder, reasonText, Slot, watts } from "../power";
+import { ConflictRow, ConflictRows, FixedRows } from "../components/ConflictRow";
+import { confirm, DetailsSpec, paragraphs } from "../components/confirm";
+import { explain, label, Note, Problem, Status, WithDetails } from "../components/Hint";
+import { cpuBlockers, EnableToggle, PowerStatusRows, settle, usePower, ValuesEditor } from "../components/PowerControls";
+import { friendlyName } from "../conflicts";
+import { eppText, limitsLine, profileOrder, reasonText, Slot, watts } from "../power";
 import { useRunningApp } from "../steam";
 import { flushPower, powerWriter, put } from "../store";
 import type { PowerInfo, PowerOptions, PowerState, PowerZone } from "../types";
-import { when } from "../util";
+import { listText, when } from "../util";
 
-const zoneText = (z: PowerZone) => {
-  const lock = (c: string) => (z.locked.includes(c) ? " (locked)" : "");
-  return `PL1 ${watts(z.pl1_w)}${lock("pl1")} · PL2 ${watts(z.pl2_w)}${lock("pl2")} · PL4 ${watts(z.pl4_w)}`;
-};
-const zoneName = (z: PowerZone) => `${z.iface === "mmio" ? "MMIO" : "MSR"} ${z.name}`;
+const det = (title: string, body: (string | null | undefined | false)[], lines?: string[], linesTitle?: string): DetailsSpec =>
+  ({ title, body: paragraphs(body), lines, linesTitle });
 const onOff = (b: boolean | null | undefined) => (b == null ? "?" : b ? "on" : "off");
+
+const zoneLine = (z: PowerZone) => {
+  const lock = (c: string) => (z.locked.includes(c) ? " (locked)" : "");
+  return `${z.iface.toUpperCase()} ${z.name}: PL1 ${watts(z.pl1_w)}${lock("pl1")} · PL2 ${watts(z.pl2_w)}${lock("pl2")} · PL4 ${watts(z.pl4_w)}`;
+};
+const ac = (s: PowerState) => (s.active.ac == null ? "Power source unknown" : s.active.ac ? "Plugged in" : "On battery");
 
 const NowSection: FC<{ info: PowerInfo | null; state: PowerState }> = ({ info, state }) => {
   const n = state.now;
   // MSR and MMIO side by side: the hardware uses the lower of the two
   const zones = [...n.zones].sort((a, b) => (a.iface === b.iface ? a.id.localeCompare(b.id) : a.iface === "msr" ? -1 : 1));
+  const why = reasonText(n.gpu?.reasons);
+  const held = (n.gpu?.reasons ?? []).some((r) => /^(pl\d|power|vr_tdc)$/.test(r));
+  const lockers = cpuBlockers(state, info);
+  const lockedBy = `${listText(lockers.map((c) => friendlyName(c.id, c.name))) || "Another program"} controls them.`;
   return (
     <PanelSection title="Status">
       <PowerStatusRows info={info} state={state} />
       <PanelSectionRow>
-        {zones.map((z) => (
-          <Field key={z.id} focusable bottomSeparator="none" label={zoneName(z)}
-            description={explain(zoneText(z), z.iface === "mmio" ? "Firmware rewrites these on every AC change; OXP3 Deck writes them again." : "The GPU follows this PL1.")} />
-        ))}
-        {!zones.length && <Note>No RAPL power-limit zones were found: the power limits cannot be read or set here.</Note>}
-        {n.gpu && (
-          <Field focusable bottomSeparator="none" label={`GPU ${n.gpu.act ?? "?"} MHz`}
-            description={explain(`Range now ${n.gpu.min ?? "?"}–${n.gpu.max ?? "?"} MHz.`,
-              reasonText(n.gpu.reasons) ? `Throttled: ${reasonText(n.gpu.reasons)} (${n.gpu.reasons.join(", ")}).` : "Not throttled.")} />
+        {zones.length > 0 ? (
+          <Status ok={null} label="Power limits now" detail={limitsLine(state)}
+            details={det("Power limits now", ["The limits each of the CPU's two power-limit interfaces holds now; the CPU uses the lower of the two.",
+              zones.some((z) => z.iface === "mmio") ? "The firmware rewrites one of them whenever the charger is plugged in or out; OXP3 Deck writes it again." : null],
+              zones.map(zoneLine), "Per interface:")} />
+        ) : (
+          <Status ok={false} label="Power limits not available" detail="This system doesn't expose power limits."
+            details={det("Power limits not available", ["No power-limit interface was found, so power limits cannot be read or set here."],
+              ["No RAPL zones: the kernel modules intel_rapl_msr and processor_thermal_rapl provide them."])} />
         )}
-        <Field focusable bottomSeparator="none" label="CPU"
-          description={`Energy preference ${eppText(n.epp)} · boost ${onOff(n.turbo)} · governor ${n.governor ?? "?"} · ${state.active.ac == null ? "power source unknown" : state.active.ac ? "on AC" : "on battery"}`} />
-        {state.enabled && state.cpu_blocked && <Status ok={false} label="Energy preference and CPU boost are not set" detail={state.cpu_blocked} />}
+        {n.gpu && (
+          <Status ok={null} label={`GPU ${n.gpu.act ?? "?"} MHz`} detail={held ? "Held back by power limit" : why ? why[0].toUpperCase() + why.slice(1) : "Running freely"}
+            details={det("GPU", [`Allowed now: ${n.gpu.min ?? "?"}–${n.gpu.max ?? "?"} MHz.`, why ? `Limited: ${why}.` : "Not limited."],
+              n.gpu.reasons.length ? [`throttle reasons: ${n.gpu.reasons.join(", ")}`] : undefined)} />
+        )}
+        <Status ok={null} label="CPU" detail={`Energy: ${eppText(n.epp)} · Boost: ${onOff(n.turbo)} · ${ac(state)}`}
+          details={det("CPU", ["Energy preference, CPU boost and the power source as they are now."], [`governor: ${n.governor ?? "?"}`, `EPP: ${n.epp ?? "?"}`])} />
+        {state.enabled && state.cpu_blocked && (
+          <>
+            <Status ok={false} label="Energy preference & boost: locked" detail={lockedBy}
+              details={det("Energy preference & boost: locked", [lockedBy, "Power limits and GPU speed still work."])} />
+            <ConflictRows rows={lockers} info={info} />
+          </>
+        )}
       </PanelSectionRow>
     </PanelSection>
   );
@@ -52,24 +72,34 @@ const OptionsSection: FC<{ info: PowerInfo; state: PowerState }> = ({ info, stat
   const act = useAction();
   const set = (name: string, o: Partial<PowerOptions>) => act.run(name, async () => { await powerWriter.drain(); return settle(await power_options(o)); });
   const r = state.range;
+  const perGameD = det("Per-game profiles", ["A game with a profile of its own uses it; every other game uses the default profile.",
+    "Off: every game uses the default profile. Saved game profiles are kept."]);
+  const splitD = det("Different settings when plugged in", ["Each profile gets a second set of values, used while the charger is plugged in.",
+    "Switches within a few seconds of plugging in or out."]);
+  const extD = r.extended_max != null ? det(`Allow up to ${r.extended_max} W when plugged in`, [
+    `Raises the sustained limit when plugged in up to ${r.extended_max} W, the device's own boost limit. ONEXPLAYER rates the OXP3 for ${r.pl1_max_battery} W sustained, up to ${r.pl1_max_ac} W.`,
+    "Use a charger of 65 W or more: a weaker one cannot keep up, so the battery drains or charging flaps on and off.",
+    `On battery the limit stays at ${r.pl1_max_battery} W.`]) : null;
   return (
     <PanelSection title="Control">
       <EnableToggle state={state} info={info} />
       <PanelSectionRow>
-        <ToggleField label="Per-game profiles" checked={info.options.per_game} disabled={!!act.busy}
-          onChange={(c) => set("per_game", { per_game: c })}
-          description={explain("A game with a profile of its own runs with it; every other game with the default profile.",
-            "Off: every game runs with the default profile (game profiles are kept).")} />
-        <ToggleField label="Separate values on AC" checked={info.options.split_ac} disabled={!!act.busy}
-          onChange={(c) => set("split_ac", { split_ac: c })}
-          description={explain("Each profile gets a second set of values used while the charger is plugged in.",
-            "Switches within a few seconds of plugging in or out.")} />
+        <WithDetails details={perGameD}>
+          <ToggleField label={label("Per-game profiles", perGameD)} checked={info.options.per_game} disabled={!!act.busy}
+            onChange={(c) => set("per_game", { per_game: c })}
+            description={explain("Games with their own profile use it.")} />
+        </WithDetails>
+        <WithDetails details={splitD}>
+          <ToggleField label={label("Different settings when plugged in", splitD)} checked={info.options.split_ac} disabled={!!act.busy}
+            onChange={(c) => set("split_ac", { split_ac: c })}
+            description={explain("Each profile gets a second set for charging.")} />
+        </WithDetails>
         {r.extended_max != null && (
-          <ToggleField label={`Allow more than ${r.pl1_max_ac} W on AC`} checked={info.options.extended} disabled={!!act.busy}
-            onChange={(c) => set("extended", { extended: c })}
-            description={explain(`Raises the sustained limit on AC up to ${r.extended_max} W, the firmware's own boost limit. ONEXPLAYER rates the OXP3 for ${r.pl1_max_battery} W sustained, up to ${r.pl1_max_ac} W.`,
-              "Use a charger of 65 W or more: a weaker one cannot keep up and the battery drains or the charge flaps on and off.",
-              "On battery the limit stays at " + `${r.pl1_max_battery} W.`)} />
+          <WithDetails details={extD}>
+            <ToggleField label={label(`Allow up to ${r.extended_max} W when plugged in`, extD)} checked={info.options.extended} disabled={!!act.busy}
+              onChange={(c) => set("extended", { extended: c })}
+              description={explain("Needs a 65 W or stronger charger.")} />
+          </WithDetails>
         )}
         <Problem what="Option" error={act.error} />
       </PanelSectionRow>
@@ -91,41 +121,48 @@ const EditorSection: FC<{ info: PowerInfo; state: PowerState }> = ({ info, state
   useEffect(() => { flushPower(); }, [k, slot]);
   const name = k === "default" ? "the default profile" : `the profile of ${prof.name || `app ${k}`}`;
   const canAdd = app && !info.profiles[app.appid];
+  const profD = det("Profile to edit", ["The sliders below edit this profile. Changes to a profile that is not active are saved and used when it is.",
+    info.options.per_game ? null : "Per-game profiles are off: every game uses the default profile."]);
+  const slotD = det("Edit values for", ["Which of the profile's two sets the sliders edit: on battery or plugged in.",
+    "The plugged-in set starts as a copy of the battery set at the first change."]);
   return (
     <PanelSection title="Profiles">
       <PanelSectionRow>
-        <DropdownItem label="Profile" rgOptions={order.map((o) => ({ data: o.key, label: o.label }))} selectedOption={k}
-          onChange={(o) => setKey(String(o.data))}
-          description={explain(`${state.active.key === k ? "Active now." : "Not active now: changes are saved and apply when it is."}`,
-            info.options.per_game ? undefined : "Per-game profiles are off: every game uses the default profile.")} />
+        <WithDetails details={profD}>
+          <DropdownItem label={label("Profile to edit", profD)} rgOptions={order.map((o) => ({ data: o.key, label: o.label }))} selectedOption={k}
+            onChange={(o) => setKey(String(o.data))}
+            description={explain(state.active.key === k ? "Active now" : "Saved; used when this game runs")} />
+        </WithDetails>
         {info.options.split_ac && (
-          <DropdownItem label="Values for" rgOptions={[{ data: "main", label: "Battery" }, { data: "ac", label: "On AC" }]}
-            selectedOption={slot} onChange={(o) => setSlotPick(o.data as Slot)}
-            description={slot === "ac" && !prof.ac ? "No AC values yet: they start as a copy of the battery values at the first change." : "Which of the profile's two sets these controls edit."} />
+          <WithDetails details={slotD}>
+            <DropdownItem label={label("Edit values for", slotD)} rgOptions={[{ data: "main", label: "Battery" }, { data: "ac", label: "Plugged in" }]}
+              selectedOption={slot} onChange={(o) => setSlotPick(o.data as Slot)}
+              description={explain("Battery or plugged in.")} />
+          </WithDetails>
         )}
-        {!state.enabled && <Note>TDP control is off: profile changes are saved and apply once it is on.</Note>}
+        {!state.enabled && <Note>Power control is off: changes are saved for later.</Note>}
       </PanelSectionRow>
       <ValuesEditor key={`${k}/${slot}`} state={state} info={info} profileKey={k} slot={slot} stored={stored} active={active && state.enabled}
-        label={`${name}${info.options.split_ac ? (slot === "ac" ? " (AC values)" : " (battery values)") : ""}`} />
+        label={`${name}${info.options.split_ac ? (slot === "ac" ? " (plugged-in values)" : " (battery values)") : ""}`} />
       <PanelSectionRow>
         {canAdd && (
           <ButtonItem layout="below" disabled={!!act.busy}
             onClick={() => act.run("add", async () => { await powerWriter.drain(); const e = settle(await power_profile(app.appid, app.name, true)); if (!e) setKey(app.appid); return e; })}
-            description={`${app.name} gets its own profile, starting as a copy of the default.`}>
+            description={explain("Starts as a copy of the default.")}>
             New profile for {app.name}
           </ButtonItem>
         )}
         {k !== "default" && (
           <ButtonItem layout="below" disabled={!!act.busy}
             onClick={() => act.run("delete", async () => {
-              if (!(await confirm({ title: "Delete profile", ok: "Delete", destructive: true,
-                text: `${prof.name || `App ${k}`} then runs with the default profile.` }))) return null;
+              if (!(await confirm({ title: "Delete profile?", ok: "Delete", destructive: true,
+                text: `${prof.name || `App ${k}`} then uses the default profile.` }))) return null;
               await powerWriter.drain();
               const e = settle(await power_profile(k, null, false));
               if (!e) setKey("default");
               return e;
             })}
-            description="The game runs with the default profile again.">
+            description={explain("The game uses the default profile again.")}>
             Delete profile
           </ButtonItem>
         )}
@@ -137,33 +174,35 @@ const EditorSection: FC<{ info: PowerInfo; state: PowerState }> = ({ info, state
 
 const ConflictsSection: FC<{ info: PowerInfo }> = ({ info }) => {
   const act = useAction();
-  const ignore = (id: string) => act.run(id, async () => { await powerWriter.drain(); return settle(await power_options({ ignore: [...info.options.ignore.filter((x) => x !== id), id] })); });
+  const active = new Set(info.conflicts.map((c) => c.id));
+  const gone = (info.fixed ?? []).filter((f) => !active.has(f.id));
+  const checkD = det("Check again", ["Looks again for other programs that change power limits, energy preference or CPU boost."],
+    ["systemd services, running programs, enabled Decky plugins, steamos-manager remotes"]);
   return (
-    <PanelSection title="Other power managers">
+    <PanelSection title="Other power programs">
       <PanelSectionRow>
-        {!info.conflicts.length && <Status ok label="None found" detail="No other program that sets the power limits, GPU clocks or EPP runs." />}
-        {info.conflicts.map((c) => (
-          <div key={c.id}>
-            <Status ok={c.ignored ? null : false} label={`${c.name}${c.ignored ? " (you said it is handled)" : c.kind === "cpu" ? ": EPP and CPU boost left to it" : c.kind === "suspect" ? "" : ": blocks TDP control"}`}
-              detail={explain(c.why, c.fix ? <>Fix: {c.fix}</> : undefined)} />
-            {c.ignorable && !c.ignored && (
-              <ButtonItem layout="below" disabled={!!act.busy} onClick={() => ignore(c.id)}
-                description={`Only once ${c.name} no longer sets these values: OXP3 Deck then stops counting it.`}>
-                I have done that
-              </ButtonItem>
-            )}
-          </div>
-        ))}
-        <ButtonItem layout="below" disabled={!!act.busy}
-          onClick={() => act.run("check", async () => {
-            const r = await power_info(true);
-            if (r.ok) put("power-info", r);
-            return r.ok ? null : r.error;
-          })}
-          description="Looks for other power managers again (services, programs, Decky plugins).">
-          {act.busy === "check" ? "Checking…" : "Check again"}
-        </ButtonItem>
-        <Problem what="Conflicts" error={act.error} />
+        {!info.conflicts.length && <Status ok label="No conflicts" detail="Nothing else changes these settings." />}
+        {info.conflicts.map((c) => <ConflictRow key={c.id} c={c} info={info} />)}
+      </PanelSectionRow>
+      {gone.length > 0 && (
+        <PanelSectionRow>
+          <Note label="Turned off by OXP3 Deck">Undo turns each back on.</Note>
+          <FixedRows info={info} />
+        </PanelSectionRow>
+      )}
+      <PanelSectionRow>
+        <WithDetails details={checkD}>
+          <ButtonItem layout="below" disabled={!!act.busy}
+            onClick={() => act.run("check", async () => {
+              const r = await power_info(true);
+              if (r.ok) put("power-info", r);
+              return r.ok ? null : r.error;
+            })}
+            description={explain("Look for conflicting programs.")}>
+            {act.busy === "check" ? "Checking…" : label("Check again", checkD)}
+          </ButtonItem>
+        </WithDetails>
+        <Problem what="Check" error={act.error} />
       </PanelSectionRow>
     </PanelSection>
   );
@@ -171,24 +210,25 @@ const ConflictsSection: FC<{ info: PowerInfo }> = ({ info }) => {
 
 const FirmwareSection: FC<{ info: PowerInfo; state: PowerState }> = ({ info, state }) => {
   const r = state.range;
+  const fwD = det("Device defaults", [
+    info.boot ? `Read when power control first wrote this boot (${when(info.boot.taken_at)}). Another tool's leftovers show here too; a reboot gives the device's own.`
+      : "Not read yet: OXP3 Deck reads them when power control first writes this boot.",
+    "Turning power control off restores these.",
+    "Before you disable or uninstall OXP3 Deck, turn power control off: the GPU speed range and energy preference it set otherwise stay until a reboot.",
+  ], state.now.zones.map((z) => `${z.iface.toUpperCase()} ${z.name}: PL1 ${watts(z.boot_pl1_w)} · PL2 ${watts(z.boot_pl2_w)}${z.pl1_base_w ? ` · base power ${watts(z.pl1_base_w)}` : ""}`),
+  "At boot:");
+  const gpuD = r.gpu_min != null ? det("GPU speed range", [r.gpu_efficient ? `Most efficient at ${r.gpu_efficient} MHz.` : null],
+    info.hw.gpu ? [`${info.hw.gpu.card}, ${info.hw.gpu.gt}`] : undefined) : null;
+  const rangeD = det("Allowed range", [r.spec === "oxp3"
+    ? `Boost up to ${r.pl2_max} W. ONEXPLAYER's own figures for the OXP3${r.extended_max ? `; up to ${r.extended_max} W plugged in with the option above` : ""}.`
+    : `Boost up to ${r.pl2_max} W: never above what this device's firmware set.`]);
   return (
-    <PanelSection title="Firmware values">
+    <PanelSection title="Device defaults">
       <PanelSectionRow>
-        <Note>{info.boot ? `The values when TDP control was first enabled this boot (read at ${when(info.boot.taken_at)}): another tool's leftovers show here too; a reboot gives the firmware's own. Boost is the highest of the interfaces. Turning TDP control off restores these.`
-          : "Not read yet: OXP3 Deck reads them when TDP control first writes this boot. Turning TDP control off restores them."}</Note>
-        <Note>Before you disable or uninstall OXP3 Deck (e.g. to go back to SimpleDeckyTDP), turn TDP control off: the GPU clock range and energy preference it set otherwise stay until a reboot.</Note>
-        {state.now.zones.map((z) => (
-          <Field key={z.id} focusable bottomSeparator="none" label={zoneName(z)}
-            description={`PL1 ${watts(z.boot_pl1_w)} · PL2 ${watts(z.boot_pl2_w)}${z.pl1_base_w ? ` · base power ${watts(z.pl1_base_w)}` : ""}`} />
-        ))}
-        {r.gpu_min != null && (
-          <Field focusable bottomSeparator="none" label="GPU clock range"
-            description={`${r.gpu_min}–${r.gpu_max} MHz${r.gpu_efficient ? `, most efficient at ${r.gpu_efficient} MHz` : ""}${info.hw.gpu ? ` (${info.hw.gpu.card}, ${info.hw.gpu.gt})` : ""}`} />
-        )}
-        <Field focusable bottomSeparator="none" label="Range OXP3 Deck allows"
-          description={r.spec === "oxp3"
-            ? `Sustained ${r.pl1_min}–${r.pl1_max_battery} W on battery, up to ${r.pl1_max_ac} W on AC${r.extended_max ? ` (${r.extended_max} W with the option above)` : ""}; boost up to ${r.pl2_max} W. ONEXPLAYER's own figures for the OXP3.`
-            : `Sustained ${r.pl1_min}–${r.pl1_max} W, boost up to ${r.pl2_max} W: never above what this device's firmware set.`} />
+        <Note label="Device defaults" details={fwD}>Restored when power control is turned off.</Note>
+        {r.gpu_min != null && <Status ok={null} label="GPU speed range" detail={`${r.gpu_min}–${r.gpu_max} MHz`} details={gpuD} />}
+        <Status ok={null} label="Allowed range" details={rangeD}
+          detail={r.spec === "oxp3" ? `${r.pl1_min}–${r.pl1_max_battery} W on battery, up to ${r.pl1_max_ac} W plugged in` : `${r.pl1_min}–${r.pl1_max} W`} />
       </PanelSectionRow>
     </PanelSection>
   );
@@ -197,24 +237,32 @@ const FirmwareSection: FC<{ info: PowerInfo; state: PowerState }> = ({ info, sta
 const ImportSection: FC = () => {
   const act = useAction();
   const [lines, setLines] = useState<{ imported: string[]; skipped: string[] } | null>(null);
+  const impD = det("Import from SimpleDeckyTDP", ["Copies SimpleDeckyTDP's default and per-game profiles into OXP3 Deck (a profile of the same game here is replaced). SimpleDeckyTDP's own files stay as they are.",
+    "Then disable or uninstall SimpleDeckyTDP in Decky → Settings → Plugins and turn power control on."]);
   return (
     <PanelSection title="SimpleDeckyTDP">
       <PanelSectionRow>
-        <ButtonItem layout="below" disabled={!!act.busy}
-          onClick={() => act.run("import", async () => {
-            if (!(await confirm({ title: "Import from SimpleDeckyTDP", ok: "Import",
-              text: "Copies SimpleDeckyTDP's default and per-game TDP, GPU clock and CPU boost values into OXP3 Deck's profiles (a profile of the same game here is replaced). SimpleDeckyTDP's own files stay as they are. Its single TDP value becomes the sustained limit; boost stays at the firmware's." }))) return null;
-            await powerWriter.drain();
-            const r = await power_import_sdtdp();
-            if (r.ok) setLines({ imported: r.imported, skipped: r.skipped });
-            return settle({ ...r, applied: null });
-          })}
-          description={explain("Takes over the profiles you made in SimpleDeckyTDP.",
-            "Then disable or uninstall SimpleDeckyTDP in Decky's settings (Plugins) and turn TDP control on.")}>
-          {act.busy ? "Importing…" : "Import from SimpleDeckyTDP"}
-        </ButtonItem>
-        {lines && <Note label={`Imported ${lines.imported.length}`}>{lines.imported.join(", ") || "nothing"}</Note>}
-        {lines && lines.skipped.length > 0 && <Note label={`Skipped ${lines.skipped.length}`}>{lines.skipped.join("; ")}</Note>}
+        <WithDetails details={impD}>
+          <ButtonItem layout="below" disabled={!!act.busy}
+            onClick={() => act.run("import", async () => {
+              if (!(await confirm({ title: "Import from SimpleDeckyTDP?", ok: "Import",
+                text: "Copies your SimpleDeckyTDP profiles into OXP3 Deck. A profile of the same game here is replaced. SimpleDeckyTDP's own files stay as they are.",
+                linesTitle: "Technical:",
+                lines: ["Its single TDP value becomes the sustained limit (PL1); boost stays at the device default.", "TDP, GPU clock range and CPU boost are copied."] }))) return null;
+              await powerWriter.drain();
+              const r = await power_import_sdtdp();
+              if (r.ok) setLines({ imported: r.imported, skipped: r.skipped });
+              return settle({ ...r, applied: null });
+            })}
+            description={explain("Copies your SimpleDeckyTDP profiles.")}>
+            {act.busy ? "Importing…" : label("Import from SimpleDeckyTDP", impD)}
+          </ButtonItem>
+        </WithDetails>
+        {lines && <Status ok label={`Imported ${lines.imported.length}`}
+          details={det(`Imported ${lines.imported.length}`, [lines.imported.join(", ") || "Nothing."])}
+          detail="Now disable SimpleDeckyTDP in Decky's settings." />}
+        {lines && lines.skipped.length > 0 && <Status ok={null} label={`Skipped ${lines.skipped.length}`}
+          details={det(`Skipped ${lines.skipped.length}`, lines.skipped)} />}
         <Problem what="Import" error={act.error} />
       </PanelSectionRow>
     </PanelSection>
