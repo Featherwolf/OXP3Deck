@@ -1,4 +1,4 @@
-// Adapted from ClawDeck (MIT, Copyright (c) 2026 IHulkSmashI and ClawDeck contributors).
+// Adapted from ClawDeck (MIT, Copyright (c) 2026 IHulkSmashI and ClawDeck contributors). See THIRD_PARTY_NOTICES.md.
 // One typed callable per backend method (main.py, DESIGN.md "Backend API"), one per line, so a test can check that
 // the frontend and main.py name the same methods. The pages call them through backend.ts, which turns a rejected
 // call into {ok: false, error}.

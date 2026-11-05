@@ -1,4 +1,4 @@
-// Adapted from ClawDeck (MIT, Copyright (c) 2026 IHulkSmashI and ClawDeck contributors).
+// Adapted from ClawDeck (MIT, Copyright (c) 2026 IHulkSmashI and ClawDeck contributors). See THIRD_PARTY_NOTICES.md.
 // Based on ClawDeck's FullPage (src/pages.tsx): the full page.
 // One tab per area, navigated with the D-pad on the left like Steam's own settings.
 import { SidebarNavigation } from "@decky/ui";

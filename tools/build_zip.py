@@ -38,7 +38,7 @@ FILE_MODE = 0o644
 EXEC_MODE = 0o755
 DIR_MODE = 0o755
 EXECUTABLES = {"bin/oxp3-tool"}
-DOCS = ("LICENSE", "README.md", "CREDITS.md")
+DOCS = ("LICENSE", "THIRD_PARTY_NOTICES.md", "README.md", "CREDITS.md")
 TOOL = "oxp3-tool"
 # The name is also the plugin's folder and the zip's file name, and Decky builds paths from it.
 NAME_RE = re.compile(r"^[A-Za-z0-9._-]+$")

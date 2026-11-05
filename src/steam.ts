@@ -1,4 +1,4 @@
-// Adapted from ClawDeck (MIT, Copyright (c) 2026 IHulkSmashI and ClawDeck contributors).
+// Adapted from ClawDeck (MIT, Copyright (c) 2026 IHulkSmashI and ClawDeck contributors). See THIRD_PARTY_NOTICES.md.
 // Steam client calls, each behind try/catch so a Steam update that renames one turns a feature off instead of
 // breaking the panel. Names checked against @decky/ui's typings: Router = CSteamUIStore (MainRunningApp),
 // SteamClient.Apps.RegisterForAppDetails / SetAppLaunchOptions, GameSessions.RegisterForAppLifetimeNotifications.

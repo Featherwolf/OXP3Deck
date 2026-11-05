@@ -1,4 +1,4 @@
-# Adapted from ClawDeck (MIT, Copyright (c) 2026 IHulkSmashI and ClawDeck contributors).
+# Adapted from ClawDeck (MIT, Copyright (c) 2026 IHulkSmashI and ClawDeck contributors). See THIRD_PARTY_NOTICES.md.
 """The environment of the programs the plugin starts.
 
 Decky Loader's Python is a PyInstaller bundle. Its bootloader points LD_LIBRARY_PATH at the bundle (its own OpenSSL

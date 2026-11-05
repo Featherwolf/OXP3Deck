@@ -1,4 +1,4 @@
-# Adapted from ClawDeck (MIT, Copyright (c) 2026 IHulkSmashI and ClawDeck contributors).
+# Adapted from ClawDeck (MIT, Copyright (c) 2026 IHulkSmashI and ClawDeck contributors). See THIRD_PARTY_NOTICES.md.
 """One SSL context for every HTTPS request the backend makes.
 
 Decky's bundled OpenSSL looks for certificates in /usr/lib/ssl (Ubuntu's layout, where it was built), which

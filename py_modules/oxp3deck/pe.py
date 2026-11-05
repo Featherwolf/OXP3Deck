@@ -1,10 +1,11 @@
 """The file version of a Windows DLL (a game's libxess.dll), read from its VS_FIXEDFILEINFO.
 
-Same rule as xess-xmx-linux's tools/proton-hook.py version(), which decides what XESS=latest swaps: the signature
-0xFEEF04BD, then dwStrucVersion, dwFileVersionMS and dwFileVersionLS. A hit whose dwStrucVersion is 0x00010000 is
-preferred, so a stray copy of the four bytes earlier in the file is skipped. Game DLLs reach 50 MB and more, so the
-file is read in 4 MB chunks, never loaded whole. It is not mapped: a page that cannot be read (a worn microSD card,
-a card pulled out, a file that shrinks) would kill the whole root backend with SIGBUS, where read() gives OSError.
+Read as xess-xmx-linux's tools/proton-hook.py version() reads it, which decides what XESS=latest swaps: the
+signature 0xFEEF04BD, then dwFileVersionMS and dwFileVersionLS. Unlike version(), which takes the first hit, this
+prefers a hit whose dwStrucVersion is 0x00010000, so a stray copy of the four bytes earlier in the file is skipped.
+Game DLLs reach 50 MB and more, so the file is read in 4 MB chunks, never loaded whole. It is not mapped: a page
+that cannot be read (a worn microSD card, a card pulled out, a file that shrinks) would kill the whole root backend
+with SIGBUS, where read() gives OSError.
 """
 from __future__ import annotations
 

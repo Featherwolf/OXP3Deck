@@ -1,4 +1,4 @@
-# Adapted from ClawDeck (MIT, Copyright (c) 2026 IHulkSmashI and ClawDeck contributors).
+# Adapted from ClawDeck (MIT, Copyright (c) 2026 IHulkSmashI and ClawDeck contributors). See THIRD_PARTY_NOTICES.md.
 """OXP3Deck: the Decky Loader backend. Thin: each method is one call into py_modules/oxp3deck, run in an executor
 thread, and answers {ok, error, ...} (DESIGN.md "Backend API"). Runs as root (plugin.json flag "root").
 

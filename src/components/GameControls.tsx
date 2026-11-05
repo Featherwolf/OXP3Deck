@@ -1,5 +1,7 @@
-// Adapted from ClawDeck (MIT, Copyright (c) 2026 IHulkSmashI and ClawDeck contributors).
+// Adapted from ClawDeck (MIT, Copyright (c) 2026 IHulkSmashI and ClawDeck contributors). See THIRD_PARTY_NOTICES.md.
 // Based on ClawDeck's per-game tab (src/tabs/PerGame.tsx).
+// The option descriptions follow xess-xmx-linux's docs/launch-options.md (Copyright (c) 2026 HHHHanasak1), partly
+// in its words; the project's MIT licence is in THIRD_PARTY_NOTICES.md.
 // One game's xess-xmx-linux options, written straight into its Steam launch options (before %command%), plus what
 // the backend found about the game (its XeSS DLLs, its Proton, the last run's logs).
 import { ButtonItem, DropdownItem, PanelSectionRow, ToggleField } from "@decky/ui";

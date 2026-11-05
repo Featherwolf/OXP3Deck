@@ -1,4 +1,4 @@
-// Adapted from ClawDeck (MIT, Copyright (c) 2026 IHulkSmashI and ClawDeck contributors).
+// Adapted from ClawDeck (MIT, Copyright (c) 2026 IHulkSmashI and ClawDeck contributors). See THIRD_PARTY_NOTICES.md.
 import { ConfirmModal, showModal } from "@decky/ui";
 import { ReactNode } from "react";
 

@@ -1,4 +1,4 @@
-# Adapted from ClawDeck (MIT, Copyright (c) 2026 IHulkSmashI and ClawDeck contributors).
+# Adapted from ClawDeck (MIT, Copyright (c) 2026 IHulkSmashI and ClawDeck contributors). See THIRD_PARTY_NOTICES.md.
 """main.py loaded the way Decky loads it (a stub `decky` module, then exec of the file), with fake feature modules:
 every call answers a dict with ok, jobs start one at a time, settings are whitelisted, and the frontend's
 src/api.ts names exactly the backend's methods."""

@@ -1,5 +1,6 @@
-# Adapted from ClawDeck (MIT, Copyright (c) 2026 IHulkSmashI and ClawDeck contributors).
-# Type hints for the `decky` module Decky Loader injects; identical to decky-plugin-template's decky.pyi.
+# decky-plugin-template's decky.pyi (https://github.com/SteamDeckHomebrew/decky-plugin-template, commit 90d0780),
+# unchanged: type hints for the `decky` module Decky Loader injects. BSD 3-Clause License, Copyright (c) 2022-2024,
+# Steam Deck Homebrew; the licence text is in THIRD_PARTY_NOTICES.md.
 """
 This module exposes various constants and helpers useful for decky plugins.
 

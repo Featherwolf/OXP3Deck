@@ -67,7 +67,7 @@ class FakeTreeTest(unittest.TestCase):
             "py_modules/oxp3deck/env.py": "X = 1\n",
             "py_modules/oxp3deck/notes.txt": "not packed\n",
             "py_modules/oxp3deck/__pycache__/env.cpython-313.pyc": "junk",
-            "LICENSE": "MIT\n", "README.md": "# r\n", "CREDITS.md": "# c\n",
+            "LICENSE": "MIT\n", "README.md": "# r\n", "CREDITS.md": "# c\n", "THIRD_PARTY_NOTICES.md": "# n\n",
         }
         for rel, text in files.items():
             p = self.plugin / rel
@@ -93,8 +93,8 @@ class FakeTreeTest(unittest.TestCase):
             files = [i.filename for i in zf.infolist() if not i.is_dir()]
             self.assertEqual(zf.read("OXP3Deck/bin/oxp3-tool"), self.tool)
         self.assertEqual(sorted(files), sorted(f"OXP3Deck/{n}" for n in [
-            "CREDITS.md", "LICENSE", "README.md", "bin/oxp3-tool", "bin/oxp3-tool.sha256", "dist/index.js",
-            "main.py", "package.json", "plugin.json", "py_modules/oxp3deck/__init__.py",
+            "CREDITS.md", "LICENSE", "README.md", "THIRD_PARTY_NOTICES.md", "bin/oxp3-tool", "bin/oxp3-tool.sha256",
+            "dist/index.js", "main.py", "package.json", "plugin.json", "py_modules/oxp3deck/__init__.py",
             "py_modules/oxp3deck/env.py"]))
 
     def test_needs_the_frontend_build(self):
@@ -114,7 +114,7 @@ class FakeTreeTest(unittest.TestCase):
             self.build()
 
     def test_missing_backend_or_docs(self):
-        for rel in ("main.py", "CREDITS.md"):
+        for rel in ("main.py", "CREDITS.md", "THIRD_PARTY_NOTICES.md"):
             (self.plugin / rel).rename(self.plugin / (rel + ".x"))
             with self.assertRaisesRegex(self.bz.BuildError, f"{re.escape(rel)} is missing"):
                 self.build()
@@ -192,7 +192,7 @@ class RealBuildTest(unittest.TestCase):
         dist = {p.relative_to(PLUGIN).as_posix() for p in (PLUGIN / "dist").rglob("*") if p.is_file()}
         backend = {f"py_modules/oxp3deck/{p.name}" for p in (PLUGIN / "py_modules" / "oxp3deck").glob("*.py")}
         expected = {"plugin.json", "package.json", "main.py", "bin/oxp3-tool", "bin/oxp3-tool.sha256",
-                    "LICENSE", "README.md", "CREDITS.md"} | dist | backend
+                    "LICENSE", "THIRD_PARTY_NOTICES.md", "README.md", "CREDITS.md"} | dist | backend
         self.assertEqual(files, expected)
         self.assertIn("dist/index.js", files)
         self.assertIn("py_modules/oxp3deck/__init__.py", files)

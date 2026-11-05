@@ -11,6 +11,9 @@ installs, sets up and updates two things:
    frame generation on the GPU's XMX cores instead of the slower DP4a path, with patched Mesa drivers. The plugin
    also sets its per-game launch options for you.
 
+It is modelled on [ClawDeck](https://github.com/IHulkSmashI/ClawDeck), the same kind of plugin for the MSI Claw (see
+[Credits](#credits)).
+
 > **Status: new, and not yet tested on a real device.** If something goes wrong, save a diagnose archive on the
 > Updates & logs page and attach it to an issue.
 
@@ -222,5 +225,17 @@ node --experimental-strip-types --test tests/js/*.test.mjs   # launch options, x
 pnpm typecheck
 ```
 
-[DESIGN.md](DESIGN.md) describes how the backend and the frontend fit together. [CREDITS.md](CREDITS.md) lists the
-projects this one builds on.
+[DESIGN.md](DESIGN.md) describes how the backend and the frontend fit together.
+
+## Credits
+
+OXP3 Deck is modelled on [ClawDeck](https://github.com/IHulkSmashI/ClawDeck) by IHulkSmashI (MIT), and some of its
+code is adapted from it. It drives [xess-xmx-linux](https://github.com/HHHHanasak1/xess-xmx-linux) by HHHHanasak1
+(MIT), runs in [Decky Loader](https://github.com/SteamDeckHomebrew/decky-loader), and its build setup comes from
+[decky-plugin-template](https://github.com/SteamDeckHomebrew/decky-plugin-template). [CREDITS.md](CREDITS.md) lists
+the projects it builds on and what each one gives.
+
+## License
+
+OXP3 Deck is under the MIT License ([LICENSE](LICENSE)). The plugin zip also holds third-party code under its own
+licences; [THIRD_PARTY_NOTICES.md](THIRD_PARTY_NOTICES.md) lists it with the licence texts.

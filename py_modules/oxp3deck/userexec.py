@@ -1,4 +1,4 @@
-# Adapted from ClawDeck (MIT, Copyright (c) 2026 IHulkSmashI and ClawDeck contributors).
+# Adapted from ClawDeck (MIT, Copyright (c) 2026 IHulkSmashI and ClawDeck contributors). See THIRD_PARTY_NOTICES.md.
 """Work done for the desktop user by the root backend.
 
 xess-xmx-linux's scripts write ~/.config and enable systemd --user units, so they must run as the user, never as

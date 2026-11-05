@@ -1,4 +1,4 @@
-// Adapted from ClawDeck (MIT, Copyright (c) 2026 IHulkSmashI and ClawDeck contributors).
+// Adapted from ClawDeck (MIT, Copyright (c) 2026 IHulkSmashI and ClawDeck contributors). See THIRD_PARTY_NOTICES.md.
 import { definePlugin, routerHook } from "@decky/api";
 import { DialogButton, Focusable, staticClasses } from "@decky/ui";
 import { MdSettings, MdVideogameAsset } from "react-icons/md";

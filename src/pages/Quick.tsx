@@ -1,4 +1,4 @@
-// Adapted from ClawDeck (MIT, Copyright (c) 2026 IHulkSmashI and ClawDeck contributors).
+// Adapted from ClawDeck (MIT, Copyright (c) 2026 IHulkSmashI and ClawDeck contributors). See THIRD_PARTY_NOTICES.md.
 // Based on ClawDeck's QuickPanel (src/pages.tsx): the Quick Access panel.
 // Short: the state of the device, what waits for the user, and the running game's XeSS options. Everything else is
 // on the full page ("More").

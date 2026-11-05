@@ -1,5 +1,8 @@
 # Credits
 
+The licence texts of the projects below, and where their parts are, are in
+[THIRD_PARTY_NOTICES.md](THIRD_PARTY_NOTICES.md).
+
 ## ClawDeck
 
 OXP3 Deck is modelled on [ClawDeck](https://github.com/IHulkSmashI/ClawDeck), a Decky Loader plugin for the MSI
@@ -7,14 +10,23 @@ Claw on Bazzite. MIT License, Copyright (c) 2026 IHulkSmashI and ClawDeck contri
 
 Adapted from it:
 
-- **Backend helpers:** undoing the library paths Decky's bundled Python sets for its children (`env.py`), HTTPS with
+- **Backend:** the start of `main.py` (py_modules on sys.path, Decky's PyInstaller variables undone before
+  `import decky`, one executor call per method), undoing those variables for child programs (`env.py`), HTTPS with
   the system's CA certificates (`tls.py`), running commands as the desktop user (`userexec.py`), and GitHub release
   lookups, downloads and safe unpacking (`downloads.py`).
-- **UI patterns:** a short Quick Access panel with a full page behind it, the page's routes and tabs, confirmation
-  dialogs and hints, the per-game controls, and how Steam launch options are read and written.
+- **Frontend:** the Quick Access panel with a full page behind it and its routes and tabs (`index.tsx`, `nav.ts`,
+  `pages/Quick.tsx`, `pages/Full.tsx`), confirmation dialogs and hints (`components/confirm.tsx`,
+  `components/Hint.tsx`), the per-game controls (`components/GameControls.tsx`), Steam's running game and launch
+  options (`steam.ts`) and the typed backend calls (`api.ts`).
+- **Tests:** loading `main.py` with a stand-in `decky` module, and the check that `api.ts` and `main.py` name the
+  same methods (`tests/test_main.py`).
 
 Each adapted file starts with the line "Adapted from ClawDeck (MIT, Copyright (c) 2026 IHulkSmashI and ClawDeck
-contributors)." ClawDeck's licence notice is in [LICENSE](LICENSE).
+contributors)." ClawDeck's licence notice is in [THIRD_PARTY_NOTICES.md](THIRD_PARTY_NOTICES.md).
+
+Also following ClawDeck's approach, without its code: how `xess.py` finds the installed package (VK_DRIVER_FILES in
+50-xess-xmx.conf) and reads the driver check and the drivers (~/.cache/xess-xmx/driver-status, lib/mesa-*,
+lib/active).
 
 ## xess-xmx-linux
 
@@ -23,24 +35,44 @@ generation on the XMX cores of Intel Arc GPUs under Linux. It brings patched Mes
 per-game launch options. MIT License, Copyright (c) 2026 HHHHanasak1. The parts it uses from others (Mesa, Intel's
 XeSS SDK and graphics compiler, AMD FidelityFX and more) keep their own licences, listed in its `THIRD_PARTY.md`.
 
-OXP3 Deck does not include any of it. When you tap Install or Update, the plugin downloads a release from the
-project's GitHub releases and runs the project's own scripts as your user. The launch options in
-[README.md](README.md) are described after its `docs/launch-options.md`.
+The plugin you install does not include xess-xmx-linux itself: when you tap Install or Update, it downloads a release
+from the project's GitHub releases and runs the project's own scripts as your user. The option descriptions in
+[README.md](README.md) and in the per-game controls (`src/components/GameControls.tsx`) follow its
+`docs/launch-options.md`, partly in its words. The repository's `tests/fixtures/xess/` holds five of its scripts
+unchanged for the tests (`get-igc.sh` and `get-xess.sh` of 20261031; `get-igc.sh`, `get-xess.sh` and `get-ffx.sh`
+of 20261104), with its licence in `tests/fixtures/xess/LICENSE`.
 
 ## Decky Loader
 
 [Decky Loader](https://github.com/SteamDeckHomebrew/decky-loader) (GPL-2.0) loads and runs the plugin.
-`dist/index.js` includes `@decky/api` (LGPL-2.1) and uses `@decky/ui` (LGPL-2.1), which Decky provides at run time.
+`dist/index.js` includes `@decky/api` (LGPL-2.1; its licence, its source and how to replace it are in
+[THIRD_PARTY_NOTICES.md](THIRD_PARTY_NOTICES.md)) and uses `@decky/ui` (LGPL-2.1), which Decky provides at run time.
 Both are by the SteamDeckHomebrew team. The frontend is built with `@decky/rollup` (BSD-3-Clause).
+
+## decky-plugin-template
+
+[decky-plugin-template](https://github.com/SteamDeckHomebrew/decky-plugin-template) by the SteamDeckHomebrew team
+(BSD 3-Clause License, Copyright (c) 2022-2024, Steam Deck Homebrew): the plugin layout and build setup
+(`rollup.config.js`, `tsconfig.json`, the `package.json` scripts, `plugin.json`) follow it, and `decky.pyi` is its
+file unchanged.
 
 ## Icons
 
-`dist/index.js` includes icons from [react-icons](https://github.com/react-icons/react-icons) (MIT). They are
-Google's Material Design icons (Apache License 2.0).
+`dist/index.js` includes [react-icons](https://github.com/react-icons/react-icons) 5.5.0 (MIT, Copyright 2018
+kamijin_fanta): its icon component and eight of its icons, which are Google's
+[Material Design icons](https://github.com/google/material-design-icons) (Apache License 2.0).
 
 ## oxp3-tool
 
 `bin/oxp3-tool` is oxp3-tool from
 [OXP3-Tool-for-Bazzite](https://github.com/Featherwolf/OXP3-Tool-for-Bazzite) (its `dist/oxp3-tool`, kept here
 in `vendor/`). Where its fixes come from is in its
-[main README](https://github.com/Featherwolf/OXP3-Tool-for-Bazzite#background).
+[main README](https://github.com/Featherwolf/OXP3-Tool-for-Bazzite#background). Its gamescope display profile is
+modelled on [gamescope](https://github.com/ValveSoftware/gamescope)'s for the same panel (BSD-2-Clause) and on the
+[ONEXPLAYER 3 SteamOS setup](https://github.com/HHHHanasak1/onexplayer3-steamos-setup) fix pack's (MIT).
+
+## Trademarks
+
+OXP3 Deck is an unofficial community project, not affiliated with or endorsed by ONE-NETBOOK (ONEXPLAYER), Intel,
+AMD, Valve, Universal Blue (Bazzite) or CachyOS. ONEXPLAYER, Intel Arc, XeSS, FSR and Steam are trademarks of their
+owners.

@@ -6,8 +6,9 @@ A Decky Loader plugin for the ONEXPLAYER 3 that installs, configures and updates
 2. **xess-xmx-linux** (github.com/HHHHanasak1/xess-xmx-linux): XeSS super resolution and frame generation on the XMX
    cores, and its per-game launch options.
 
-Modelled on ClawDeck (github.com/IHulkSmashI/ClawDeck, MIT, MSI Claw on Bazzite): some backend helpers are adapted
-from it (credited in CREDITS.md). It runs on CachyOS (Handheld Edition and desktop) and Bazzite.
+Modelled on ClawDeck (github.com/IHulkSmashI/ClawDeck, MIT, MSI Claw on Bazzite): some backend helpers and UI
+patterns are adapted from it (credited in CREDITS.md, its licence in THIRD_PARTY_NOTICES.md). It runs on CachyOS
+(Handheld Edition and desktop) and Bazzite.
 
 ## Rules
 
@@ -48,7 +49,7 @@ plugin.json            name "OXP3Deck", flags ["root"], api_version 1
 package.json           version = DECKY_PLUGIN_VERSION
 main.py                class Plugin: one async method per frontend call, thin
 py_modules/oxp3deck/
-  env.py               clean_env(), restore of Decky's *_ORIG variables
+  env.py               clean_env(), restore of Decky's *_ORIG variables (adapted from ClawDeck)
   context.py           Ctx (the desktop user, Decky's folders, a fake root for tests), settings.json
   sysexec.py           run a program with clean_env(), stdin /dev/null, output streamed line by line (from pipes,
                        or from a root-only file it writes to); /proc start times of a pid
@@ -79,6 +80,7 @@ tests/                 unittest, with a stub `decky` module and fake roots; fixt
 tools/build_zip.py     assembles OXP3Deck.zip from dist/, the backend files and vendor/oxp3-tool
 tools/vendor_oxp3_tool.py  refreshes vendor/oxp3-tool (+ .sha256) from OXP3-Tool-for-Bazzite's dist/
 vendor/                the oxp3-tool the zip carries as bin/oxp3-tool
+third_party/           @decky/api 1.1.3's source, kept for its licence (LGPL-2.1, THIRD_PARTY_NOTICES.md); not built
 ```
 
 State the plugin keeps: `DECKY_PLUGIN_SETTINGS_DIR/settings.json` (the xess keys listed under the install job,
