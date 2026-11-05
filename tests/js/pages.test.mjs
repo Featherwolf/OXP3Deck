@@ -47,3 +47,50 @@ test("old folders xess_remove_folder always refuses get no Remove button (RC-2)"
   assert.match(s, /x\.old_folders\.map\(\(p\) => <PanelSectionRow key=\{p\}><OldFolder /);
   assert.doesNotMatch(s, /old_folders_kept[^\n]*<OldFolder/);
 });
+
+test("index.tsx follows the running app for power_game and stops it in onDismount", () => {
+  const s = src("index.tsx");
+  assert.match(s, /const stopPower = onMainAppChange\(\(a\) => \{ power_game\(a\)\.then\(notePower\); \}\)/);
+  assert.match(s, /power_game\(runningApp\(\)\?\.appid \?\? null\)\.then\(notePower\)/);
+  const dismount = s.slice(s.indexOf("onDismount()"));
+  assert.match(dismount, /stopPower\(\)/);
+});
+
+test("power values go through the writer only, never power_set from a control", () => {
+  for (const name of ["components/PowerControls.tsx", "pages/Power.tsx", "pages/Quick.tsx"]) {
+    const s = src(name);
+    assert.doesNotMatch(s, /power_set\(/, `${name} calls power_set`);
+    assert.doesNotMatch(s, /onChange=\{[^}]*power_set/, `${name}: power_set in an onChange`);
+  }
+  assert.match(src("store.ts"), /export const powerWriter = makeWriter\(power_set,/);
+  assert.match(src("components/PowerControls.tsx"), /powerWriter\.write\(key, slot, values\)/);
+});
+
+test("the quick panel shows Power after Status and before oxp3-tool", () => {
+  const s = src("pages/Quick.tsx");
+  const body = s.slice(s.indexOf("export const QuickPanel"));
+  const status = body.indexOf("<StatusSection"), power = body.indexOf("<PowerSection quick"), oxp3 = body.indexOf("<Oxp3Section");
+  assert.ok(status > 0 && power > status && oxp3 > power, "Status, Power, oxp3-tool");
+});
+
+test("the full page has the Power tab first", () => {
+  const s = src("pages/Full.tsx");
+  const pages = s.slice(s.indexOf("pages={["));
+  assert.match(pages, /^pages=\{\[\s*\{ title: "Power", icon: <MdBolt \/>, route: `\$\{ROUTE\}\/power`, content: <PowerTab \/> \}/);
+});
+
+test("power-state is polled only while active (it wakes the GPU)", () => {
+  const s = src("store.ts");
+  const fn = s.slice(s.indexOf("export const usePowerState"));
+  assert.match(fn, /\{ skip: !active/);
+  assert.match(fn, /if \(!active\) return undefined;/);
+  assert.match(src("components/PowerControls.tsx"), /usePower\(!quick \|\| visible\)/);
+});
+
+test("every power call in api.ts is wrapped in backend.ts with an empty state", () => {
+  const api = src("api.ts");
+  const names = [...api.matchAll(/callable<.*?>\("(power_[a-z_]+)"\)/g)].map((m) => m[1]);
+  assert.equal(names.length, 9);
+  const b = src("backend.ts");
+  for (const n of names) assert.match(b, new RegExp(`export const ${n} = guard\\("${n}", `), n);
+});

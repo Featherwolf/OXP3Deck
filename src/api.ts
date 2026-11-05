@@ -6,7 +6,8 @@ import { callable } from "@decky/api";
 
 import type {
   ApplyOpts, CatalogRes, DriversRes, GameInfoRes, JobListRes, JobRes, JobStart, KernelRes, Overview, Oxp3UpdateCheck,
-  PlanRes, Res, ShimRes, StatusRes, XessStateRes, XessUpdateCheck,
+  PlanRes, PowerChangeRes, PowerImportRes, PowerInfoRes, PowerOptions, PowerStateRes, PowerValues, Res, ShimRes,
+  StatusRes, XessStateRes, XessUpdateCheck,
 } from "./types";
 
 // ---- overview ----------------------------------------------------------------------------------------------------
@@ -36,6 +37,17 @@ export const xess_remove_folder = callable<[path: string], Res>("xess_remove_fol
 
 // ---- per game ----------------------------------------------------------------------------------------------------
 export const game_info = callable<[appid: string], GameInfoRes>("game_info");
+
+// ---- power -------------------------------------------------------------------------------------------------------
+export const power_info = callable<[refresh: boolean], PowerInfoRes>("power_info");
+export const power_state = callable<[], PowerStateRes>("power_state");
+export const power_enable = callable<[on: boolean], PowerChangeRes>("power_enable");
+export const power_options = callable<[opts: Partial<PowerOptions>], PowerChangeRes>("power_options");
+export const power_set = callable<[key: string, slot: "main" | "ac", values: Partial<PowerValues>], PowerChangeRes>("power_set");
+export const power_profile = callable<[appid: string, name: string | null, on: boolean], PowerChangeRes>("power_profile");
+export const power_game = callable<[appid: string | null], PowerChangeRes>("power_game");
+export const power_take_control = callable<[], PowerChangeRes>("power_take_control");
+export const power_import_sdtdp = callable<[], PowerImportRes>("power_import_sdtdp");
 
 // ---- jobs and misc -----------------------------------------------------------------------------------------------
 export const job_status = callable<[id: string | null], JobRes>("job_status");

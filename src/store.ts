@@ -4,8 +4,9 @@
 // and someone is looking at it.
 import { useEffect, useReducer, useRef } from "react";
 
-import { job_status } from "./backend";
-import type { Job } from "./types";
+import { job_status, power_set, power_state } from "./backend";
+import { makeWriter } from "./power";
+import type { Job, PowerChangeRes, PowerStateRes } from "./types";
 
 type Entry = { data: unknown; inflight: Promise<unknown> | null; subs: Set<() => void>;
                loader: (() => Promise<unknown>) | null; stale: boolean };
@@ -32,6 +33,14 @@ export const load = <T>(key: string, loader: () => Promise<T>): Promise<T> => {
 };
 
 export const peek = <T>(key: string): T | undefined => entries.get(key)?.data as T | undefined;
+
+/** Replace the cached answer for key (an answer that came another way, e.g. the power writer's state). */
+export const put = <T>(key: string, data: T) => {
+  const e = entry(key);
+  e.data = data;
+  e.stale = false;
+  notify(e.subs);
+};
 
 /**
  * The cached answer for key, loaded on first use. fresh: reload on every mount (the cached one shows meanwhile).
@@ -164,3 +173,61 @@ export const useClaim = (id: string | null | undefined) => {
 
 /** For onDismount: stop the poll timer. */
 export const stopPolling = () => { stopped = true; if (timer) clearTimeout(timer); timer = null; };
+
+// ---- power ----------------------------------------------------------------------------------------------------------
+
+/**
+ * The one writer behind every power slider and toggle that sets profile values (power.ts makeWriter): changes reach
+ * the backend in order, one at a time. Its answers update the cached power-state; the profiles reload afterwards.
+ */
+export const powerWriter = makeWriter(power_set, {
+  onState: (state) => put<PowerStateRes>("power-state", { ok: true, error: null, state }),
+  onAnswer: (r, stale) => {
+    if (!stale) invalidate("power-info");
+    if (!r.ok) powerErrors.forEach((f) => { try { f(r.error); } catch { /* a dead subscriber */ } });
+  },
+});
+const powerErrors = new Set<(e: string | null) => void>();
+
+/** fn(error) when a change the writer sent was refused. */
+export const usePowerErrors = (fn: (e: string | null) => void) => {
+  const latest = useRef(fn);
+  latest.current = fn;
+  useEffect(() => {
+    const f = (e: string | null) => latest.current(e);
+    powerErrors.add(f);
+    return () => { powerErrors.delete(f); };
+  }, []);
+};
+
+/** A power change's answer into the caches (power-state now, the profiles and the overview on their next use). */
+export const notePower = (r: PowerChangeRes): string | null => {
+  if (r.state) put<PowerStateRes>("power-state", { ok: true, error: null, state: r.state });
+  invalidate("power-info");
+  invalidate("overview");
+  return r.ok ? null : r.error || "refused";
+};
+
+/** For a panel closing and onDismount: send what the sliders still hold. */
+export const flushPower = () => { try { powerWriter.flush(); } catch { /* the backend is going away */ } };
+
+/** A poll answer from before a change the writer made (or while one waits) is dropped: it would move a slider back. */
+const loadPowerState = async (): Promise<PowerStateRes | undefined> => {
+  const v = powerWriter.version();
+  const r = await power_state();
+  return powerWriter.busy() || powerWriter.version() !== v ? peek<PowerStateRes>("power-state") ?? r : r;
+};
+
+/**
+ * The live power state (it reads the GPU clocks, which wakes the GPU): loaded on mount and every 2 s, only while
+ * active (the panel or the tab shows), never otherwise. Unmounting or going inactive sends what the writer holds.
+ */
+export const usePowerState = (active: boolean) => {
+  const res = useResource<PowerStateRes | undefined>("power-state", loadPowerState, { skip: !active, fresh: true });
+  useEffect(() => {
+    if (!active) return undefined;
+    const t = setInterval(() => { if (!powerWriter.busy()) load("power-state", loadPowerState); }, 2000);
+    return () => { clearInterval(t); flushPower(); };
+  }, [active]);
+  return res;
+};

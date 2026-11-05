@@ -1,0 +1,6 @@
+inputplumber.service                                  loaded    active   running InputPlumber Service
+powerstation.service                                  loaded    active   running PowerStation
+steamos-manager.service                               loaded    active   running SteamOS Manager
+thermald.service                                      loaded    active   running Thermal Daemon Service
+tuned.service                                         loaded    active   running Dynamic System Tuning Daemon
+tuned-ppd.service                                     loaded    active   running PPD-to-tuned API Translation Daemon

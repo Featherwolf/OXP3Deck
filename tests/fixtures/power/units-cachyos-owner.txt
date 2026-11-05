@@ -1,0 +1,7 @@
+inputplumber.service                                  loaded    active   running InputPlumber Service
+intel_lpmd.service                                    loaded    inactive dead    Intel Linux Energy Optimizer (lpmd) Service
+power-profiles-daemon.service                         loaded    active   running Power Profiles daemon
+powerstation.service                                  not-found inactive dead    powerstation.service
+thermald.service                                      loaded    active   running Thermal Daemon Service
+tuned.service                                         loaded    inactive dead    Dynamic System Tuning Daemon
+tuned-ppd.service                                     loaded    inactive dead    PPD-to-tuned API Translation Daemon

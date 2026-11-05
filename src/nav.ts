@@ -2,7 +2,7 @@
 import { Navigation } from "@decky/ui";
 
 export const ROUTE = "/oxp3deck";
-export type Tab = "fixes" | "buttons" | "xess" | "games" | "kernel" | "updates";
+export type Tab = "power" | "fixes" | "buttons" | "xess" | "games" | "kernel" | "updates";
 
 /** Opens the full page on one tab and closes the Quick Access menu. */
 export const openPage = (tab: Tab = "fixes") => {

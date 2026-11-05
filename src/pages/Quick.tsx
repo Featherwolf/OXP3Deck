@@ -10,6 +10,7 @@ import { get_overview, oxp3_status, xess_check_update, xess_state } from "../bac
 import { GameControls } from "../components/GameControls";
 import { explain, Note, Problem, Status } from "../components/Hint";
 import { JobView } from "../components/JobView";
+import { PowerSection } from "../components/PowerControls";
 import { RebootRow } from "../components/Reboot";
 import { openPage } from "../nav";
 import { useRunningApp } from "../steam";
@@ -172,6 +173,7 @@ export const QuickPanel: FC = () => {
   return (
     <>
       <StatusSection o={o} err={ov.data && !ov.data.ok ? ov.data.error : null} st={status} />
+      <PowerSection quick app={app} />
       {o && <Oxp3Section o={o} st={st.data} loading={st.loading} />}
       {o && <XessSection o={o} />}
       {app && (
@@ -183,7 +185,7 @@ export const QuickPanel: FC = () => {
       <PanelSection>
         <PanelSectionRow>
           <ButtonItem layout="below" onClick={() => openPage(app ? "games" : "fixes")}
-            description="Every fix, the button layout, XeSS details, games, the kernel and the logs.">More</ButtonItem>
+            description="Power profiles, every fix, the button layout, XeSS details, games, the kernel and the logs.">More</ButtonItem>
         </PanelSectionRow>
       </PanelSection>
     </>

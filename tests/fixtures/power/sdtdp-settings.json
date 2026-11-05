@@ -1,0 +1,14 @@
+{
+  "enableTdpProfiles": true,
+  "advanced": {"acPowerProfiles": true},
+  "tdpProfiles": {
+    "default": {"tdp": 12, "cpuBoost": false, "smt": true, "gpuMode": "BALANCE",
+                "powerControls": {"intel_pstate": {"epp": "balance_power", "powerGovernor": "powersave"}}},
+    "default-ac-power": {"tdp": 28, "cpuBoost": true, "gpuMode": "RANGE", "minGpuFrequency": 400,
+                         "maxGpuFrequency": 2000},
+    "1091500": {"tdp": 18, "cpuBoost": true, "gpuMode": "FIXED", "fixedGpuFrequency": 1500,
+                "powerControls": {"intel_pstate": {"epp": "performance"}}},
+    "1091500-ac-power": {"tdp": 3},
+    "notanapp": {"tdp": 10}
+  }
+}

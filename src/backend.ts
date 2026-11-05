@@ -10,15 +10,18 @@ const reason = (e: unknown): string => {
 type Raw = typeof raw;
 type ResName = Exclude<keyof Raw, "get_setting">;
 
-/** raw[name] with a rejection (or a non-object answer) turned into {ok: false, error: "name: reason"}. */
-const guard = <K extends ResName>(name: K): Raw[K] => {
+/**
+ * raw[name] with a rejection (or a non-object answer) turned into {ok: false, error: "name: reason", ...empty}: empty
+ * gives the answer's other fields (the power calls' state: null), so a page can read them without a check.
+ */
+const guard = <K extends ResName>(name: K, empty: Record<string, unknown> = {}): Raw[K] => {
   const fn = raw[name] as unknown as (...args: unknown[]) => Promise<unknown>;
   return (async (...args: unknown[]) => {
     try {
       const r = await fn(...args);
-      return r && typeof r === "object" ? r : { ok: false, error: `${name}: no answer` };
+      return r && typeof r === "object" ? r : { ...empty, ok: false, error: `${name}: no answer` };
     } catch (e) {
-      return { ok: false, error: `${name}: ${reason(e)}` };
+      return { ...empty, ok: false, error: `${name}: ${reason(e)}` };
     }
   }) as unknown as Raw[K];
 };
@@ -43,6 +46,16 @@ export const xess_set_driver = guard("xess_set_driver");
 export const xess_shim_system_protons = guard("xess_shim_system_protons");
 export const xess_remove_folder = guard("xess_remove_folder");
 export const game_info = guard("game_info");
+const NO_CHANGE = { state: null, applied: null };
+export const power_info = guard("power_info", { info: null });
+export const power_state = guard("power_state", { state: null });
+export const power_enable = guard("power_enable", NO_CHANGE);
+export const power_options = guard("power_options", NO_CHANGE);
+export const power_set = guard("power_set", NO_CHANGE);
+export const power_profile = guard("power_profile", NO_CHANGE);
+export const power_game = guard("power_game", NO_CHANGE);
+export const power_take_control = guard("power_take_control", NO_CHANGE);
+export const power_import_sdtdp = guard("power_import_sdtdp", { imported: [], skipped: [], state: null });
 export const job_status = guard("job_status");
 export const job_list = guard("job_list");
 export const reboot = guard("reboot");

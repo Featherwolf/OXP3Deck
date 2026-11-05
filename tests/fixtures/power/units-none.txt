@@ -1,0 +1,3 @@
+dbus-broker.service                                   loaded    active   running D-Bus System Message Bus
+power-profiles-daemon.service                         loaded    inactive dead    Power Profiles daemon
+systemd-journald.service                              loaded    active   running Journal Service

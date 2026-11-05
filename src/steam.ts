@@ -37,30 +37,78 @@ export const lastGame = (): RunningApp | null => {
   }
 };
 
-/** The running game; follows game starts and exits (Steam's app lifetime notifications). */
+// One shared watch of the main running app for every user (the panel, the pages, power_game): Steam's app lifetime
+// notifications (Router catches up a moment later, so it is read at once and after 1 s) plus a 3 s check, which also
+// sees the focus moving between two running apps. Listeners hear only changes.
+type AppListener = (app: RunningApp | null) => void;
+const listeners = new Set<AppListener>();
+let seen: RunningApp | null = null;
+let stopWatch: (() => void) | null = null;
+
+const sameApp = (a: RunningApp | null, b: RunningApp | null) => a?.appid === b?.appid && a?.name === b?.name;
+
+const checkApp = () => {
+  const now = runningApp();
+  if (sameApp(seen, now)) return;
+  seen = now;
+  listeners.forEach((f) => { try { f(now); } catch { /* a dead listener */ } });
+};
+
+const startWatch = () => {
+  seen = runningApp();
+  const timers = new Set<ReturnType<typeof setTimeout>>();
+  let reg: { unregister(): void } | null = null;
+  try {
+    reg = client()?.GameSessions?.RegisterForAppLifetimeNotifications?.(() => {
+      checkApp();
+      const t = setTimeout(() => { timers.delete(t); checkApp(); }, 1000);
+      timers.add(t);
+    }) ?? null;
+  } catch {
+    reg = null;
+  }
+  const poll = setInterval(checkApp, 3000);
+  stopWatch = () => {
+    clearInterval(poll);
+    timers.forEach((t) => clearTimeout(t));
+    timers.clear();
+    try { reg?.unregister(); } catch { /* already gone */ }
+    stopWatch = null;
+  };
+};
+
+/** cb(app) on every change of the running app (or its name); the returned function stops it. */
+export const watchRunningApp = (cb: AppListener): (() => void) => {
+  listeners.add(cb);
+  if (!stopWatch) startWatch();
+  return () => {
+    listeners.delete(cb);
+    if (!listeners.size) stopWatch?.();
+  };
+};
+
+/** cb(appid) whenever the main running app changes (null: none runs); the returned function stops it. */
+export const onMainAppChange = (cb: (appid: string | null) => void): (() => void) => {
+  let prev = runningApp()?.appid ?? null;
+  return watchRunningApp((a) => {
+    const id = a?.appid ?? null;
+    if (id === prev) return;
+    prev = id;
+    cb(id);
+  });
+};
+
+/** The running game; follows game starts and exits (the shared watch above). */
 export const useRunningApp = (): RunningApp | null => {
   const [app, setApp] = useState<RunningApp | null>(runningApp);
   useEffect(() => {
-    const timers: ReturnType<typeof setTimeout>[] = [];
     const update = () => setApp((old) => {
       const now = runningApp();
-      return old?.appid === now?.appid && old?.name === now?.name ? old : now;
+      return sameApp(old, now) ? old : now;
     });
-    let reg: { unregister(): void } | null = null;
-    try {
-      reg = client()?.GameSessions?.RegisterForAppLifetimeNotifications?.(() => {
-        // Router catches up a moment after the notification
-        update();
-        timers.push(setTimeout(update, 1000));
-      }) ?? null;
-    } catch {
-      reg = null;
-    }
+    const stop = watchRunningApp(update);
     update();
-    return () => {
-      timers.forEach(clearTimeout);
-      try { reg?.unregister(); } catch { /* already gone */ }
-    };
+    return stop;
   }, []);
   useEffect(() => { if (app) remember.set("lastGame", JSON.stringify(app)); }, [app?.appid]);
   return app;

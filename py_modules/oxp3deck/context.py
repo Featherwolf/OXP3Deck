@@ -174,9 +174,13 @@ class Settings:
     def set(self, key: str, value) -> str | None:
         return self.update({key: value})
 
-    def update(self, values: dict) -> str | None:
+    def replace(self, values: dict) -> str | None:
+        """The whole file becomes `values` (keys not in it are dropped); otherwise as update()."""
+        return self.update(values, keep=False)
+
+    def update(self, values: dict, keep: bool = True) -> str | None:
         with self._lock:
-            new = dict(self._data)
+            new = dict(self._data) if keep else {}
             new.update(values)
             try:
                 blob = (json.dumps(new, indent=2, sort_keys=True) + "\n").encode("utf-8")

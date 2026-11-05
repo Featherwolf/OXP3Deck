@@ -3,7 +3,7 @@
 // One tab per area, navigated with the D-pad on the left like Steam's own settings.
 import { SidebarNavigation } from "@decky/ui";
 import { FC, useEffect } from "react";
-import { MdBuild, MdGamepad, MdHistory, MdMemory, MdSportsEsports, MdAutoAwesome } from "react-icons/md";
+import { MdBolt, MdBuild, MdGamepad, MdHistory, MdMemory, MdSportsEsports, MdAutoAwesome } from "react-icons/md";
 
 import { get_overview, oxp3_status } from "../backend";
 import { ROUTE } from "../nav";
@@ -13,6 +13,7 @@ import { ButtonsTab } from "./Buttons";
 import { FixesTab } from "./Fixes";
 import { GamesTab } from "./Games";
 import { KernelTab } from "./Kernel";
+import { PowerTab } from "./Power";
 import { oxp3Usable } from "./Quick";
 import { UpdatesTab } from "./Updates";
 import { XessTab } from "./XeSS";
@@ -27,6 +28,7 @@ export const FullPage: FC = () => {
   const limine = s?.os.platform === "cachyos" && s.boot === "Limine";
   return (
     <SidebarNavigation title="OXP3 Deck" showTitle pages={[
+      { title: "Power", icon: <MdBolt />, route: `${ROUTE}/power`, content: <PowerTab /> },
       { title: "Fixes", icon: <MdBuild />, route: `${ROUTE}/fixes`, content: <FixesTab /> },
       { title: "Buttons", icon: <MdGamepad />, route: `${ROUTE}/buttons`, content: <ButtonsTab /> },
       { title: "XeSS", icon: <MdAutoAwesome />, route: `${ROUTE}/xess`, content: <XessTab /> },

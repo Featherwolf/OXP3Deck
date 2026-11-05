@@ -28,6 +28,32 @@ Also following ClawDeck's approach, without its code: how `xess.py` finds the in
 50-xess-xmx.conf) and reads the driver check and the drivers (~/.cache/xess-xmx/driver-status, lib/mesa-*,
 lib/active).
 
+Power control (`powerhw.py`, `power.py`) also learned from ClawDeck's Panther Lake measurements on the MSI Claw
+(its `docs/HARDWARE-FINDINGS.md`), without its code: RAPL limits written PL2 before PL1 when raising (§12), only the
+xe render GT (`gt0`) changed and never the media GT (§1, item 3), and thermald rewriting the power limits within
+seconds (§21).
+
+## SimpleDeckyTDP
+
+[SimpleDeckyTDP](https://github.com/aarron-lee/SimpleDeckyTDP) by Aarron Lee (BSD-3-Clause, Copyright (c) 2023,
+Aarron Lee) is the TDP plugin OXP3 Deck's power control replaces on the OXP3. Its ideas are followed, without its
+code: the profile model (a default profile, per-game profiles by Steam app id, separate `-ac-power` values), applying
+again after a resume with a short delay, and its `settings.json` format, which **Import from SimpleDeckyTDP** reads
+as data (`tdpProfiles`, `enableTdpProfiles`, `advanced.acPowerProfiles`). No SimpleDeckyTDP code is in OXP3 Deck, so
+[THIRD_PARTY_NOTICES.md](THIRD_PARTY_NOTICES.md) has no section for it.
+
+## Research sources for power control
+
+Read to learn how other tools set the same limits, so OXP3 Deck can detect them and not fight them; no code from
+them is in OXP3 Deck:
+
+- [Handheld Daemon](https://github.com/hhd-dev/hhd) (LGPL-2.1): its TDP control writes PL1, PL2 and PL4
+  (`adjustor/core/rapl.py`), which is why OXP3 Deck warns when PL4 is left below the boost limit.
+- [PowerStation](https://github.com/ShadowBlip/PowerStation) (GPL-3.0): the service behind Steam's TDP slider on
+  Bazzite.
+- [ONEXPLAYER 3 SteamOS setup](https://github.com/HHHHanasak1/onexplayer3-steamos-setup) (MIT): the finding that the
+  Arc GPU follows the MSR PL1, not the MMIO one.
+
 ## xess-xmx-linux
 
 [xess-xmx-linux](https://github.com/HHHHanasak1/xess-xmx-linux) by HHHHanasak1 runs XeSS super resolution and frame

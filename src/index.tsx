@@ -3,14 +3,19 @@ import { definePlugin, routerHook } from "@decky/api";
 import { DialogButton, Focusable, staticClasses } from "@decky/ui";
 import { MdSettings, MdVideogameAsset } from "react-icons/md";
 
+import { power_game } from "./backend";
 import { openPage, ROUTE } from "./nav";
 import { FullPage } from "./pages/Full";
 import { QuickPanel } from "./pages/Quick";
-import { stopPolling } from "./store";
+import { onMainAppChange, runningApp } from "./steam";
+import { flushPower, notePower, stopPolling } from "./store";
 
 export default definePlugin(() => {
   // exact: false, so /oxp3deck/<tab> reaches the page and SidebarNavigation picks the tab
   routerHook.addRoute(ROUTE, FullPage, { exact: false });
+  // power profiles follow the running game: the backend hears every change, and the game running at load
+  const stopPower = onMainAppChange((a) => { power_game(a).then(notePower); });
+  power_game(runningApp()?.appid ?? null).then(notePower);
   return {
     name: "OXP3 Deck",
     // Decky's own title bar, with a button to the full page (as "More" at the bottom does)
@@ -26,6 +31,8 @@ export default definePlugin(() => {
     content: <QuickPanel />,
     icon: <MdVideogameAsset />,
     onDismount() {
+      stopPower();
+      flushPower();
       stopPolling();
       try { routerHook.removeRoute(ROUTE); } catch { /* the loader is going away */ }
     },

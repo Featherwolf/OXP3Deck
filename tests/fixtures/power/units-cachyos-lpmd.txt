@@ -1,0 +1,7 @@
+dbus-broker.service                                   loaded    active   running D-Bus System Message Bus
+inputplumber.service                                  loaded    active   running InputPlumber Service
+intel_lpmd.service                                    loaded    active   running Intel Linux Energy Optimizer (lpmd) Service
+power-profiles-daemon.service                         loaded    inactive dead    Power Profiles daemon
+systemd-journald.service                              loaded    active   running Journal Service
+thermald.service                                      loaded    inactive dead    Thermal Daemon Service
+tuned-ppd.service                                     not-found inactive dead    tuned-ppd.service

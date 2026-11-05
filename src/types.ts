@@ -30,6 +30,7 @@ export type Overview = Res & {
   job: Job | null;
   reboot_pending: boolean;
   do_not_reboot: string | null;
+  power?: PowerSummary | null;               // null: the power module did not answer
 };
 
 // ---- oxp3-tool -----------------------------------------------------------------------------------------------------
@@ -155,3 +156,69 @@ export type GameInfoRes = Res & { game: GameInfo | null };
 
 export type JobRes = Res & { job: Job | null };
 export type JobListRes = Res & { jobs: Job[] };
+
+// ---- power (DESIGN.md "Power (TDP, GPU, CPU)") ---------------------------------------------------------------------
+
+export type Epp = "performance" | "balance_performance" | "balance_power" | "power";
+export type PowerValues = {
+  pl1_w: number | null; pl2_w: number | null; gpu_min_mhz: number | null; gpu_max_mhz: number | null;
+  epp: Epp | null; turbo: boolean | null;              // null: the firmware's value
+};
+export type PowerProfile = { name: string | null; main: PowerValues; ac: PowerValues | null };
+export type PowerOptions = { per_game: boolean; split_ac: boolean; extended: boolean; ignore: string[] };
+export type PowerRange = {
+  pl1_min: number; pl1_max: number; pl2_max: number;    // for the AC state now (W)
+  pl1_max_battery: number; pl1_max_ac: number; extended_max: number | null;   // extended_max: OXP3 only
+  gpu_min: number | null; gpu_max: number | null; gpu_efficient: number | null;   // rpn, rp0, rpe (MHz)
+  spec: "oxp3" | "firmware";
+};
+export type PowerZone = {
+  id: string; iface: "msr" | "mmio"; name: string;
+  pl1_w: number | null; pl2_w: number | null; pl4_w: number | null;   // read now
+  boot_pl1_w: number | null; boot_pl2_w: number | null;              // snapshot (null: none taken this boot)
+  pl1_base_w: number | null;                                         // PL1 max_power_uw, shown only
+  locked: string[];                                                  // "pl1" | "pl2"
+};
+export type PowerConflict = {
+  id: string; name: string; kind: "blocks" | "cpu" | "suspect";
+  ignorable: boolean; ignored: boolean; why: string; fix: string;
+};
+export type PowerOverridden = { what: string; ours: string; now: string; since: number; suspects: string[] };
+export type PowerApply = {
+  ok: boolean; error: string | null; written: string[];
+  failed: { id: string; error: string; locked: boolean }[];
+};
+export type PowerGpuNow = { min: number | null; max: number | null; act: number | null; reasons: string[] };
+export type PowerState = {
+  enabled: boolean;
+  active: { key: string; name: string; slot: "main" | "ac"; app: string | null; ac: boolean | null };
+  values: PowerValues;                    // the active slot as stored
+  applied_values: PowerValues;            // after clamping and with firmware values filled in (what was written)
+  now: { pl1_w: number | null; pl2_w: number | null;     // effective: the lowest over the zones
+         zones: PowerZone[];
+         gpu: PowerGpuNow | null;
+         epp: Epp | "default" | "mixed" | null; turbo: boolean | null; governor: string | null };
+  range: PowerRange;
+  overridden: PowerOverridden | null;
+  blocked: string | null;                 // why nothing is written although enabled
+  cpu_blocked: string | null;             // why EPP and turbo are not written
+  last: PowerApply | null;                // the last apply
+};
+export type PowerInfo = {
+  hw: { rapl: boolean; mmio: boolean; gpu: { card: string; gt: string; media_gt: string | null } | null;
+        cpu: { pstate: string | null; epp_choices: Epp[]; turbo: boolean } | null;
+        ac_supply: string | null; problems: string[] };
+  options: PowerOptions;
+  profiles: Record<string, PowerProfile>;  // "default" always present
+  conflicts: PowerConflict[];
+  boot: { taken_at: number } | null;
+  sdtdp_found: boolean;                    // SimpleDeckyTDP's settings.json exists
+  state: PowerState;
+};
+/** line e.g. "15 W / 25 W · Cyberpunk 2077" or "Off". */
+export type PowerSummary = { enabled: boolean; line: string | null; overridden: boolean; blocked: string | null };
+export type PowerInfoRes = Res & { info: PowerInfo | null };
+export type PowerStateRes = Res & { state: PowerState | null };
+export type PowerChangeRes = Res & { state: PowerState | null; applied: PowerApply | null;
+                                     conflicts?: PowerConflict[] };   // conflicts: a refused enable
+export type PowerImportRes = Res & { imported: string[]; skipped: string[]; state: PowerState | null };

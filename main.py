@@ -47,6 +47,7 @@ def _load(name: str):
 oxp3tool = _load("oxp3tool")
 xess = _load("xess")
 games = _load("games")
+power = _load("power")              # (powerhw is imported by power)
 
 OXP3_VENDOR = "ONE-NETBOOK"          # oxp3_tool/detect.py OXP3_SYS_VENDOR / OXP3_PRODUCT_NAME
 OXP3_PRODUCT = "ONEXPLAYER 3"
@@ -54,6 +55,7 @@ SETTING_KEYS = {"xess_driver": (str, type(None)), "xess_shim_system": (bool,)}
 UI_KEY = re.compile(r"^ui_[A-Za-z0-9_]{1,60}$")
 MAX_SETTING_BYTES = 4096
 MAX_UI_KEYS = 64
+POWER_TICK_S = 2                     # the power watch loop's period: power.TICK_S (a test keeps them equal)
 REBOOT_KEY = "oxp3_reboot_pending"   # settings.json: {boot_id, value} from the last oxp3-tool status
 OXP3_STILL_RUNNING = ("the plugin restarted while oxp3-tool was running; it may still be running: read the status "
                       "when it has ended")
@@ -139,6 +141,7 @@ class Plugin:
         self.jobs = None
         self._broken = None
         self._boot = None
+        self._watch = None
         try:
             self.ctx = context.from_decky()
             self.settings = context.Settings(os.path.join(self.ctx.settings_dir, "settings.json"))
@@ -230,12 +233,36 @@ class Plugin:
     # ---- lifecycle -----------------------------------------------------------------------------------------------
 
     async def _main(self):
-        """A pacman update of proton-cachyos puts the stock DLL back: shim the system Protons again when needed."""
+        """A pacman update of proton-cachyos puts the stock DLL back: shim the system Protons again when needed.
+        Then the power watch task starts (power.tick every POWER_TICK_S); _main itself returns."""
         try:
             self._check()
             await asyncio.get_running_loop().run_in_executor(None, self._reshim)
         except Exception:
             log.error("start-up check failed (carrying on):\n%s", traceback.format_exc())
+        if self._broken is None and self._watch is None:
+            self._watch = asyncio.get_running_loop().create_task(self._power_watch())
+
+    async def _power_watch(self):
+        """AC changes, resume, the boot apply and drift are seen here (DESIGN.md "Events"), in the executor. An
+        error is logged (the same text once in a row) and the loop goes on; a power module that did not load ends
+        it."""
+        last = None
+        while True:
+            await asyncio.sleep(POWER_TICK_S)
+            try:
+                await asyncio.get_running_loop().run_in_executor(None, _mod("power").tick, self.ctx)
+                last = None
+            except Unavailable as e:
+                log.error("power watch stopped: %s", e)
+                return
+            except asyncio.CancelledError:
+                raise
+            except Exception as e:
+                text = f"{type(e).__name__}: {e}"
+                if text != last:
+                    log.error("power watch: %s", traceback.format_exc())
+                last = text
 
     def _reshim(self) -> None:
         x = _mod("xess")
@@ -250,7 +277,11 @@ class Plugin:
         # programs it started do not: oxp3-tool and the xess-xmx-linux scripts (userexec detach) have their own
         # session and write to files in /run/oxp3deck, so they run to their end, EXIT traps included. A short
         # helper (cp, rm, the unpacker) keeps running too but loses its output pipe. The job shows as interrupted
-        # at the next start (_after_restart).
+        # at the next start (_after_restart). Power limits stay as they are (DESIGN.md "Power": none outlives a
+        # reboot, and a reload must not drop a game's limits); only the watch task stops.
+        if self._watch is not None:
+            self._watch.cancel()
+            self._watch = None
         log.info("OXP3Deck unloading")
 
     async def _uninstall(self):
@@ -286,6 +317,7 @@ class Plugin:
             "job": job.to_dict(tail=20) if job else None,
             "reboot_pending": part("reboot", self._reboot_pending, False),
             "do_not_reboot": part("rebuild marker", lambda: _mod("oxp3tool").rebuild_unfinished(ctx), None),
+            "power": part("power", lambda: _mod("power").summary(ctx), None),
         }
 
     # ---- oxp3-tool -----------------------------------------------------------------------------------------------
@@ -386,6 +418,36 @@ class Plugin:
 
     async def game_info(self, appid):
         return await self._call("game_info", lambda: _mod("games").game_info(self.ctx, self.settings, str(appid)))
+
+    # ---- power (not jobs: no job ever blocks these) ----------------------------------------------------------------
+
+    async def power_info(self, refresh=False):
+        refresh = refresh is True
+        return await self._call("power_info", lambda: _mod("power").info(self.ctx, refresh))
+
+    async def power_state(self):
+        return await self._call("power_state", lambda: _mod("power").state(self.ctx))
+
+    async def power_enable(self, on):
+        return await self._call("power_enable", lambda: _mod("power").enable(self.ctx, on))
+
+    async def power_options(self, opts):
+        return await self._call("power_options", lambda: _mod("power").options(self.ctx, opts))
+
+    async def power_set(self, key, slot, values):
+        return await self._call("power_set", lambda: _mod("power").set_values(self.ctx, key, slot, values))
+
+    async def power_profile(self, appid, name, on):
+        return await self._call("power_profile", lambda: _mod("power").profile(self.ctx, appid, name, on))
+
+    async def power_game(self, appid):
+        return await self._call("power_game", lambda: _mod("power").game(self.ctx, appid))
+
+    async def power_take_control(self):
+        return await self._call("power_take_control", lambda: _mod("power").take_control(self.ctx))
+
+    async def power_import_sdtdp(self):
+        return await self._call("power_import_sdtdp", lambda: _mod("power").import_sdtdp(self.ctx))
 
     # ---- jobs and misc -------------------------------------------------------------------------------------------
 

@@ -196,6 +196,8 @@ class RealBuildTest(unittest.TestCase):
         self.assertEqual(files, expected)
         self.assertIn("dist/index.js", files)
         self.assertIn("py_modules/oxp3deck/__init__.py", files)
+        self.assertIn("py_modules/oxp3deck/power.py", files)
+        self.assertIn("py_modules/oxp3deck/powerhw.py", files)
         for i in self.infos:
             if not i.is_dir():
                 self.assertEqual(self.zf.read(i), (self.source(i.filename)).read_bytes(), i.filename)

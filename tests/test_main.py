@@ -32,6 +32,9 @@ CALLS = {
     "xess_install": (), "xess_uninstall": (), "xess_set_driver": ("26.3",), "xess_shim_system_protons": (),
     "xess_remove_folder": ("/home/jordan/xess-old",), "game_info": ("1091500",), "job_status": (None,),
     "job_list": (), "reboot": (), "get_setting": ("ui_tab",), "set_setting": ("ui_tab", "fixes"),
+    "power_info": (False,), "power_state": (), "power_enable": (True,), "power_options": ({"split_ac": True},),
+    "power_set": ("default", "main", {"pl1_w": 15}), "power_profile": ("1091500", "Cyberpunk 2077", True),
+    "power_game": ("1091500",), "power_take_control": (), "power_import_sdtdp": (),
 }
 
 
@@ -87,8 +90,10 @@ class Base(unittest.TestCase):
         self.addCleanup(stub_decky.uninstall)
         quiet(self)
         self.m = load_main(self.tmp.name)
-        for name in ("oxp3tool", "xess", "games"):   # nothing real runs (runuser, oxp3-tool) unless a test says so
-            setattr(self.m, name, Raising())        # (and Plugin()'s _after_restart leaves the real /run alone)
+        # nothing real runs (runuser, oxp3-tool, sysfs writes) unless a test says so (and Plugin()'s _after_restart
+        # leaves the real /run alone)
+        for name in ("oxp3tool", "xess", "games", "power"):
+            setattr(self.m, name, Raising())
         self.p = self.m.Plugin()
         self.assertIsNone(self.p._broken)
         self.p.ctx = stub_decky.make_ctx(self.tmp.name)   # uid 1000 and a fake root for /etc, /sys, /proc
@@ -267,6 +272,85 @@ class LifecycleTest(Base):
         asyncio.run(self.p._main())
         self.assertEqual(call(self.p, "job_list")["jobs"], [])
 
+    def watch(self, seconds, **fns):
+        """_main, then `seconds` of the power watch loop, then _unload: (the task, how many ticks ran)."""
+        ticks = []
+        fake = self.fake("power", tick=lambda ctx: ticks.append(ctx) or {"ok": True, "did": "nothing"})
+        for k, v in fns.items():
+            setattr(fake, k, v)
+        self.fake("xess", system_protons_need_shim=lambda ctx, settings: False)
+
+        async def go():
+            with mock.patch.object(self.m, "POWER_TICK_S", 0.01):
+                await self.p._main()
+                task = self.p._watch
+                self.assertIsNotNone(task)
+                await asyncio.sleep(seconds)
+                done_early = task.done()
+                await self.p._unload()
+                await asyncio.sleep(0.05)
+                return task, done_early
+
+        task, done_early = asyncio.run(go())
+        self.assertTrue(task.done())
+        self.assertIsNone(self.p._watch)
+        return task, done_early, ticks
+
+    def test_main_starts_the_power_watch_and_unload_stops_it(self):
+        from oxp3deck import power
+        self.assertEqual(self.m.POWER_TICK_S, power.TICK_S)
+        task, done_early, ticks = self.watch(0.3)
+        self.assertFalse(done_early)
+        self.assertTrue(task.cancelled())
+        self.assertGreater(len(ticks), 2)
+        self.assertIs(ticks[0], self.p.ctx)
+
+    def test_a_raising_tick_does_not_end_the_loop(self):
+        calls = []
+
+        def tick(ctx):
+            calls.append(1)
+            raise RuntimeError("sysfs went away")
+
+        task, done_early, _ticks = self.watch(0.3, tick=tick)
+        self.assertFalse(done_early)
+        self.assertGreater(len(calls), 2)
+
+    def test_a_power_module_that_did_not_load_ends_the_loop(self):
+        self.m.power = None
+        self.fake("xess", system_protons_need_shim=lambda ctx, settings: False)
+
+        async def go():
+            with mock.patch.object(self.m, "POWER_TICK_S", 0.01):
+                await self.p._main()
+                task = self.p._watch
+                await asyncio.sleep(0.1)
+                return task
+
+        task = asyncio.run(go())
+        self.assertTrue(task.done())
+        self.assertFalse(task.cancelled())
+
+    def test_power_calls_answer_while_a_job_runs(self):
+        go = threading.Event()
+        self.addCleanup(go.set)
+        self.fake("xess", install=lambda ctx, settings, job: {"ok": go.wait(10)})
+        self.fake("power", state=lambda ctx: {"ok": True, "error": None, "state": {"enabled": True}},
+                  set_values=lambda ctx, key, slot, values: {"ok": True, "error": None, "state": None,
+                                                             "applied": {"written": [key, slot]}})
+        self.assertTrue(call(self.p, "xess_install")["ok"])
+        self.assertEqual(call(self.p, "power_state")["state"], {"enabled": True})
+        self.assertEqual(call(self.p, "power_set", "default", "main", {"pl1_w": 15})["applied"]["written"],
+                         ["default", "main"])
+        go.set()
+
+    def test_power_info_takes_a_boolean(self):
+        seen = []
+        self.fake("power", info=lambda ctx, refresh: seen.append(refresh) or {"ok": True, "info": None})
+        for value, want in ((True, True), (False, False), ("yes", False), (None, False)):
+            call(self.p, "power_info", value)
+            self.assertIs(seen[-1], want)
+
     def test_unload_and_uninstall_change_nothing(self):
         with mock.patch.object(sysexec, "run", side_effect=AssertionError("ran a program")):
             self.assertIsNone(asyncio.run(self.p._unload()))
@@ -310,7 +394,11 @@ class OverviewTest(Base):
                                "home": self.p.ctx.home, "platform": "cachyos",
                                "device": {"vendor": "ONE-NETBOOK", "product": "ONEXPLAYER 3", "supported": True},
                                "oxp3": self.inst, "xess": self.summary, "job": None, "reboot_pending": False,
-                               "do_not_reboot": "limine-mkinitcpio"})
+                               "do_not_reboot": "limine-mkinitcpio", "power": None})   # power: Raising
+        line = {"ok": True, "error": None, "enabled": True, "line": "15 W / 25 W · Default", "overridden": False,
+                "blocked": None}
+        self.fake("power", summary=lambda ctx: line)
+        self.assertEqual(call(self.p, "get_overview")["power"], line)
 
     def test_platforms_and_devices(self):
         for text, want in (("ID=bazzite\nID_LIKE=\"fedora\"\n", "bazzite"), ("ID=custom\nID_LIKE=\"bazzite fedora\"\n",

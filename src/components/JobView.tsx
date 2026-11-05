@@ -11,7 +11,7 @@ import { Code, Note, Problem, Status } from "./Hint";
 
 // @decky/api has it only with loader API 2 (Decky 3.3); older loaders get @decky/ui's copy. Chosen once, so the
 // same hook runs on every render.
-const useQuickAccessVisible: () => boolean =
+export const useQuickAccessVisible: () => boolean =
   typeof apiQuickAccessVisible === "function" ? apiQuickAccessVisible
     : typeof uiQuickAccessVisible === "function" ? uiQuickAccessVisible : () => true;
 
