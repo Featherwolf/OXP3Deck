@@ -11,7 +11,7 @@ from tests.test_xess import SHIM_OLD, STOCK, env_text, make_package
 WITCHER = "292030"
 
 
-class GameInfoTest(unittest.TestCase):
+class GameBase(unittest.TestCase):
     def setUp(self):
         self.tmp = tempfile.TemporaryDirectory()
         self.addCleanup(self.tmp.cleanup)
@@ -38,6 +38,8 @@ class GameInfoTest(unittest.TestCase):
         os.makedirs(os.path.dirname(p), exist_ok=True)
         return fake_dll(p, version)
 
+
+class GameInfoTest(GameBase):
     def test_witcher3_on_a_stock_system_proton(self):
         """The owner's case: XeLL 1.2.1.13 refuses the GPU, on proton-cachyos-slr without the shim."""
         self.w.compat({"0": "proton_experimental", WITCHER: "proton-cachyos-slr"})
@@ -184,6 +186,58 @@ class GameInfoTest(unittest.TestCase):
                 self.assertLogs("oxp3deck", "ERROR"):
             r = games.game_info(self.ctx, self.settings, WITCHER)
         self.assertEqual((r["ok"], r["error"]), (False, "game info: RuntimeError: boom"))
+
+
+class SuggestTest(GameBase):
+    """GameInfo.suggest: what the automatic launch options may add (DESIGN.md "Automatic launch options")."""
+
+    def hooked(self):
+        self.w.compat({WITCHER: "GE-Proton10-3"})
+        self.w.proton("GE-Proton10-3", "tools", dll=SHIM_OLD, hook=True)
+
+    def test_old_xess_asks_for_latest(self):
+        self.hooked()
+        self.dll("bin/libxess.dll", (1, 3, 1, 0))
+        self.assertEqual(self.info()["suggest"], [
+            {"key": "XESS", "value": "latest",
+             "why": "XeSS 1.3.1.0 is older than 2.0.2.68, so it would run in the slower mode."}])
+
+    def test_xell_12_gives_one_entry(self):
+        self.hooked()
+        self.dll("bin/libxess.dll", (2, 0, 2, 68))
+        self.dll("bin/libxess_fg.dll", (1, 1, 0, 19))
+        self.dll("bin/libxell.dll", (1, 2, 1, 13))
+        sug = self.info()["suggest"]
+        self.assertEqual([(s["key"], s["value"]) for s in sug], [("XESS", "latest")])
+        self.assertIn("frame generation 1.1.0.19 is older than 1.2", sug[0]["why"])     # the first reason
+        os.unlink(os.path.join(self.game, "bin/libxess_fg.dll"))
+        self.assertIn("XeLL 1.2.1.13 may refuse this GPU", self.info()["suggest"][0]["why"])
+
+    def test_current_xess_needs_nothing(self):
+        self.hooked()
+        self.dll("bin/libxess.dll", (2, 0, 2, 68))
+        self.dll("bin/libxell.dll", (1, 3, 2, 10))
+        self.assertEqual(self.info()["suggest"], [])
+
+    def test_fsr_only_needs_20261104(self):
+        self.hooked()
+        self.dll("Game/amd_fidelityfx_dx12.dll", (1, 0, 0, 0))
+        self.assertEqual(self.info()["suggest"], [])                    # the package is 20261031
+        write(os.path.join(self.pkg, "tools", "fsr-fg.sh"), "#!/bin/sh\n")
+        self.assertEqual(self.info()["suggest"], [
+            {"key": "FSR", "value": "xess", "why": "The game has FSR 3.1+ and no XeSS: its FSR runs on XeSS."}])
+
+    def test_not_installed_or_no_hook(self):
+        self.w.compat({WITCHER: "proton-cachyos-slr"})
+        self.w.proton("proton-cachyos-slr", "system", dll=STOCK)     # a system Proton without the hook
+        self.dll("bin/libxess.dll", (1, 3, 1, 0))
+        g = self.info()
+        self.assertIs(g["compat_tool_hook"], False)
+        self.assertEqual(g["suggest"], [])
+        self.hooked()
+        self.assertEqual(len(self.info()["suggest"]), 1)
+        os.unlink(os.path.join(self.ctx.home, xess.ENV_FILE))
+        self.assertEqual(self.info()["suggest"], [])
 
 
 if __name__ == "__main__":

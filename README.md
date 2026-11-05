@@ -74,9 +74,11 @@ paths). Steam Game Mode has no mouse hover, so there are no tooltips.
 - **Status:** the device and OS. A red **Do not reboot yet** line when oxp3-tool could not finish rebuilding the
   boot entries (its Details say what to run). **Reboot to finish** when a change waits for a reboot. The running
   task and its last log line (the whole log in its Details).
-- **Power:** the power limits now ("15 W steady · 25 W boost") and the active profile. **Power control (TDP)** on
-  or off, then **Separate profile for <game>**, **Sustained power**, **Boost power**, **GPU maximum speed** and
-  **CPU boost**. Red lines when another power program is in the way, each with **Fix for me** where OXP3 Deck can
+- **Power:** a **Live** line ("18.4 W · 62 °C · GPU 87 % · 3 h 10 min left"), the power limits now ("15 W steady ·
+  25 W boost") and the active profile. **Power control (TDP)** on or off, then **Separate profile for <game>**,
+  **Sustained power**, **Boost power**, **GPU maximum speed**, the [CPU and GPU controls](#cpu-and-gpu-controls) and
+  **CPU boost**; then **Fan**, **CPU scheduler mode**, **Battery charge limit** and **Run from charger** where this
+  system has them. Red lines when another power program is in the way, each with **Fix for me** where OXP3 Deck can
   turn it off for you (see [Other power managers](#other-power-managers)).
 - **Device fixes:** Install or Update the fixes tool when it is missing or old. The recommended fixes not applied
   yet, with **Apply recommended**.
@@ -85,9 +87,11 @@ paths). Steam Game Mode has no mouse hover, so there are no tooltips.
 - **All settings:** the full page, with these tabs.
 
 **Power:** the power limits now (each interface in Details), the GPU speed, energy preference, boost and the power
-source. The options (per-game profiles, different settings when plugged in, up to 52 W when plugged in), the editor
+source, then **Live readouts** (one value per row). The options (per-game profiles, different settings when plugged
+in, up to 52 W when plugged in, **How often to check**), the editor
 for every profile (also GPU minimum speed, energy preference and **Reset to device defaults**), **Other power
-programs** (each with **Fix for me**, **Undo**, **I've handled it** or **How to fix**), **Turned off by OXP3 Deck**
+programs** (each with **Fix for me**, **Undo**, **I've handled it** or **How to fix**, and **Pause Intel's
+low-power daemon in games**), **Battery**, **Turned off by OXP3 Deck**
 (with Undo), the device's own values, and **Import from SimpleDeckyTDP**.
 
 **Fixes:** every oxp3-tool fix with its state, notes and when it takes effect. Apply and Revert for each one. Both
@@ -147,6 +151,48 @@ uninstall, and a game's limits should not drop mid-session).
 **It does not fight.** If something else changes a limit OXP3 Deck set (outside the few seconds after an AC change
 or a resume, when the firmware does that), it stops writing and shows a red line with the likely culprit and
 **Take control again**. Nothing is written in a loop.
+
+**How often to check** (Power tab): how often OXP3 Deck checks that your settings are still in place and tries again
+what the device did not take (the GPU busy resetting or resuming): Off, or every 2 to 60 s (default 2 s). Off still
+re-applies after a game change, the charger and sleep.
+
+### CPU and GPU controls
+
+While power control is on, each profile (default, per game, plugged in) also has:
+
+- **CPU speed cap** (30–100 %): every core at most this share of its top speed. Lower leaves more of the power limit
+  to the GPU in GPU-heavy games; 60–70 % is a good start on battery.
+- **CPU vs GPU balance** (1–5, 3 = device default): a hint to the chip's firmware, 1 favours the CPU and 5 the GPU.
+  Works only while the system's power mode is Balanced (power-profiles-daemon's Balanced uses it too); OXP3 Deck
+  never switches the power mode itself. The Power tab adds **Let the chip save more** (0–3).
+- **GPU power saving**: the GPU speeds up more slowly. Good with a frame limit.
+- **CPU minimum speed (plugged in)**: from the device's own floor to 50 %, used only on the charger.
+- **Show advanced CPU options**: a speed cap per core type (performance, efficient, low-power cores), instead of the
+  CPU speed cap (switching asks first), and an energy preference per core type.
+
+None of these is measured on the device yet; their Details say what to expect. They reset at reboot and when power
+control is turned off. Intel's low-power daemon and TuneD lock the CPU ones while they run (the control says so).
+
+### Fan, battery, scheduler (when available)
+
+- **Fan** (Auto, Quiet about 40 %, Max), per profile. Quiet goes back to Auto at 90 °C (Max stays, it is already
+  full speed); both go back when the temperature cannot be read, on any error, before sleep and when OXP3 Deck stops.
+- **Battery charge limit** (50–100 %) and **Run from charger** (while awake and plugged in, the battery is left
+  alone; it still charges asleep). These follow the battery, not the profile.
+- Fan and battery need Linux 7.4 or newer on the ONEXPLAYER 3 (the Power tab says so on an older kernel).
+- **CPU scheduler mode** (CachyOS's LAVD scheduler through scx_loader: Auto, Gaming, Power save), per profile; only
+  while scx_lavd runs. OXP3 Deck never starts a scheduler and puts the previous mode back.
+- **Pause Intel's low-power daemon in games** (Power tab, only while intel_lpmd runs): off while a game runs, back to
+  automatic afterwards.
+
+If another program (Handheld Daemon, steamos-manager, CachyOS's power switch) changes one of these, OXP3 Deck stops
+and shows **Take control** instead of fighting it.
+
+### When it takes effect
+
+Every setting shows it after its one line, and again in its confirm dialog: **Now**, **Restart the game**, **Log
+out of Game Mode or reboot**, **Reboot** or **Only while no game runs**. After a change that waits, a row under the
+control says what to do ("Restart Cyberpunk 2077 to apply"). A greyed-out control says why instead of its line.
 
 ### Moving from SimpleDeckyTDP
 
@@ -255,6 +301,11 @@ next start. No re-login is needed.
   write to. The Games page says whether the game's Proton has the shim and the hook. Without the shim, XeSS stays on
   DP4a.
 - Keep a frame limit on with frame generation, or the generated frames reach the screen unevenly.
+- **Add needed launch options automatically** (Games and XeSS tabs, off by default; each game can override it): when
+  a game needs `XESS=latest` (XeSS older than 2.0.2.68, old frame generation, XeLL 1.2) or `FSR=xess` (FSR 3.1+ and
+  no XeSS, xess-xmx-linux 20261104+), OXP3 Deck adds just that variable, a few seconds after you quit the game or
+  when you open its settings while it is not running; never while it runs. The game's settings show **Added:
+  XESS=latest** with why, and **Undo**. A key added once, or undone, is never added again for that game.
 - Everything else in the launch options stays as you wrote it: wrappers such as `gamemoderun`, other variables, and
   the game's own arguments. Options without `%command%` are game arguments, so the plugin writes
   `VARIABLES %command% ARGUMENTS`, with each argument in quotes where the shell would read it otherwise

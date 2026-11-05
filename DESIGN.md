@@ -16,8 +16,10 @@ patterns are adapted from it (credited in CREDITS.md, its licence in THIRD_PARTY
 
 - **The plugin adds no logic of its own to what oxp3-tool does.** Every fix, state and check comes from
   `oxp3-tool <command> --json` (oxp3-tool 0.4.1 or later; an early 0.4.0 build lacks fields the plugin reads),
-  run as root by the backend. The plugin is a front end. The one exception is power control (power.py,
-  powerhw.py), which writes sysfs itself; its writes are not jobs and no job ever blocks them.
+  run as root by the backend. The plugin is a front end. The exceptions are power control (power.py,
+  powerhw.py) and the extras (extras.py: battery, fan, scheduler mode, intel_lpmd; "Extras"), which write sysfs or
+  call D-Bus themselves, and the live readouts (readouts.py), which only read; none of these are jobs and no job
+  ever blocks them.
 - **xess-xmx-linux scripts run as the desktop user**, never as root (`runuser -u <user>`), with a minimal
   environment (`env -i` + HOME, USER, LOGNAME, PATH, XDG_RUNTIME_DIR, DBUS_SESSION_BUS_ADDRESS): its 20261031
   install.sh runs `systemctl --user import-environment` with no names, which would copy Decky's variables into the
@@ -69,8 +71,15 @@ py_modules/oxp3deck/
   steamlib.py          Steam libraries, app install folders, compat tool of an app, prefixes
   games.py             per-game info: XeSS DLL versions in the game folder, last-run shim logs, advice
   pe.py                a DLL's file version (VS_FIXEDFILEINFO, the rule tools/proton-hook.py uses)
-  powerhw.py           power sysfs only: RAPL (MSR and MMIO), the xe GPU clock range, EPP, turbo, AC, suspend count
-  power.py             power control: profiles (power.json), the boot snapshot and run state, events, drift, conflicts
+  powerhw.py           power sysfs only: RAPL (MSR and MMIO), the xe GPU clock range and power profile, EPP (per core
+                       type too), turbo, intel_pstate's speed cap and floor, per-core-type caps, the SoC slider, AC,
+                       suspend count
+  power.py             power control: profiles (power.json), the boot snapshot and run state, events, drift, conflicts,
+                       the polling rate; power.active() for extras
+  readouts.py          live readouts (package W, battery, CPU temperature, GPU busy and clocks, throttling, fan RPM):
+                       read only, deltas between two samples (0.4)
+  extras.py            battery charge limit and charge behaviour, fan mode (kernel 7.4+, ONEXPLAYER 3 only), scx_lavd
+                       mode (org.scx.Loader), intel_lpmd off during games; extras.json, extras-run.json (0.4)
 src/                   frontend (TypeScript, @decky/ui)
   api.ts               one `callable` per backend method; backend.ts wraps each so it never rejects
   types.ts             the answers below, as TypeScript types
@@ -81,11 +90,15 @@ src/                   frontend (TypeScript, @decky/ui)
                        xess.tag_key) and what its confirmation says (pure, tested under node)
   steam.ts             the running game (one shared watch: onMainAppChange), launch options through SteamClient
   power.ts             power control's serial writer and texts (pure, tested under node)
+  effects.ts           "When it takes effect": the tags, the tag of every setting, pending texts (pure, node-tested)
+  autolaunch.ts        automatic launch options: what to add, the record, Undo (pure, node-tested)
+  live.ts              the live readouts' line and Details texts (pure, node-tested)
   conflicts.ts         the conflicts' friendly names, one-liners, Details and Fix / Undo dialogs (pure, node-tested)
   text.ts              firstSentence and the one-line limit (pure, node-tested)
-  pages/, components/  the quick panel, the full page's tabs (pages/Power.tsx), shared rows (Hint: explain, Status,
-                       Note, Problem, WithDetails, label; confirm: confirm, showDetails; ConflictRow, JobView,
-                       GameControls, PowerControls, ...)
+  pages/, components/  the quick panel, the full page's tabs (pages/Power.tsx), shared rows (Hint: explain,
+                       explainWhen, Status, Note, Problem, WithDetails, label; confirm: confirm, showDetails;
+                       Effect: Pending; ConflictRow, JobView, GameControls, PowerControls, CpuControls, LiveRows,
+                       ExtrasControls, AutoLaunch, ...)
 tests/                 unittest, with a stub `decky` module and fake roots; fixtures/oxp3: real oxp3-tool --json
                        output (tests/make_fixtures.py regenerates it from an OXP3-Tool-for-Bazzite checkout's
                        CLI, found next to this repository or by OXP3_TOOL_SRC); js/: node tests
@@ -107,7 +120,10 @@ diagnose archive pass through `/run/oxp3deck` (0700, root's); oxp3-tool's that a
 at the next start once oxp3-tool's lock is free, a script's `user-*.log` once no xess-xmx-linux script from before the
 restart runs (`xess-script.json`). Power control keeps `DECKY_PLUGIN_SETTINGS_DIR/power.json` (profiles and
 options) and `/run/oxp3deck/power-run.json` (the boot snapshot, the last game, what it wrote, locked limits, an
-override; for this boot only). Nothing inside the plugin folder (an update deletes it).
+override; for this boot only); the extras keep `DECKY_PLUGIN_SETTINGS_DIR/extras.json` (charge limit, charge
+behaviour, the intel_lpmd option) and `/run/oxp3deck/extras-run.json` (what they changed this boot and what was there
+before). The frontend keeps `ui_autolaunch`, `ui_autolaunch_log`, `ui_power_advanced` in settings.json. Nothing inside
+the plugin folder (an update deletes it).
 
 ## Backend API (main.py)
 
@@ -373,6 +389,9 @@ finds an old record ended cannot remove the live one a job has written since.
 
 ## Frontend
 
+- 0.4: every setting carries a "When it takes effect" tag and greyed-out controls say why ("When it takes
+  effect"); the Power section gains the Live row and the new controls ("Frontend 0.4"); per-game controls gain
+  automatic launch options ("Automatic launch options").
 - **Quick Access panel** (short):
   - Status: device and OS line; red "Do not reboot" when a boot-entry rebuild is unfinished; "Reboot to finish"
     button when a change waits for a reboot; the running job with its last log line.
@@ -441,7 +460,7 @@ to ours). One mechanism, the same on every screen:
 - **`src/text.ts`** (framework-free, tested under node): `firstSentence(s, max)` (up to the first ". " / ": " after
   20 chars, else cut at a word before `max` with "…"); `MAX_LINE = 80`.
 - **Details body**, always in this order, each part only when it says something: what it does → when it takes
-  effect → risks / when to leave it alone → how to fix (for a problem) → "Technical:" the names (PL1, EPP, unit names,
+  effect (0.4: the tag's text, then any condition) → risks / when to leave it alone → how to fix (for a problem) → "Technical:" the names (PL1, EPP, unit names,
   env variables, paths, commands) as `lines`. Technical names appear only here.
 - **Problem rows with a fix**: a conflict, and the EPP/CPU boost controls while one blocks them, get the row pattern
   below ("Conflict rows").
@@ -629,6 +648,10 @@ energy-performance preference (EPP) and turbo, with a default profile, per-game 
 values. It replaces SimpleDeckyTDP, which on Panther Lake writes one value to every constraint (PL1 = PL2 = PL4), only
 to `intel-rapl-mmio`, cannot set the xe GPU clocks and caps the range at 40 W.
 
+0.4 adds the CPU speed cap and floor, the CPU vs GPU balance (SoC slider), the GPU power-saving ramp, per-core-type
+caps and energy preference, the polling rate and live readouts ("Power 0.4" below), and, in their own module, the
+battery charge limit and behaviour, fan mode, scheduler mode and intel_lpmd pause ("Extras").
+
 The facts this section rests on (kernel 7.2 source and measurements on the owner's OXP3, BIOS 5.09):
 
 - Two RAPL interfaces drive the same package and the hardware enforces the **lower** of them: `intel-rapl:0` (MSR,
@@ -660,10 +683,18 @@ The facts this section rests on (kernel 7.2 source and measurements on the owner
   fixed unit runs again (D-Bus activation, a system update), OXP3 Deck says so and offers the fix again; it never
   repeats it by itself.
 - **Write only what is ours to write**: PL1 (`long_term`) and PL2 (`short_term`) of every `package-*` zone of
-  `intel-rapl` and `intel-rapl-mmio`; `min_freq` / `max_freq` of the render GT; `energy_performance_preference` of
-  every cpufreq policy; `intel_pstate/no_turbo`. Never PL4 (`peak_power`), never `psys`, `core`, `uncore` or `dram`
-  zones, never a zone's `enabled` (writing it changes PL2's enable and clamp bits too), never `time_window_us`, never
-  the media GT, never `power_profile`, the governor, `intel_pstate/status`, `platform_profile` or SMT.
+  `intel-rapl` and `intel-rapl-mmio`; `min_freq` / `max_freq` and (0.4) `power_profile` (`base` / `power_saving`
+  only) of the render GT; `energy_performance_preference` of every cpufreq policy; `intel_pstate/no_turbo`; (0.4)
+  `intel_pstate/max_perf_pct` and `min_perf_pct`; `scaling_max_freq` of every cpufreq policy (the per-core-type
+  caps); `slider_balance` and `slider_offset` of `/sys/module/processor_thermal_soc_slider/parameters`; and the
+  word `balanced` into the `profile` file of the platform-profile class device named "SoC Power Slider", **only when
+  that file already reads `balanced`** (rewriting it is what makes the slider take effect; "Power → New CPU and GPU
+  controls"). Never PL4 (`peak_power`), never `psys`, `core`, `uncore` or `dram` zones, never a zone's `enabled`
+  (writing it changes PL2's enable and clamp bits too), never `time_window_us`, never the media GT, never the
+  governor, `intel_pstate/status`, `scaling_min_freq`, SMT, the legacy `/sys/firmware/acpi/platform_profile`, any
+  other platform-profile handler, and never the profiles `performance`, `low-power` or `custom` (power-profiles-daemon
+  owns the choice of profile; OXP3 Deck only re-asserts `balanced` while it is already chosen). The extras
+  (extras.py) have their own list ("Extras → What it writes").
 - **Constraints are found by name** (`constraint_N_name`), zones by their `name` file, GTs by `gtidle/name`, never by
   index.
 - **Clamp before writing, read back after**: every value is clamped to the range below; every write is read back and
@@ -675,7 +706,8 @@ The facts this section rests on (kernel 7.2 source and measurements on the owner
   (`/run/oxp3deck/power-run.json`), and the other interface is still written.
 - **Refuse to fight**: when something else changes a value OXP3 Deck wrote (and no AC change or resume explains it),
   it stops writing and says so (Drift). Only a user action takes control again.
-- **Limits stay on plugin unload and uninstall**: `_unload` and `_uninstall` write nothing. A plugin reload or update
+- **Limits stay on plugin unload and uninstall**: `_unload` and `_uninstall` write nothing for power.py (the
+  extras' fan, scheduler and intel_lpmd changes are undone at unload: "Extras → Safety"). A plugin reload or update
   (Decky runs `_uninstall` on every update) must not drop a game's limits mid-session, and none of these values
   outlives a reboot: firmware sets RAPL, the xe driver its clock range and intel_pstate EPP and turbo afresh at boot.
   Turning **"TDP control" off** is how firmware values come back at once: it writes the boot snapshot back.
@@ -1467,3 +1499,730 @@ ToggleField, SliderField and DropdownItem, and A on a Status row with Details.
   "## SimpleDeckyTDP" section with the full BSD-3-Clause text in THIRD_PARTY_NOTICES.md (under "In the plugin zip"
   when it reaches `dist/index.js` or `py_modules`). Its mobx suspend helper is never taken (it carries SDH-PlayTime's
   and moondeck's licences). ClawDeck code keeps the existing MIT header line.
+
+## Power 0.4: new CPU and GPU controls, live readouts, polling rate
+
+Version 0.4.0 (package.json; the integrator bumps it). The facts come from the kernel source (CachyOS 7.2.11, v7.2,
+7.3.1, 7.4-rc1), checked for this batch; nothing below is measured on the device yet, so every "helps games" claim is
+a hint in Details, never a promise up front. Everything in this section is power.py / powerhw.py: written only while
+"TDP control" is on, per profile (default, per game, AC slot), clamped, read back, re-applied on game / AC / resume
+like PL1, drift-detected like EPP, restored by "TDP control" off from the boot snapshot.
+
+### New fields (power.json `PowerValues`, every slot)
+
+| Field | Stored bounds | null means | Applied |
+|---|---|---|---|
+| `cpu_max_pct` | int 30..100 | the snapshot's `max_perf_pct` (100) | always; refused together with any `cpu_cap_*` |
+| `cpu_min_pct` | int 1..50 | the snapshot's `min_perf_pct` (9 on the owner's unit) | **only while AC is online**; on battery (or AC unknown) the snapshot value is written; clamped to `[snapshot min, min(50, effective cap)]` |
+| `soc_balance` | int 1..5 | the snapshot's `slider_balance` (3) | always; takes effect only while the SoC profile reads `balanced` |
+| `soc_offset` | int 0..3 | the snapshot's `slider_offset` (0) | with `soc_balance` |
+| `gpu_power_profile` | `"base"` \| `"power_saving"` | the snapshot's (`base`) | render GT only |
+| `cpu_cap_p_mhz`, `cpu_cap_e_mhz`, `cpu_cap_lpe_mhz` | int 400..6000 | that type's snapshot `scaling_max_freq` per policy | refused together with `cpu_max_pct` |
+| `epp_p`, `epp_e`, `epp_lpe` | one of `EPP_CHOICES` | the profile's `epp` (then the snapshot) | per policy of that core type |
+| `fan_mode` | `"auto"` \| `"quiet"` \| `"max"` | Auto (nothing written unless something else was) | **by extras.py**, not power.py; also while TDP control is off |
+| `scx_mode` | `"auto"` \| `"gaming"` \| `"powersave"` | leave the loader's mode as it is | **by extras.py**; also while TDP control is off |
+
+- `FIELDS` (power.py and src/power.ts) grows by these 13 names in this order; `EMPTY` gets them as null. Old
+  power.json files read them as null (migration-free, as before); a wrong type or out-of-bounds value reads as null.
+- **Mutual exclusion**: after the merge of `set_values`, a slot with `cpu_max_pct` non-null and any `cpu_cap_*`
+  non-null is refused (`"use either the CPU speed cap or the per-core caps, not both"`), nothing saved. The frontend
+  sends the switch as one change (`{cpu_max_pct: null, cpu_cap_p_mhz: 2400, ...}`), after a confirm (texts below).
+- power.py never writes `fan_mode` or `scx_mode` to hardware; it validates, stores, copies them with the profile
+  (`profile()` copy, `set_values` merge, SimpleDeckyTDP import leaves them null) and hands them out through
+  `power.active()`.
+- `options` gains `poll_s` (below). `OPTION_DEFAULTS["poll_s"] = 2`.
+
+### Discovery (`powerhw.discover`, additions to `Hw`)
+
+```python
+"cpu": {..., "perf_pct": bool,                    # intel_pstate/max_perf_pct and min_perf_pct both exist
+        "types": {"p": ["policy0", ...], "e": [...], "lpe": [...]},   # groups with no policy are left out
+        "type_range": {"p": {"min_mhz": 400, "max_mhz": 5100}, ...}},  # cpuinfo_min/max_freq (kHz → MHz), over
+                                                                        # the group: min of mins, max of maxes
+"soc": {"params": "/sys/module/processor_thermal_soc_slider/parameters",
+        "profile": "/sys/class/platform-profile/platform-profile-0"} | None,
+"gpu": {..., "power_profile": bool}               # freq0/power_profile exists (render GT)
+```
+
+- **Core types**: a policy's type is that of the first CPU in its `affected_cpus`. CPU N is P when it is in
+  `/sys/devices/cpu_core/cpus` (a kernel cpulist, "0-3,8"; parse ranges and commas), E or LP-E when it is in
+  `/sys/devices/cpu_atom/cpus`: LP-E when `/sys/devices/system/cpu/cpu<N>/cache/index3` does not exist (no L3), else E.
+  Neither file (not hybrid): every policy is `p`. A CPU in neither list: `p`.
+- **SoC slider**: `soc` is set only when the params folder has both `slider_balance` and `slider_offset` **and** one
+  `/sys/class/platform-profile/platform-profile-*` (scandir, `^platform-profile-\d+$`) has `name` exactly
+  `SoC Power Slider`; that one's folder is `profile`. Never by index.
+- No new problem lines; a missing part just hides its control (the frontend checks `info.hw`).
+
+### Reading (additions)
+
+```python
+{"perf": {"max": 100, "min": 9} | None,           # int(max_perf_pct), int(min_perf_pct)
+ "caps": {"policy0": 5100000, ...} | None,         # scaling_max_freq, kHz
+ "soc": {"balance": 3, "offset": 0, "profile": "balanced", "choices": ["low-power", "balanced", "performance"]} | None,
+ "gpu": {..., "profile": "base" | "power_saving" | None},   # read also with gpu=False: the show function does not
+                                                            # wake the GPU (it prints a cached value)
+ ...}
+```
+
+- Slider params are hex (`kstrtou8(arg, 16)`), shown as two hex digits (`03`): read with `int(text, 16)`, written as
+  `f"{v:02x}"`. `profile` is the word in the file; `choices` from the same folder's `choices` (split on spaces).
+- `power_profile` reads `[base]    power_saving` (the bracketed word is the value), or `invalid` → None.
+
+### Target and apply (additions; `powerhw.apply` steps 7–10 after turbo, before the read-back)
+
+```python
+{"perf": {"max": 70, "min": 9}, "caps": {"policy4": 2400000, ...}, "soc": {"balance": 4, "offset": 0},
+ "gpu_profile": "power_saving", "epp": {"policy0": "performance", "policy4": "balance_power", ...}}
+```
+
+7. **perf** (ids `cpu/max_pct`, `cpu/min_pct`): the driver clamps the cap to `[floor, 100]` and the floor to
+   `[minimum, cap]`, so: if the new max ≥ the current max, write `max_perf_pct` first, then `min_perf_pct`; else
+   `min_perf_pct` first (lower the floor first when moving down), then `max_perf_pct`. power.py guarantees min ≤ max;
+   powerhw's last guard lowers a target `min` above the target `max` to it. An equal value is not written. Never
+   "0" (the driver reads it as "the floor").
+8. **caps** (ids `cpu/cap/policyN`): each policy's `scaling_max_freq` in kHz, clamped to
+   `[that policy's scaling_min_freq read now, cpuinfo_max_freq]`; read back within `CAP_TOLERANCE_KHZ = 100_000`
+   (HWP rounds to its ratio steps). EINVAL → failed for that policy, the others go on.
+9. **soc** (ids `soc/offset`, `soc/balance`, `soc/profile`): write `slider_offset`, then `slider_balance`, then, only
+   when the `profile` file reads exactly `balanced` now, write `balanced` to it (the kernel never skips a same-value
+   write, and that write is what sends the slider to the firmware). When it reads anything else, the params are
+   still written (power-profiles-daemon's next `balanced` picks them up) and `soc/profile` is neither written nor
+   failed. `slider_balance` EINVAL (the driver refuses 0 and 6) → failed. The legacy
+   `/sys/firmware/acpi/platform_profile` is never touched (it would write every handler).
+10. **gpu_profile** (id `gpu/profile`): write `base` / `power_saving` to `freq0/power_profile`, EAGAIN retried like the
+   clocks, then read back, and only when the value differs: on 7.2 `power_profile_store` takes `guard(xe_pm_runtime)`,
+   so the write wakes the GPU (the no-resume guard is only inside `xe_guc_pc_set_power_profile`); reading the file
+   does not wake it. Any OSError (EAGAIN after the retries from a GT reset or resume, a GuC error as EIO, ENODEV,
+   EBUSY) or a read-back that differs is a failed item with `transient: True` (not an error the UI shows in red;
+   "Polling rate" retries it). The driver keeps
+   the value across resume and GT reset (`xe_guc_pc_start`) and resets it to `base` at boot.
+
+- **EPP split**: when any of `epp_p`/`epp_e`/`epp_lpe` is non-null, power.py's target `epp` is a dict per policy:
+  each policy gets its type's field, else `epp`, else the snapshot's value. powerhw's dict path already exists (step
+  4). `ours` then records `epp/<first policy of each type>` instead of `epp`, and the drift check compares those.
+- `ApplyResult.failed[]` items gain `transient: bool` (false unless said above). `written` ids as listed.
+- Read-back comparisons: perf exactly, caps within 100 MHz, soc params exactly, gpu profile exactly.
+- (Built: the 7.2 driver's `slider_balance` show prints the value in use, which changes only at a profile write, so
+  when the profile does not read `balanced` the balance is written but not read back and not put in `ours`; the
+  next apply writes it again, which is harmless. A failed item that is only `transient` does not make an apply fail
+  as a whole (`ok` stays true). Each failed item carries `transient`.)
+
+### Snapshot, restore, drift, conflicts
+
+- **Snapshot** gains `perf {max, min}`, `caps {policy: kHz}`, `soc {balance, offset}`, `gpu_profile`. Built: the run
+  file of a plugin upgraded in the middle of a boot has a snapshot without these keys, so `_ensure_snapshot` fills
+  **missing keys only** (read now) before the first write that needs them; existing keys are never retaken.
+- **Restore** ("TDP control" off) writes them back with the same orders (perf order rule; soc: params, then
+  `balanced` only if it reads `balanced`).
+- **Resolve**: `cpu_max_pct` → `perf.max`; `cpu_min_pct` → `perf.min` only when `ac is True`, else the snapshot min;
+  the effective floor is `min(that, perf.max)`. Caps: each policy of type T gets `cpu_cap_T_mhz × 1000` or its snapshot
+  value. `applied_values` reports the new fields the same way (W/MHz/%, the firmware value for nulls).
+- **Drift**: `ours` gets `cpu/max_pct`, `cpu/min_pct`, `cpu/cap/<first policy of each type>`, `soc/balance`,
+  `soc/offset`, `gpu/profile` (only when written and read back). The tick's `read(gpu=False)` includes them. A change
+  of the platform profile itself (power-profiles-daemon switching to `performance` and back) is **not** drift: OXP3
+  Deck does not own it. Suspects (`_suspects`): `cpu/*` and `soc/*` → the active "cpu" conflicts and `hhd`;
+  `gpu/profile` → the "blocks" ones; none found → `["other"]` (UI: "Another program"; `"steam"` stays the fallback
+  for RAPL and GPU clocks only).
+- **Who blocks which field** (`FIELD_BLOCKERS` in power.py; a blocked field is not written, not restored, and its
+  `ours` entries are dropped, as EPP/turbo today):
+
+  | Field group (key in `blocked_fields`) | Blocked by (active, not ignored) |
+  |---|---|
+  | `epp` (epp, epp_p/e/lpe), `turbo` | every "cpu" conflict (unchanged) |
+  | `cpu_pct` (cpu_max_pct, cpu_min_pct), `cpu_caps` | `intel_lpmd`, `tuned` (power-profiles-daemon does not write them) |
+  | `soc` | `intel_lpmd` (it writes the slider; power-profiles-daemon cooperates: its `balanced` uses our value) |
+  | `gpu_profile` | nothing |
+
+  `intel_lpmd` counts as no blocker while `extras.lpmd_paused(ctx)` is true (OXP3 Deck has it in LPM_FORCE_OFF for
+  the running game). power.py imports it lazily (`from . import extras` inside try; ImportError or any exception →
+  False). `state.cpu_blocked` / `cpu_blocked_by` keep their meaning (EPP and boost).
+- **`fix("intel_lpmd")` note**: unchanged, except no note when OXP3 Deck's own `cpu/max_pct` is in `ours`.
+- (Built: `power._lpmd_paused(ctx)` wraps the lazy `extras.lpmd_paused`, which runs under power's lock and so must
+  never take extras' lock; extras.py's does not. When a drift check finds a field group newly blocked, every
+  blocked group's `ours` entries are dropped and the tick answers "nothing". Suspects for EPP and boost now fall
+  back to "other" too, since Steam does not set them. A power.json slot that holds both the speed cap and per-core
+  caps, written by hand, reads its per-core caps as null.)
+
+### Polling rate (`poll_s`)
+
+How often the backend re-checks the power settings and retries what did not take. `power_options({poll_s})`:
+an int, `0` (Off) or 2..60; anything else refused. Default 2 = the 0.3 behaviour.
+
+- main.py's watch loop stays at `TICK_S = 2` (AC, resume, game, the conflict recheck, the boot apply and the extras'
+  safety checks keep their timing whatever `poll_s` is).
+- tick step 5 (the drift check) runs only when `poll_s > 0` and `now − p.last_poll ≥ poll_s` (then `last_poll = now`).
+  Inside a grace window (after AC or resume) it runs every tick regardless, as 0.3 does. Off: no drift check outside
+  grace windows (an override then shows only when `state()` runs while a panel is open, for the GPU clocks, or at the
+  next apply's read-back).
+- At the same moments, the ids in `p.pending` (failed with `transient: True` at the last apply) are written again
+  (`_apply`, which writes only what differs) at most `PENDING_RETRIES = 30` times per apply; a success clears them.
+- It never re-writes over another program (Drift's rule stays): "re-applies" means retrying what the device itself
+  did not take (the GPU busy resetting or resuming) and the grace-window re-applies.
+- UI: slider over the steps `POLL_STEPS = [0, 2, 3, 5, 10, 15, 20, 30, 45, 60]` (index slider; label "Off" for 0,
+  "<n> s" otherwise). Power tab only.
+
+### Live readouts (`readouts.py`, `power_live`)
+
+Read only, no settings, no lock shared with power.py (its own `threading.Lock`; state per `ctx.root`). Every path
+through `ctx.sys_path`. Found by name, never by number; discovery cached in the module and redone when a cached path
+stops reading.
+
+```python
+def sample(ctx) -> dict      # {ok, error, live: Live}; never raises
+```
+
+| Value | Source | Rule |
+|---|---|---|
+| `package_w` | `/sys/class/powercap/intel-rapl:<N>/energy_uj` of the MSR zone named `package-0` (never MMIO: counting both doubles it) | Δenergy / Δt (monotonic); Δ < 0 → add `max_energy_range_uj`; first sample, Δt < 0.2 s or > 30 s → null; 1 decimal |
+| `battery` | the first `power_supply` whose `type` is `Battery` (BAT0) | `status`; `capacity`; `draw_w` = `power_now` µW, else `current_now × voltage_now`; `time_left_min` = `energy_now / power_now` (or `charge_now / current_now`) when Discharging; `time_to_full_min` when Charging, to `charge_control_end_threshold` if present else 100 %; null when unreadable or draw < 0.5 W |
+| `cpu_temp_c` | hwmon whose `name` is `coretemp`: the `tempN_input` whose `tempN_label` is `Package id 0`, else `temp1_input` | m°C → °C, 1 decimal. Also the GPU's temperature (no separate iGPU sensor) |
+| `gpu.busy_pct` | render GT `gtidle/idle_residency_ms` | `100 − 100 × Δidle_ms / (Δt × 1000)`, clamped 0..100, integer |
+| `gpu.cur_mhz`, `gpu.act_mhz` | `freq0/cur_freq` (requested), `act_freq` (granted) | these reads wake the GPU: only called while a panel shows |
+| `gpu.reasons` | `freq0/throttle/reasons` | as powerhw (prefix `reason_` dropped, `none` → []) |
+| `throttle.cpu_ms` | `cpu0/thermal_throttle/package_throttle_total_time_ms` | Δ since the last sample (null on the first); `throttle.cpu` = Δ > 0 |
+| `fan_rpm` | hwmon `name` `oxp_ec` → `fan1_input` (kernel 7.4+) | null otherwise (acpi_fan is not used: unchecked on the device) |
+
+`Live = {t, package_w, battery: {status, percent, draw_w, time_left_min, time_to_full_min} | null, cpu_temp_c,
+gpu: {busy_pct, cur_mhz, act_mhz, reasons} | null, throttle: {cpu_ms, cpu, gpu: string[]}, fan_rpm}` (all numbers may
+be null; `throttle.gpu` = `gpu.reasons`).
+
+Frontend: `useLive(active)` in store.ts polls `power_live()` every `LIVE_MS = 1000` only while mounted and `active`
+(the quick panel or Power tab is shown), one call in flight at a time, stopped on unmount and on `stopPolling`. Quick
+panel: one row (top of the Power section, also while TDP control is off) "Live" with the line from `live.ts`
+`liveLine(live)`: "18.4 W · 62 °C · GPU 87 % · 3 h 10 min left" (parts that are null left out); Details: every value
+of the table, "requested 1500 MHz, running 1450 MHz", why it is slow (`whySlow(live)`: "CPU too hot" when
+`throttle.cpu`, the GPU reasons through `reasonText`, else "Not held back"), the fan RPM, and "Technical:" the sources.
+The Power tab shows the same values as separate Status rows under "Live readouts" (each row one value).
+
+## Extras (extras.py)
+
+Battery charge limit, charge behaviour, fan mode, scx_lavd mode, intel_lpmd off during games. One module, its own
+`threading.RLock` (never held while power.py's is: main.py calls them one after the other), its own settings
+(`extras.json`, `context.Settings`) and run state (`/run/oxp3deck/extras-run.json`, root's 0600, `write_atomic` into
+`sysexec.run_dir(ctx)`, ignored when its `boot_id` is not this boot's). Every result `{ok, error, ...}`, never raises;
+subprocesses through `sysexec.run` (clean env, stdin /dev/null, argv list, absolute path) in the executor.
+
+### What it writes
+
+- `/sys/class/power_supply/<battery>/charge_control_end_threshold` (50..100) and `charge_behaviour` (`auto` or
+  `inhibit-charge-awake`; **never** `inhibit-charge`, which also blocks charging asleep and can leave a flat
+  battery: the validator refuses it and the writer has no path to it).
+- The `oxp_ec` hwmon's `pwm1_enable` (2 auto, 1 manual, 0 full speed) and `pwm1` (0..255, the driver scales it to the
+  EC's 0..184).
+- D-Bus (system bus, root, through `busctl`): org.scx.Loader `SwitchScheduler` / `SwitchSchedulerWithArgs`, and
+  intel_lpmd `LPM_FORCE_OFF` / `LPM_AUTO` / `LPM_FORCE_ON`. Nothing else: no `StartScheduler` (OXP3 Deck never
+  starts a scheduler that is not running), no `StopScheduler`, no `Terminate`, no lpmd process lists.
+
+### Gates (when a control exists)
+
+- **Battery and fan (kernel 7.4+)**: `/sys/class/dmi/id/board_name` stripped is exactly `ONEXPLAYER 3` **and** an hwmon
+  whose `name` is `oxp_ec` exists **and** the file itself exists (the battery = the first `type` `Battery` supply).
+  The `ONEXPLAYER 3` entry is only in mainline 7.4-rc1's oxpec.c (DMI_EXACT_MATCH on the board name); 7.2, 7.3 and
+  their stable branches lack it. Otherwise the control is absent from `ExtrasState` (`available: false`, `why`:
+  "Needs Linux 7.4 or newer (this is <release>)." when the board matches and the files do not exist; "Only on the
+  ONEXPLAYER 3." otherwise). The UI hides unavailable battery and fan rows; the Power tab shows one Note "Battery
+  and fan controls need Linux 7.4" when only the kernel is missing. `charge_behaviour`'s offered values are
+  `auto` and `inhibit-charge-awake`, filtered by the words the file lists.
+- **scx mode**: `/sys/kernel/sched_ext` exists (else the row is hidden). Then `busctl --system --auto-start=no
+  --json=short get-property org.scx.Loader /org/scx/Loader org.scx.Loader CurrentScheduler` must answer (else
+  greyed: "The scheduler loader isn't running."; `--auto-start=no`: OXP3 Deck never D-Bus-activates it), and the
+  answer must be `scx_lavd` (else greyed: "Only for the LAVD scheduler; <name> runs now." / "No scheduler runs
+  now." for `unknown`).
+- **intel_lpmd**: `intel_lpmd.service` active (one `systemctl is-active --quiet intel_lpmd.service`, cached 60 s;
+  inactive on the owner's unit) — else the row is hidden.
+
+### The D-Bus APIs (verified from source for this design)
+
+- **scx-loader** (github.com/sched-ext/scx-loader at 259bb6c, 2026-10-29; `configs/org.scx.Loader.xml`,
+  `crates/scx_loader/src/{main,dbus,lib}.rs`): bus name `org.scx.Loader`, object `/org/scx/Loader`, interface
+  `org.scx.Loader`. Properties `CurrentScheduler` (s, "unknown" when none), `SchedulerMode` (u: 0 Auto, 1 Gaming,
+  2 PowerSave, 3 LowLatency, 4 Server), `CurrentSchedulerArgs` (as; non-empty when started with custom arguments).
+  Methods `SwitchScheduler(s scx_name, u sched_mode)`, `SwitchSchedulerWithArgs(s, as)`. The bus policy allows root
+  everything; the methods check polkit action `org.scx.loader.manage-schedulers` (root passes). The default config
+  maps scx_lavd's modes to `--autopilot` / `--performance` / `--powersave` (each with `--pinned-slice-us 500`).
+  Switching **with a mode** drops custom arguments, so the arguments seen before are restored with
+  `SwitchSchedulerWithArgs` when they were non-empty. Only the methods above, which older loaders have too, are used
+  (not `SchedulerModes` / `DefaultMode`, which are newer).
+- **intel-lpmd** (github.com/intel/intel-lpmd at 9ece012, 2026-11-05; `src/intel_lpmd_dbus_interface.xml`,
+  `src/lpmd_dbus_server.c`): bus name and interface `org.freedesktop.intel_lpmd`, object `/org/freedesktop/intel_lpmd`.
+  Methods `LPM_FORCE_ON`, `LPM_FORCE_OFF`, `LPM_AUTO` (no arguments), `GetState` → s (`OFF`, `ON`, `AUTO`,
+  `PROCESS-PRECONFIG`, `FREEZE`, `RESTORE`, `TERMINATE`, `UNKNOWN`). The privileged methods need uid 0 and are
+  **rate limited: one privileged call per 2 s** ("rate limited: too many privileged requests"), so extras makes at
+  most one lpmd call per tick and retries a rate-limited one at the next tick. `GetState` may be missing in older
+  builds: an error answer reads as state `null`.
+- Commands (exact argv, `B = sysexec.which("busctl") or "/usr/bin/busctl"`, timeout `BUS_TIMEOUT_S = 2` s):
+  - `[B, "--system", "--auto-start=no", "--json=short", "get-property", "org.scx.Loader", "/org/scx/Loader",
+    "org.scx.Loader", <Prop>]` → stdout `{"type":"s","data":"scx_lavd"}` (`u` → int, `as` → list).
+  - `[B, "--system", "--auto-start=no", "call", "org.scx.Loader", "/org/scx/Loader", "org.scx.Loader",
+    "SwitchScheduler", "su", <name>, str(mode)]`;
+    `[..., "SwitchSchedulerWithArgs", "sas", <name>, str(len(args)), *args]`.
+  - `[B, "--system", "--auto-start=no", "call", "org.freedesktop.intel_lpmd", "/org/freedesktop/intel_lpmd",
+    "org.freedesktop.intel_lpmd", <Method>]` (`GetState` with `--json=short` → `{"type":"s","data":["AUTO"]}`).
+  - The scheduler name is checked against `^scx_[a-z0-9_]{1,40}$` and each argument against `^[-A-Za-z0-9_.=,]{1,64}$`
+    (at most 32) before they go into an argv; anything else is not restored (note "the scheduler's own arguments
+    could not be put back; restart scx_loader").
+
+### Settings (`extras.json`) and run state
+
+```json
+{"version": 1, "charge_limit": null, "charge_behaviour": null, "lpmd_game_off": false}
+```
+
+`charge_limit` int 50..100 or null (never written); `charge_behaviour` `"auto"` | `"inhibit-charge-awake"` | null;
+`lpmd_game_off` bool. Same normalisation rules as power.json (bad values read as default, unknown keys dropped).
+These are global (not per profile): a battery setting follows the battery, not the game. `fan_mode` and `scx_mode`
+are per profile and live in power.json (above).
+
+```python
+{"boot_id": str,
+ "fan": {"ours": "quiet" | "max" | None, "reverted": str | None, "overridden": str | None, "key": str | None},
+ "scx": {"before": {"sched": str, "mode": int, "args": [str]} | None, "ours": int | None, "overridden": str | None},
+ "lpmd": {"paused": bool, "before": str | None, "app": str | None, "error": str | None},
+ "charge": {"limit": int | None, "behaviour": str | None, "overridden": {"limit": str|None, "behaviour": str|None}},
+ "suspend_count": int | None}
+```
+
+### Behaviour (`tick(ctx, active)`, every 2 s from main.py's watch loop, and `sync(ctx, active)`)
+
+`active` is `power.active(ctx)` (below), or None when the power module did not load (then: no app, every
+profile field null, so only the charge settings and the safety rules act). `sync` does steps 2–4 at once after a profile change (main.py calls it after
+every power_set / power_game / power_profile / power_options / power_enable / power_take_control and after
+extras_set); `tick` does steps 1–5.
+
+1. **Fan safety first** (only while `fan.ours` is quiet or max): read the coretemp package temperature (as
+   readouts.py; extras has its own small reader); ≥ `FAN_HOT_C = 90` °C while quiet (max is already full speed:
+   Auto could slow the fan while hot, so max is left), or unreadable in either → write `pwm1_enable` 2, `ours`
+   None, `reverted` = "The CPU reached 90 °C" / "The temperature couldn't be read", and the profile's fan mode is
+   not applied again until the user changes a fan setting or the active profile key changes (no oscillation).
+2. **Fan mode**: wanted = `active.values.fan_mode` or `auto`. If wanted is auto and `ours` is None → nothing (never
+   write when nothing was changed). auto → `pwm1_enable` 2; quiet → `pwm1_enable` 1 then `pwm1` = `FAN_QUIET_PWM =
+   102` (about 40 %, a constant to tune on the device); max → `pwm1_enable` 0 (the driver sets 255). Read back
+   `pwm1_enable`: auto must read 2; quiet/max must read 1 or 0 (the driver reports 0 only at full speed). Any OSError
+   → write 2 once more, `ours` None, `reverted` = "Fan control failed: back to Auto (<strerror>)". Quiet and Max
+   need the sleep watch (Safety) running; if it cannot start, Auto and `reverted` "Can't watch for sleep, so the fan
+   stays on Auto".
+   **Drift**: `ours` quiet/max and `pwm1_enable` reads 2 (outside 10 s after a resume) → `overridden` "Something
+   else set the fan back to Auto" (Handheld Daemon, steamos-manager), no fan writes until `extras_take_control("fan")`
+   or a fan setting change.
+3. **scx mode**: wanted = `active.values.scx_mode` (null = leave). Read the three properties at most every
+   `SCX_CHECK_S = 10` s (and right before a call). When wanted is set, the loader runs `scx_lavd` and
+   `SchedulerMode` ≠ wanted: on the first change record `before` (sched, mode, args), then `SwitchScheduler
+   ("scx_lavd", mode)`; `ours` = mode. When wanted becomes null and `before` is set: restore (args non-empty →
+   `SwitchSchedulerWithArgs`, else `SwitchScheduler(before.sched, before.mode)`), clear `before` / `ours`.
+   **Drift**: `ours` set and the loader's mode or scheduler differs (CachyOS's game-performance or
+   power-profiles-daemon switch modes too) → `overridden` "Something else changed the scheduler mode", `before`
+   dropped (that program owns it now), no calls until take_control or a change of `scx_mode`.
+4. **intel_lpmd** (only with `lpmd_game_off` on and the service active): `active.app` set and not paused →
+   `GetState`; `OFF` already → nothing (paused stays false); else `LPM_FORCE_OFF`, `paused = true`, `before` = the
+   state (`AUTO` / `ON` / null), `app` = the game. `active.app` null (or another app after a game change: restore
+   first, pause again on the next tick), option turned off, or unload → `LPM_FORCE_ON` when `before` was `ON`, else
+   `LPM_AUTO`; `paused = false`. While paused, a `GetState` other than `OFF` (the daemon restarted) → `paused =
+   false`, one new pause for the same game at most. A change of `paused` sets the tick's answer
+   `lpmd_changed: true` (main.py then calls `power.refresh`, since intel_lpmd stops or starts blocking fields).
+   Errors keep the last state and go into `lpmd.error`; "rate limited" is retried at the next tick silently.
+5. **Charge**: at the first tick of a process, at a set, and 3 s after a resume (suspend_count up or a BOOTTIME jump,
+   as power.tick detects them), write each non-null setting that differs, read back; `charge_behaviour` reads like
+   `[auto] inhibit-charge inhibit-charge-awake` (the bracketed word is the value). A read that differs from what
+   OXP3 Deck last wrote, outside 10 s after a resume → `overridden` for that one (Handheld Daemon and
+   steamos-manager write these too), not written again until take_control or a new value.
+
+### Safety
+
+- **Before sleep**: while `fan.ours` is quiet or max, a sleep watch thread holds a logind delay inhibitor
+  (`systemd-inhibit --what=sleep --mode=delay --who=OXP3Deck --why="Fan back to Auto before sleep" sleep infinity`,
+  through sysexec with its own session) and reads `busctl --system --json=short monitor
+  --match=type='signal',sender='org.freedesktop.login1',interface='org.freedesktop.login1.Manager',member='PrepareForSleep'`
+  line by line. On `PrepareForSleep(true)`: write `pwm1_enable` 2 (`ours` kept, so the mode comes back), then end the
+  inhibitor process (logind waits for it, at most `InhibitDelayMaxSec`). On `PrepareForSleep(false)` (resume): take a
+  new inhibitor; the profile's fan mode is written again by the next tick after a 3 s delay. The thread and both
+  processes end when the fan goes back to Auto and at unload. If either process cannot start or ends on its own →
+  fan Auto (step 2's rule).
+- **Unload** (`extras.unload(ctx)`, from main.py `_unload`, in the executor with a 3 s budget: Decky kills the
+  process 5 s after asking): fan → `pwm1_enable` 2 when `ours` is set; scx → restore `before`; lpmd → restore when
+  paused; stop the sleep watch. Charge settings stay (they are the user's battery choice and are written again at the
+  next start). `_uninstall` adds nothing (Decky runs `_unload` first).
+- **Errors** in a fan write or read → Auto (above). Every refused value (`inhibit-charge`, a limit outside 50..100, a
+  mode outside the lists) → `{ok: false, error}`, nothing written.
+
+### API
+
+```python
+def info(ctx) -> dict                    # ExtrasInfoRes: {ok, error, extras: ExtrasState}; cheap (no D-Bus call
+                                         # when the cached scx/lpmd state is under 10 s old)
+def set_options(ctx, opts) -> dict       # opts: {charge_limit?, charge_behaviour?, lpmd_game_off?} → ExtrasInfoRes;
+                                         # validates, saves, applies the charge values at once
+def take_control(ctx, what) -> dict      # what: "fan" | "scx" | "charge_limit" | "charge_behaviour" → ExtrasInfoRes;
+                                         # clears that override (and fan.reverted) and applies at once
+def tick(ctx, active: dict) -> dict      # {ok, error, did: [str], lpmd_changed: bool}
+def sync(ctx, active: dict) -> dict      # {ok, error, did: [str], lpmd_changed: bool}
+def lpmd_paused(ctx) -> bool             # OXP3 Deck has intel_lpmd in LPM_FORCE_OFF now
+def unload(ctx) -> None
+```
+
+`power.active(ctx)` (builder 1, power.py, under power's lock, no hardware read but `ac_online`):
+`{"key": str, "slot": "main" | "ac", "app": str | None, "ac": bool | None, "enabled": bool, "values": PowerValues}`
+(the active profile's stored slot, whether or not TDP control is on). `power.refresh(ctx) -> {ok, error}`: when
+`_may_write`, sets `apply_at = now` so the next tick applies (used after an intel_lpmd pause change).
+
+(Built: as above, with these additions. `ExtrasState.charge` gains `error` (the last write error, else null) and
+`ExtrasState.scx` gains `note` (a failed switch or restore, or "the scheduler's own arguments could not be put
+back; restart scx_loader"). The run file also keeps `fan.held` (the mode a revert or override holds; a different
+wanted mode, or after a revert a different profile key, lifts it), and `lpmd.again` / `lpmd.gave_up` (the one
+re-pause after a daemon restart). A saved argument that fails the check is not passed: the mode is restored with
+`SwitchScheduler(before.sched, before.mode)` and the note is set; a bad scheduler name gets no call at all. The
+charge override check reads the two files at most every `CHARGE_CHECK_S = 10` s. The tick's own resume check
+(suspend count, BOOTTIME jump) also brings the fan mode back 3 s after a resume when the sleep watch missed it.
+`systemctl is-active intel_lpmd.service` runs only while the option is on, something is paused, or `info` asks
+(cached 60 s). The sleep watch writes Auto without the module lock (logind waits at most `InhibitDelayMaxSec`).
+main.py: `extras_set` / `extras_take_control` answer with `info()` taken after the sync; `_unload` waits
+`UNLOAD_EXTRAS_S = 3` s.)
+
+## Automatic launch options
+
+A global toggle "Add needed launch options automatically" (default **off**) plus a per-game override. Frontend only
+(the backend never writes launch options), using `launchopts.ts`'s managed keys and `setManaged`, so the user's own
+text is never touched.
+
+- **What is needed** comes from the backend: `GameInfo.suggest: {key: ManagedKey, value: string, why: string}[]`, added
+  by games.py `_suggest(...)` next to `_advice`, from the same conditions, only when xess-xmx-linux is installed and the
+  game's Proton has the hook (`compat_tool_hook` is not false; a system Proton without it gets none):
+  - libxess.dll older than 2.0.2.68, libxess_fg.dll older than 1.2, or libxell.dll 1.2.x → `XESS=latest` (one entry;
+    `why` names the oldest reason, e.g. "XeSS 1.3.1 is older than 2.0.2.68, so it would run in the slower mode.").
+  - an FSR 3.1+ DLL and no XeSS DLL, with xess-xmx-linux 20261104+ (`features.fsr`) → `FSR=xess` ("The game has FSR
+    3.1+ and no XeSS: its FSR runs on XeSS.").
+  The `advice` lines stay as they are.
+- **`src/autolaunch.ts`** (pure, node-tested):
+  ```ts
+  export type AutoSuggest = { key: ManagedKey; value: string; why: string };
+  export type AutoRecord = { added: Partial<Record<ManagedKey, string>>; why: string[]; at: number;
+                             done: ManagedKey[]; undone: boolean };
+  export type AutoSettings = { on: boolean; games: Record<string, boolean> };    // ui_autolaunch
+  export const effectiveOn: (s: AutoSettings | null, appid: string) => boolean;   // games[appid] ?? on ?? false
+  export const plan: (text: string, suggest: AutoSuggest[], rec: AutoRecord | undefined) =>
+    { text: string; added: AutoSuggest[] };   // adds each key that is absent from managed(parse(text)) and not in
+                                              // rec.done; nothing when parse(text).typo; text unchanged when none
+  export const undo: (text: string, rec: AutoRecord) => string;   // removes each added key whose value still equals
+                                                                  // what was added (a user change is kept)
+  export const record: (prev: AutoRecord | undefined, added: AutoSuggest[], now: number) => AutoRecord;
+  export const trimLog: (log: Record<string, AutoRecord>, max = 20) => Record<string, AutoRecord>;  // newest `at` kept
+  ```
+  A key once added (or undone) for a game is in `done` and is never added again, so removing it by hand, or Undo,
+  is final.
+- **When**: (a) `index.tsx` keeps the previous main app; when it changes away from Steam app X and X is no longer in
+  `Router.RunningApps`, after 3 s: `autoApply(X)` (in `src/components/AutoLaunch.tsx`'s module, not a hook):
+  `effectiveOn` → `game_info(X)` → `getLaunchOptions(X)` → `plan` → `setLaunchOptions` → `ui_autolaunch_log[X] =
+  record(...)` (through `set_setting`, trimmed to 20 games) → toast "Added launch options for <name>: XESS=latest.
+  They apply at its next start." (b) Opening a game's controls (Games tab, or the quick panel's last game) while that
+  game is **not** running does the same once per mount. **Never while that game runs** (checked right before the
+  write, again through `RunningApps`): the row says "Will be added when you quit <name>." A non-Steam app is skipped.
+- **UI** (GameControls, under the XeSS options): Dropdown "Add launch options automatically" (options "Use global
+  (On)" / "Use global (Off)", "On for this game", "Off for this game"); when the log has an entry not undone: Status
+  ✓ "Added: XESS=latest" ⓘ (Details: each `why`, the date, "Applies from the next start.") and ButtonItem "Undo"
+  (confirm, then `undo` → `setLaunchOptions`, `undone: true`; refused while the game runs: greyed with "Quit <name>
+  first."). The global toggle sits on the Games tab top and in the XeSS tab ("Add needed launch options
+  automatically").
+
+## When it takes effect (effect tags)
+
+Every setting shows when it takes effect, in the short-line style, next to its one line, in its confirm dialog and,
+after a change that is not immediate, in a pending row.
+
+- **`src/effects.ts`** (pure, node-tested):
+  ```ts
+  export type Effect = "now" | "game" | "session" | "reboot" | "idle";
+  export type EffectSpec = Effect | Effect[];          // e.g. ["idle", "session"]: "Only while no game runs · Log out…"
+  export const EFFECT_TEXT: Record<Effect, string> = { now: "Now", game: "Restart the game",
+    session: "Log out of Game Mode or reboot", reboot: "Reboot", idle: "Only while no game runs" };
+  export const PENDING_TEXT: Record<Exclude<Effect, "now" | "idle">, string> = { game: "Restart the game to apply",
+    session: "Log out of Game Mode or reboot to apply", reboot: "Reboot to apply" };
+  export const EFFECTS: Record<string, EffectSpec>;    // the table below, keyed by setting id
+  export const effectText: (e: EffectSpec) => string;  // joined with " · "
+  export const confirmLine: (e: EffectSpec) => string; // "Takes effect: Restart the game."
+  export const fixEffect: (fix: { id: string; takes_effect?: string }) => Effect;   // EFFECTS["fix.<id>"], else from
+                                                       // the text: /reboot/ → reboot, /Game Mode starts/ → session,
+                                                       // else now
+  export const strongest: (es: EffectSpec[]) => EffectSpec;   // reboot > session > game > now ("idle" kept alongside)
+  ```
+- **Hint.tsx** gains `explainWhen(does: ReactNode, effect: EffectSpec, why?: string | null)`: the one line, then a
+  muted (`#9aa4b1`) " · <effectText>"; with `why` (the control is greyed out) the line is `why` instead of `does`, tag
+  kept. `explain(does)` stays for read-only rows. The 80-char limit applies to `does` / `why`, not to the tag.
+- **Greyed-out controls always say why** (`why`), e.g. "Turn on power control first.", "Locked by Power Profiles.",
+  "Only while plugged in.", "Only in the Balanced power mode.", "Quit the game first.", "Needs Linux 7.4 or newer.",
+  "Uses the per-core caps." / "Uses the CPU speed cap.", "The scheduler loader isn't running.".
+- **Confirm dialogs**: `ConfirmOpts` gains `effect?: EffectSpec`; `confirm` appends a paragraph `confirmLine(effect)`
+  after `text`. Every `confirm(` call (and every function returning `ConfirmOpts`: `fixConfirm`, `undoConfirm`, the
+  actions.tsx flows) passes one.
+- **Pending rows** (`components/Effect.tsx`): `notePending({id, effect, label, appid?})` keeps a small in-memory list
+  (store.ts); `<Pending ids={[...]}/>` renders Status rows "Restart <game> to apply" (`game`, with the app's name;
+  cleared when that appid starts again, from `onMainAppChange`), "Log out of Game Mode or reboot to apply"
+  (`session`; for XeSS the backend's `relogin_needed` is the source instead, and the row goes when it clears), "Reboot
+  to apply" (`reboot`; the existing "Reboot to finish" row covers oxp3-tool's `reboot_pending`, so no second row). A
+  pending row sits right under the control that caused it; the list is lost when the frontend reloads (the backend
+  flags cover the lasting cases).
+
+| Setting id | Control | Tag |
+|---|---|---|
+| `power.enable` | Power control (TDP) | Now |
+| `power.game_profile` | Separate profile for <game> | Now |
+| `power.pl1`, `power.pl2`, `power.gpu_min`, `power.gpu_max`, `power.epp`, `power.turbo` | the sliders and choices | Now |
+| `power.reset`, `power.new_profile`, `power.delete_profile` | Reset to device defaults, New / Delete profile | Now |
+| `power.per_game`, `power.split_ac`, `power.extended`, `power.poll_s` | Power tab options | Now |
+| `power.cpu_max_pct`, `power.soc`, `power.gpu_profile`, `power.cpu_min_pct`, `power.cpu_caps`, `power.epp_split` | new controls | Now |
+| `power.take_control`, `power.fix`, `power.unfix`, `power.ignore`, `power.import` | conflict and override buttons, import | Now |
+| `extras.fan`, `extras.scx`, `extras.lpmd`, `extras.charge_limit`, `extras.charge_behaviour` | extras | Now |
+| `fix.buttons`, `fix.xbox-key`, `fix.volume-keys`, `fix.inputplumber-suspend` | Fixes: Apply / Undo | Now |
+| `fix.gyro`, `fix.nvme-resume`, `fix.xe-panel-replay-off`, `fix.xe-hdr-backlight`, `fix.xe-dsb-off` | Fixes: Apply / Undo | Reboot |
+| `fix.oled-profile` (and its "Lowest refresh rate") | Fixes | Log out of Game Mode or reboot |
+| `fix.nvme-resume.any_ssd` | Apply even without the problem | Reboot |
+| `fixes.recommended` | Apply recommended (quick) | `strongest` of the fixes |
+| `buttons.layout` (each key, frame limit, Apply layout) | Buttons | Now when "Apply without reboot" is on, else Reboot |
+| `buttons.restart` | Apply without reboot | Now |
+| `xess.install`, `xess.update`, `xess.repair`, `xess.uninstall` | XeSS | Only while no game runs · Log out of Game Mode or reboot |
+| `xess.driver` | Default graphics driver | Restart the game |
+| `xess.shim` | Add XeSS to system Protons | Restart the game |
+| `xess.remove_folder` | Remove an old folder | Now |
+| `game.xess`, `game.fg`, `game.mesa`, `game.vendor`, `game.log`, `game.fsr`, `game.typo` | per-game launch options | Restart the game |
+| `game.auto`, `game.auto_undo`, `auto.global` | automatic launch options | Restart the game |
+| `kernel.try`, `kernel.keep` | Kernel | Reboot |
+| `oxp3.install` | Install / Update fixes tool | Now |
+| `reboot` | Reboot to finish | Now |
+
+Selectors that change nothing (Profile to edit, Edit values for, Show 5x–8x, Show advanced CPU options, Show log,
+Check again, Refresh, How to fix, Details, Check for update, Save a problem report) carry no tag.
+
+## Interfaces 0.4 (main.py, api.ts, types.ts)
+
+**main.py** (builder 2 owns every main.py edit):
+
+```python
+power = _load("power"); readouts = _load("readouts"); extras = _load("extras")   # with the others
+
+async def power_live(self)                    # _mod("readouts").sample(self.ctx)          → PowerLiveRes
+async def extras_info(self)                   # _mod("extras").info(self.ctx)              → ExtrasInfoRes
+async def extras_set(self, opts)              # _mod("extras").set_options(self.ctx, opts) → ExtrasInfoRes
+async def extras_take_control(self, what)     # _mod("extras").take_control(self.ctx, what) → ExtrasInfoRes
+```
+
+- `power_options(opts)` now also takes `poll_s`; power_set / power_game / power_profile / power_options /
+  power_enable / power_take_control run, in the same executor call after the power call, `self._sync_extras()`:
+  `_mod("extras").sync(self.ctx, _mod("power").active(self.ctx))` (and `power.refresh` when it answers
+  `lpmd_changed`); any exception there is logged and never changes the power answer. extras_set does the same sync.
+- `_power_watch`: each tick `power.tick`, then `extras.tick(ctx, power.active(ctx))`, then `power.refresh(ctx)` when
+  `lpmd_changed`. Each in its own try: `Unavailable` of power ends only the power part, of extras only the extras
+  part; the loop ends when both are unavailable. A part whose executor step has not finished within `POWER_TICK_S`
+  (a hung scx_loader or intel_lpmd: up to about 9 calls of `BUS_TIMEOUT_S = 2` s) is not awaited: the other part goes
+  on each pass, and the slow part starts again only once its step has finished (its result is then handled).
+- `_unload`: cancel the watch, then `await asyncio.wait_for(loop.run_in_executor(None, _mod("extras").unload,
+  self.ctx), 3)` (exceptions and the timeout logged).
+- No new settings keys for set_setting (the frontend's are `ui_*`).
+
+**api.ts** (one per line, after power_unfix):
+
+```ts
+export const power_live = callable<[], PowerLiveRes>("power_live");
+export const extras_info = callable<[], ExtrasInfoRes>("extras_info");
+export const extras_set = callable<[opts: Partial<ExtrasOptions>], ExtrasInfoRes>("extras_set");
+export const extras_take_control = callable<[what: ExtrasWhat], ExtrasInfoRes>("extras_take_control");
+```
+
+**types.ts** additions:
+
+```ts
+export type FanMode = "auto" | "quiet" | "max";
+export type ScxMode = "auto" | "gaming" | "powersave";
+export type GpuPowerProfile = "base" | "power_saving";
+export type CoreType = "p" | "e" | "lpe";
+// PowerValues gains:
+//   cpu_max_pct, cpu_min_pct, soc_balance, soc_offset: number | null; gpu_power_profile: GpuPowerProfile | null;
+//   cpu_cap_p_mhz, cpu_cap_e_mhz, cpu_cap_lpe_mhz: number | null; epp_p, epp_e, epp_lpe: Epp | null;
+//   fan_mode: FanMode | null; scx_mode: ScxMode | null;
+// PowerOptions gains: poll_s: number;                       // 0 = Off, 2..60
+// PowerRange gains:
+//   cpu_pct_min: number (30); cpu_min_pct_fw: number | null; cpu_min_pct_max: number (50);
+//   core_types: Partial<Record<CoreType, { min_mhz: number; max_mhz: number; policies: number }>>;
+// PowerInfo.hw gains: cpu.perf_pct: boolean; cpu.types: CoreType[]; soc: boolean; gpu.power_profile: boolean
+// PowerState.now gains:
+//   cpu_max_pct: number | null; cpu_min_pct: number | null;
+//   caps_mhz: Partial<Record<CoreType, number | null>>;      // first policy of each type
+//   soc: { balance: number; offset: number; profile: string | null; choices: string[] } | null;
+//   gpu_profile: GpuPowerProfile | null;
+//   epp_types: Partial<Record<CoreType, Epp | "default" | null>>;
+// PowerState gains: blocked_fields: Partial<Record<"epp" | "turbo" | "cpu_pct" | "cpu_caps" | "soc", string[]>>;
+// PowerApply.failed[] items gain transient: boolean; PowerOverridden.suspects may hold "other"
+export type Live = {
+  t: number; package_w: number | null;
+  battery: { status: string; percent: number | null; draw_w: number | null; time_left_min: number | null;
+             time_to_full_min: number | null } | null;
+  cpu_temp_c: number | null;
+  gpu: { busy_pct: number | null; cur_mhz: number | null; act_mhz: number | null; reasons: string[] } | null;
+  throttle: { cpu_ms: number | null; cpu: boolean; gpu: string[] };
+  fan_rpm: number | null;
+};
+export type PowerLiveRes = Res & { live: Live | null };
+export type ExtrasOptions = { charge_limit: number | null; charge_behaviour: "auto" | "inhibit-charge-awake" | null;
+                              lpmd_game_off: boolean };
+export type ExtrasWhat = "fan" | "scx" | "charge_limit" | "charge_behaviour";
+export type ExtrasState = {
+  board_ok: boolean; kernel: string;
+  charge: { available: boolean; why: string | null; limit: number | null; behaviour: string | null;
+            behaviours: ("auto" | "inhibit-charge-awake")[];
+            overridden: { limit: string | null; behaviour: string | null } };
+  fan: { available: boolean; why: string | null; rpm: number | null; mode_now: FanMode | "manual" | null;
+         ours: FanMode | null; reverted: string | null; overridden: string | null; sleep_watch: boolean };
+  scx: { shown: boolean; available: boolean; why: string | null; scheduler: string | null;
+         mode: "auto" | "gaming" | "powersave" | "lowlatency" | "server" | null; ours: ScxMode | null;
+         overridden: string | null };
+  lpmd: { shown: boolean; paused: boolean; state: string | null; error: string | null };
+  options: ExtrasOptions;
+};
+export type ExtrasInfoRes = Res & { extras: ExtrasState | null };
+// GameInfo gains: suggest: { key: ManagedKey; value: string; why: string }[]
+```
+
+`backend.ts` wraps the four new calls like the others (`{ok: false, error, live: null}` / `{..., extras: null}`).
+`store.ts`: `useResource("extras-info", extras_info)`, reloaded 2 s after each power or extras change (a fan or scx
+change is applied by the sync, so the answer is already fresh; the reload catches lpmd).
+
+## Frontend 0.4 (placement and up-front text)
+
+Quick panel Power section, in order (texts ≤ 80 chars; "→ Details" as in "Up-front text"):
+
+1. "Live" row (always, TDP control on or off).
+2. The 0.3 rows.
+3. While TDP control is on, after GPU maximum speed: CPU speed cap, CPU vs GPU balance, GPU power saving, CPU
+   minimum speed; then ToggleField "Show advanced CPU options" (`ui_power_advanced`, no tag) revealing the per-core
+   caps and the per-core energy preference.
+4. Always (when available): Fan mode, Scheduler mode, then Battery charge limit, Run from charger.
+   intel_lpmd's toggle and the polling rate are on the Power tab only.
+
+The Power tab shows the same controls in its profile editor (they edit the chosen profile and slot; extras' global
+options in a new "Battery" section, the intel_lpmd toggle under "Other power programs", "How often to check" under
+Control) and a "Live readouts" section after Status.
+
+| Row | Label | One line (up front) | Tag | → Details |
+|---|---|---|---|---|
+| Live (quick) | "Live" ⓘ | `liveLine`: "18.4 W · 62 °C · GPU 87 % · 3 h 10 min left" | — | every readout, requested vs running GPU clock, why it is slow, fan RPM; Technical: energy_uj, gtidle, coretemp, thermal_throttle |
+| CPU speed cap | "CPU speed cap" | "Lower leaves more power for the GPU in GPU-heavy games." / greyed: why | Now | 30–100 % of each core's top speed; suggested 60–70 % on battery; steadier frame pacing at a fixed TDP is likely but unmeasured; resets at reboot; Technical: intel_pstate/max_perf_pct |
+| CPU vs GPU balance | "CPU vs GPU balance" | "Hint to the chip: favour the CPU (1) or the GPU (5)." / greyed "Only in the Balanced power mode." | Now | 3 = device default; works only while the power mode is Balanced; power-profiles-daemon's Balanced uses it too; effect not measured; Technical: slider_balance (+ slider_offset), platform-profile "SoC Power Slider" rewritten to balanced |
+| Slider offset (Power tab) | "Let the chip save more" | "Lets the firmware lean towards saving power by up to this much." | Now | 0–3, the firmware may move the balance up by this; Technical: slider_offset |
+| GPU power saving | "GPU power saving" | "GPU speeds up more slowly. Good with a frame limit." | Now | can stutter in uncapped heavy games; render GPU only; resets at reboot, OXP3 Deck sets it again; Technical: freq0/power_profile base / power_saving |
+| CPU minimum speed | "CPU minimum speed (plugged in)" | "Higher reacts faster, uses more power." / greyed "Only while plugged in." | Now | from the device's own floor (<n> %) to 50 %, never above the speed cap; on battery the device's floor is used; Technical: intel_pstate/min_perf_pct |
+| Advanced toggle | "Show advanced CPU options" | "Caps and energy preference per core type." | — | — |
+| Per-core caps | "Performance cores max" / "Efficient cores max" / "Low-power cores max" | "Limit these cores' top speed." / greyed "Uses the CPU speed cap." | Now | MHz, step 100; either this or the speed cap (switching asks first: confirm "Use per-core caps?" text "This turns off the CPU speed cap." / "Use the CPU speed cap?" text "This turns off the per-core caps."); Technical: policyN/scaling_max_freq, cpu_core / cpu_atom |
+| EPP split | "Energy preference: performance cores" / "…: efficient cores" / "…: low-power cores" | "Same as above" option first; "How eagerly these cores speed up." / greyed "Locked by <name>." | Now | gain is small and unmeasured; Technical: energy_performance_preference per policy |
+| Fan mode | "Fan" | "Auto, Quiet or Max. Quiet goes back to Auto if the CPU gets too hot." / reverted: the reason | Now | Quiet ≈ 40 %; Quiet back to Auto at 90 °C (Max stays), on any error, before sleep and when OXP3 Deck stops; needs Linux 7.4; Handheld Daemon's fan control fights it; Technical: oxp_ec pwm1_enable / pwm1 |
+| Fan overridden (red) | "Something else changed the fan" | "Likely Handheld Daemon. Turn its fan control off, then Take control." | Now | — |
+| Scheduler mode | "CPU scheduler mode" | "Gaming favours the game; Power save saves battery." / greyed why | Now | CachyOS's LAVD scheduler through scx_loader; per profile; CachyOS's power switch may change it too (then OXP3 Deck stops and says so); Technical: org.scx.Loader SwitchScheduler, scx_lavd --performance / --powersave / --autopilot |
+| intel_lpmd (Power tab) | "Pause Intel's low-power daemon in games" | "Stops it moving the game to slow cores while a game runs." | Now | only while it runs; it reverts when the daemon restarts; Technical: LPM_FORCE_OFF / LPM_AUTO on org.freedesktop.intel_lpmd |
+| Charge limit | "Battery charge limit" | "Stops charging at this level. Slows battery wear when often plugged in." | Now | 50–100 % (100 = charge fully); needs Linux 7.4; Handheld Daemon and Steam may also set it; Technical: charge_control_end_threshold |
+| Charge behaviour | "Run from charger (battery idle)" | "While awake and plugged in, the battery is left alone." | Now | less heat when docked; charges normally while asleep; never "inhibit-charge"; Technical: charge_behaviour inhibit-charge-awake / auto |
+| Battery note (Power tab) | "Battery and fan controls" | "Need Linux 7.4 or newer (this is <release>)." | — | the kernel versions |
+| Polling (Power tab) | "How often to check" | "How often OXP3 Deck checks your settings are still in place." | Now | Off: only after a game change, the charger or sleep; it retries what didn't take (GPU busy) but never fights another program |
+| Auto launch (global) | "Add needed launch options automatically" | "Adds what XeSS needs for a game. Never changes your own text." | Restart the game | applies from the next start; never while the game runs; Undo per game; what it may add (XESS=latest, FSR=xess) and when |
+| Auto launch (per game) | "Add launch options automatically" | "Use global (On)" / "On for this game" / "Off for this game" | Restart the game | as above |
+| Auto added | "Added: XESS=latest" ✓ ⓘ | "Applies from the next start." | Restart the game | each why, date |
+| Auto waiting | "Will be added when you quit <name>" | the keys | — | — |
+
+The "Added: XESS=latest" row is the one place a launch-option variable shows up front: it names exactly what was
+written, which the Undo next to it removes (an exception to "no env variables in one-liners", made here).
+
+(Built, frontend: extra tag ids `power.soc_offset`, `extras.take_control`, `buttons.layout_reboot` (Apply layout with
+"Apply without reboot" off) and `fix.oled-profile.min_refresh`; `effects.ts` also has `effectOf` and `pendingText`.
+"Reset to device defaults" writes every field null but `fan_mode` / `scx_mode` (`power.ts` `RESET`). The speed cap and
+the per-core caps grey each other out ("Uses the per-core caps." / "Uses the CPU speed cap."); the switch is a button
+under the greyed one ("Use the CPU speed cap instead" / "Use per-core caps instead"), confirm, then one change
+(`toPct(null)` / `toCaps({})`). CPU minimum speed is greyed "Only while plugged in." in the quick panel only (the Power
+tab edits the AC value from battery too). The charge limit and the polling rate are sent 400 ms after the last slider
+move. `autolaunch.ts` inserts and removes the one token in place (never re-joining the user's text; game arguments
+without `%command%` only when they need no re-quoting), keeps the log under the 4096-byte setting limit (`fitLog`), and
+`steam.ts` `isRunning` answers true when Steam cannot tell. Node tests load `src/*.ts` files with runtime imports
+through `tests/js/tsresolve.mjs` (an extensionless-import resolve hook). New `PowerRange` / `hw` / `now` fields are
+optional in types.ts, for an older backend.)
+
+## Tests 0.4
+
+**Builder 1** (`tests/powerfake.py` grows `perf(ctx, max=100, min=9)`, `types(ctx, p="0-3", atom="4-11",
+no_l3=(8, 9, 10, 11), max_khz=..., min_khz=...)` (affected_cpus, cpuinfo_*, scaling_max/min_freq per policy),
+`soc(ctx, balance="03", offset="00", profile="balanced", name="SoC Power Slider")`, `gpu_profile(ctx, value="base")`,
+`energy(ctx, uj, max_uj)`, `coretemp(ctx, milli=62000, label="Package id 0")`, `gtidle(ctx, ms)`,
+`throttle(ctx, ms)`, `oxp_ec_fan(ctx, rpm)`):
+- test_powerhw: core types (P / E / LP-E by L3; not hybrid → all p; a CPU in neither list); the SoC device found by
+  name among two platform-profile devices, none when the name differs or a param is missing; hex read/write `"04"`;
+  perf order (raising writes max first, lowering min first; recorder order); caps clamp to scaling_min_freq and
+  tolerance; soc writes offset, balance, then `balanced` only when it reads balanced (with `performance`: params
+  written, the profile file untouched, no failure); never writes `performance`, `low-power`, `custom`, the legacy
+  file, `scaling_min_freq` (no recorded path); gpu power_profile `[base]    power_saving` parsing, EIO → failed
+  transient, read-back mismatch → transient; `read(gpu=False)` still opens no min/max/act/cur file.
+- test_power: new fields' bounds and nulls; mutual exclusion refused, nothing saved; `cpu_min_pct` applied on AC
+  only (battery writes the snapshot floor), clamped under the cap; EPP split dict per policy, `ours` per type;
+  snapshot gains keys, an old snapshot without them gets them filled (not retaken); restore writes them back in
+  order; drift on `cpu/max_pct` → overridden with suspects (lpmd active → intel_lpmd; none → "other"); a
+  power-profiles-daemon profile switch is not drift; `FIELD_BLOCKERS` (ppd blocks epp/turbo but not cpu_pct/soc;
+  intel_lpmd blocks cpu_pct, caps, soc; with `extras.lpmd_paused` patched true it blocks none); `poll_s`: 0 →
+  no drift check outside grace, 10 → one check every 5 ticks, grace still every tick, pending transient ids retried
+  and cleared; `power_options({poll_s: 1})` and `61` refused; `active()` shape with per_game / split_ac;
+  `refresh()` sets apply_at only when writing is allowed; fan_mode / scx_mode stored and copied, never written.
+- test_readouts: package W from two samples, wrap with `max_energy_range_uj`, first sample null, MMIO zone ignored;
+  battery power_now and current×voltage, time left / to full; coretemp by name with a second hwmon of another name
+  first; GPU busy from idle residency; throttle delta; fan RPM only with oxp_ec; a tree with nothing → every value
+  null, `ok: true`.
+
+**Builder 2** (`tests/extrasfake.py`: DMI board_name, oxp_ec hwmon with `pwm1_enable`/`pwm1`/`fan1_input`, battery
+with `charge_control_end_threshold` and `charge_behaviour` in the bracketed form, `/sys/kernel/sched_ext`, and a
+fake `sysexec.run` answering `busctl` and `systemctl is-active` from tables and recording argv):
+- gates: board `ONEXPLAYER 3` + oxp_ec + files → available; `ONEXPLAYER 3 EVA` or missing oxp_ec → not, with the
+  why; scx hidden without sched_ext, greyed for `unknown` / `scx_bpfland`; lpmd hidden when inactive.
+- charge: 49 / 101 / `inhibit-charge` refused, nothing written; written and read back; re-applied after a resume;
+  hhd-style change → overridden; take_control clears it.
+- fan: quiet writes 1 then 102; max writes 0; quiet at 90 °C → 2 and not re-applied until a change; max at 90 °C
+  stays; unreadable temperature →
+  2; write error → 2; pwm1_enable read 2 while quiet → overridden; unload writes 2; the sleep watch: a fake
+  monitor line `PrepareForSleep(true)` writes 2 and ends the inhibitor, `false` takes a new one, the next tick
+  re-applies; a watch that cannot start → Auto with the reason.
+- scx: argv exactly as in "The D-Bus APIs" (`--auto-start=no` on every call; no `StartScheduler`, `StopScheduler`);
+  the mode set when the profile asks and the loader runs scx_lavd; restore with mode, or with args when they were
+  non-empty; a bad arg or name not restored; mode changed by someone else → overridden, no more calls.
+- lpmd: pause only with the option on, the service active and a game; `OFF` already → no call; restore
+  LPM_AUTO / LPM_FORCE_ON by `before`; "rate limited" retried next tick; at most one privileged call per tick;
+  `lpmd_paused` follows; `lpmd_changed` set on each change; a daemon restart re-pauses once.
+- games.py `suggest`: XeSS 1.3 → XESS=latest; XeLL 1.2 → XESS=latest (one entry); FSR-only with 20261104 → FSR=xess,
+  without → none; not installed or a hook-less Proton → none.
+- test_main: `CALLS` gains `"power_live": ()`, `"extras_info": ()`, `"extras_set": ({"lpmd_game_off": True},)`,
+  `"extras_take_control": ("fan",)`; the signature test covers the `_mod("readouts")` / `_mod("extras")` calls; the
+  watch loop runs extras.tick after power.tick, calls power.refresh on `lpmd_changed`, survives a raising extras and an
+  unavailable one, and keeps ticking power while an extras step hangs; `_unload` calls extras.unload within 3 s; power_set's answer is unchanged by a raising sync.
+- test_package: `extras.py` and `readouts.py` in the zip listing.
+
+**Builder 3** (node tests, no new dependencies):
+- `tests/js/effects.test.mjs`: every id the frontend uses is in `EFFECTS` (ids read from `src/**/*.tsx` by the
+  `effect=` / `EFFECTS["…"]` pattern); `fixEffect` for each fixture fix id and for an unknown one by its text;
+  `strongest`; `confirmLine`.
+- `tests/js/autolaunch.test.mjs`: `plan` adds absent keys only, keeps the user's text byte for byte apart from the
+  added tokens, skips `done` keys, does nothing on a typo; `undo` removes only unchanged added keys; `trimLog` keeps
+  the 20 newest; `effectiveOn`.
+- `tests/js/live.test.mjs`: `liveLine` drops nulls and stays ≤ 80 chars; `whySlow`.
+- `tests/js/power.test.mjs`: `FIELDS` and `EMPTY` have the 19 names; the index slider of `POLL_STEPS`.
+- `tests/js/pages.test.mjs`: every `<ToggleField`, `<SliderField`, `<DropdownItem` in `src/` (up to its `/>`) has
+  `explainWhen(` in its props, except the selectors listed above (by label); every `confirm(` call's object has
+  `effect`; `fixConfirm` / `undoConfirm` results have `effect`; `setLaunchOptions(` in AutoLaunch.tsx is preceded by a
+  running check in the same function; `power_live(` is only called from `useLive`; `extras_set(` never sends
+  `"inhibit-charge"` (the only behaviour values in src/ are `auto` and `inhibit-charge-awake`).
+
+On the device (owner, after the build): max_perf_pct 70 at 25 W in a GPU-bound game (FPS, package W); slider 1 vs 5
+at a fixed PL1 (A/B); power_saving with a 40 FPS cap (W); min_perf_pct 50 on AC (feel, idle W); the Live row against
+`turbostat` / `intel_gpu_top`; polling Off then Steam's TDP slider (no drift line until the panel opens); on 7.4:
+charge limit 80 %, Run from charger (battery current ≈ 0 while gaming plugged in), Quiet fan (RPM, temperature,
+back to Auto at 90 °C, before sleep and on plugin reload); scx mode Gaming in a game and back after it; intel_lpmd
+paused while a game runs (`GetState` OFF) and back.
+
+## Builders 0.4 (who owns which file)
+
+| Builder | Owns (creates or edits) | Must not edit |
+|---|---|---|
+| 1 backend power | `py_modules/oxp3deck/power.py`, `powerhw.py`, new `readouts.py`; `tests/powerfake.py`, `tests/test_power.py`, `tests/test_powerhw.py`, new `tests/test_readouts.py`, `tests/fixtures/power/` | main.py, extras.py, games.py, src/ |
+| 2 backend extras | new `py_modules/oxp3deck/extras.py`; `games.py` (`suggest`); **all of `main.py`** (incl. `power_live`); new `tests/extrasfake.py`, `tests/test_extras.py`; `tests/test_games.py`, `tests/test_main.py`, `tests/test_package.py`; CREDITS.md (scx-loader and intel-lpmd named as API sources, GPL-2.0, no code copied) | power.py, powerhw.py, readouts.py, src/ |
+| 3 frontend | everything under `src/` (types.ts, api.ts, backend.ts, store.ts, power.ts, new effects.ts, autolaunch.ts, live.ts, components/Effect.tsx, CpuControls.tsx, LiveRows.tsx, ExtrasControls.tsx, AutoLaunch.tsx, every page and component for tags and greyed-out whys); `tests/js/*`; README.md (new controls, tags, auto launch options) | anything in py_modules, main.py, tests/*.py |
+
+Interfaces between them are exactly the signatures above: builder 2 may stub `power.active` / `power.refresh` /
+`readouts.sample` in its tests until builder 1's land; builder 1 reads `extras.lpmd_paused` lazily (missing →
+False). DESIGN.md belongs to the integrator; a builder writes "(Built: …)" notes into its own sections only.

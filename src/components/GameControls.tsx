@@ -10,12 +10,15 @@ import { FC, useEffect, useMemo, useRef, useState } from "react";
 import { game_info, xess_state } from "../backend";
 import { driverPrefix, fixTypo, fsrSupported, managed, ManagedKey, parse, setManaged } from "../launchopts";
 import { getLaunchOptions, isSteamApp, RunningApp, setLaunchOptions } from "../steam";
-import { useResource } from "../store";
+import { EFFECTS } from "../effects";
+import { notePending, useResource } from "../store";
 import type { GameInfo, GameInfoRes, XessDriver, XessStateRes } from "../types";
 import { remember, when } from "../util";
 import { firstSentence } from "../text";
 import { DetailsSpec, paragraphs } from "./confirm";
-import { Code, explain, label, Note, Problem, Status, WithDetails } from "./Hint";
+import { AutoLaunchRows } from "./AutoLaunch";
+import { Pending } from "./Effect";
+import { Code, explain, explainWhen, label, Note, Problem, Status, WithDetails } from "./Hint";
 
 type Opt = { data: string; label: string };
 
@@ -116,7 +119,8 @@ export const GameControls: FC<{ app: RunningApp; quick?: boolean; running?: bool
   const disabled = busy || opts === undefined || blocked;
   const nextStart = running ? `Applies when you start ${app.name} again.` : `Applies at the next start of ${app.name}.`;
 
-  const write = async (next: string) => {
+  /** `what`: the setting that changed (its pending row while the game runs: it applies at the next start). */
+  const write = async (next: string, what?: { id: string; label: string }) => {
     if (next === text) return;
     setErr(null);
     if (!writable) { setDraft(next); setSaved(false); return; }
@@ -128,8 +132,11 @@ export const GameControls: FC<{ app: RunningApp; quick?: boolean; running?: bool
     if (now !== next) setRev((n) => n + 1);
     setErr(r.ok ? null : r.error);
     setSaved(r.ok);
+    if (r.ok && running && what) notePending({ id: what.id, effect: EFFECTS["game.xess"], label: what.label, appid: app.appid, game: app.name });
   };
-  const change = (c: Partial<Record<ManagedKey, string | null>>) => write(setManaged(text, c));
+  const change = (c: Partial<Record<ManagedKey, string | null>>, id: string, what: string) => write(setManaged(text, c), { id, label: what });
+  // a greyed-out control says why
+  const why = blocked ? "Fix the launch options typo first." : opts === undefined ? "Reading the launch options…" : null;
 
   const xessOpts = useMemo<Opt[]>(() => {
     const o = [{ data: "", label: "Game's own" }, { data: "latest", label: "Latest (package)" }, { data: "dp4a", label: "DP4a, no XMX" }];
@@ -205,8 +212,8 @@ export const GameControls: FC<{ app: RunningApp; quick?: boolean; running?: bool
       {blocked && (
         <PanelSectionRow>
           <Status ok={false} red label="Launch options typo" detail="Blocks the settings below." details={typoD} />
-          <ButtonItem layout="below" disabled={busy || opts === undefined} onClick={() => write(fixTypo(text))}
-            description={explain(nextStart)}>
+          <ButtonItem layout="below" disabled={busy || opts === undefined} onClick={() => write(fixTypo(text), { id: "game.typo", label: "Launch options typo" })}
+            description={explainWhen(nextStart, EFFECTS["game.typo"])}>
             Fix the typo
           </ButtonItem>
         </PanelSectionRow>
@@ -214,13 +221,13 @@ export const GameControls: FC<{ app: RunningApp; quick?: boolean; running?: bool
       <PanelSectionRow>
         <WithDetails details={xessD}>
           <DropdownItem key={`xess-${key}`} {...below} label={label("XeSS version", xessD)} menuLabel="XeSS version" disabled={disabled}
-            rgOptions={xessOpts} selectedOption={cur.XESS ?? ""} onChange={(o) => change({ XESS: o.data || null })}
-            description={explain(cur.XESS === "latest" ? "Newer XeSS for older games." : cur.XESS === "dp4a" ? "For testing." : "Uses the game's XeSS.")} />
+            rgOptions={xessOpts} selectedOption={cur.XESS ?? ""} onChange={(o) => change({ XESS: o.data || null }, "game.xess", "XeSS version")}
+            description={explainWhen(cur.XESS === "latest" ? "Newer XeSS for older games." : cur.XESS === "dp4a" ? "For testing." : "Uses the game's XeSS.", EFFECTS["game.xess"], why)} />
         </WithDetails>
         <WithDetails details={fgD}>
           <DropdownItem key={`fg-${key}-${experimental}`} {...below} label={label("Frame generation", fgD)} menuLabel="XeSS frame generation"
-            disabled={disabled} rgOptions={fgOpts} selectedOption={cur.XESS_FG ?? ""} onChange={(o) => change({ XESS_FG: o.data || null })}
-            description={explain(cur.XESS_FG ? "Turn on frame gen in the game and set a frame limit." : "Uses the game's own choice.")} />
+            disabled={disabled} rgOptions={fgOpts} selectedOption={cur.XESS_FG ?? ""} onChange={(o) => change({ XESS_FG: o.data || null }, "game.fg", "Frame generation")}
+            description={explainWhen(cur.XESS_FG ? "Turn on frame gen in the game and set a frame limit." : "Uses the game's own choice.", EFFECTS["game.fg"], why)} />
         </WithDetails>
         <WithDetails details={expD}>
           <ToggleField label={label("Show 5x–8x (experimental)", expD)} checked={experimental} bottomSeparator="none"
@@ -229,29 +236,30 @@ export const GameControls: FC<{ app: RunningApp; quick?: boolean; running?: bool
         </WithDetails>
         <WithDetails details={mesaD}>
           <DropdownItem key={`mesa-${key}`} {...below} label={label("Graphics driver", mesaD)} menuLabel="Graphics driver" disabled={disabled}
-            rgOptions={mesaOpts} selectedOption={cur.MESA ?? ""} onChange={(o) => change({ MESA: o.data || null })}
-            description={explain("Only change if this game misbehaves.")} />
+            rgOptions={mesaOpts} selectedOption={cur.MESA ?? ""} onChange={(o) => change({ MESA: o.data || null }, "game.mesa", "Graphics driver")}
+            description={explainWhen("Only change if this game misbehaves.", EFFECTS["game.mesa"], why)} />
         </WithDetails>
         <WithDetails details={vendorD}>
           <ToggleField label={label("Compatibility mode", vendorD)} checked={cur.force_vk_vendor === "-1"} disabled={disabled} bottomSeparator="none"
-            onChange={(v) => change({ force_vk_vendor: v ? "-1" : null })}
-            description={explain("Only for games that need it; XeSS slows down.")} />
+            onChange={(v) => change({ force_vk_vendor: v ? "-1" : null }, "game.vendor", "Compatibility mode")}
+            description={explainWhen("Only for games that need it; XeSS slows down.", EFFECTS["game.vendor"], why)} />
         </WithDetails>
         <WithDetails details={logD}>
           <ToggleField label={label("Save XeSS logs", logD)} checked={!!cur.XESS_LOG && cur.XESS_LOG !== "0"} disabled={disabled} bottomSeparator="none"
-            onChange={(v) => change({ XESS_LOG: v ? "1" : null })}
-            description={explain("For bug reports; leave off otherwise.")} />
+            onChange={(v) => change({ XESS_LOG: v ? "1" : null }, "game.log", "Save XeSS logs")}
+            description={explainWhen("For bug reports; leave off otherwise.", EFFECTS["game.log"], why)} />
         </WithDetails>
         {showFsr && (
           <WithDetails details={fsrD}>
             <DropdownItem key={`fsr-${key}`} {...below} label={label("FSR → XeSS", fsrD)} menuLabel="FSR on XeSS" disabled={disabled}
               rgOptions={fsrOpts} selectedOption={mode}
-              onChange={(o) => { const m = FSR_MODES.find((f) => f.data === o.data); if (m) change(m.set); }}
-              description={explain(fsrNow?.line ?? "Set by hand.")} />
+              onChange={(o) => { const m = FSR_MODES.find((f) => f.data === o.data); if (m) change(m.set, "game.fsr", "FSR → XeSS"); }}
+              description={explainWhen(fsrNow?.line ?? "Set by hand.", EFFECTS["game.fsr"], why)} />
           </WithDetails>
         )}
         {busy && <Status ok={null} label="Saving…" />}
         {saved && !err && <Status ok label="Saved" detail={nextStart} />}
+        <Pending ids={["game.xess", "game.fg", "game.mesa", "game.vendor", "game.log", "game.fsr", "game.typo"]} appid={app.appid} />
         <Problem what="Launch options" error={err} />
         {writable ? (
           !quick && <Status ok={null} label="Launch options" detail={text ? "Open Details to see them." : "None"} details={optsD} />
@@ -264,6 +272,11 @@ export const GameControls: FC<{ app: RunningApp; quick?: boolean; running?: bool
           </>
         )}
       </PanelSectionRow>
+      {steam && (
+        <PanelSectionRow>
+          <AutoLaunchRows app={app} running={!!running} onWritten={(t) => { if (t !== null) { setOpts(t); setRev((n) => n + 1); } }} />
+        </PanelSectionRow>
+      )}
       <PanelSectionRow>
         <Problem what="Game check" error={gi.data && !gi.data.ok ? gi.data.error : null} />
         {game && <Status ok={game.compat_tool_shimmed} label={`Proton: ${toolName(game)}`} detail={protonShort(game)}

@@ -1,0 +1,1 @@
+tuned.service                                         loaded    active   running Dynamic System Tuning Daemon

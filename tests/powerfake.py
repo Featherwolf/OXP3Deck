@@ -165,6 +165,108 @@ def oxp3(ctx, msr=True, mmio=True, gpu=True, cpu_=True, on_ac=False):
     suspend(ctx, 0)
 
 
+def perf(ctx, max=100, min=9) -> None:
+    base = ctx.sys_path("/sys/devices/system/cpu/intel_pstate")
+    put(os.path.join(base, "max_perf_pct"), max)
+    put(os.path.join(base, "min_perf_pct"), min)
+
+
+def perf_path(ctx, which="max") -> str:
+    return ctx.sys_path(f"/sys/devices/system/cpu/intel_pstate/{which}_perf_pct")
+
+
+def _cpulist(text: str) -> list[int]:
+    out = []
+    for part in text.split(","):
+        lo, _, hi = part.partition("-")
+        out += list(range(int(lo), int(hi or lo) + 1))
+    return out
+
+
+def types(ctx, p="0-3", atom="4-11", no_l3=(8, 9, 10, 11), max_khz=None, min_khz=400000, policies=None) -> None:
+    """A hybrid CPU: P cores `p`, atom cores `atom` (LP-E: those in `no_l3`, without cache/index3), one policy per
+    CPU (policyN for cpuN, as intel_pstate does). max_khz: {type: kHz} (cpuinfo_max_freq = scaling_max_freq)."""
+    max_khz = {"p": 5100000, "e": 3800000, "lpe": 2500000, **(max_khz or {})}
+    base = ctx.sys_path("/sys/devices")
+    if p is not None:
+        put(os.path.join(base, "cpu_core", "cpus"), p)
+    if atom is not None:
+        put(os.path.join(base, "cpu_atom", "cpus"), atom)
+    cores = set(_cpulist(p)) if p else set()
+    atoms = set(_cpulist(atom)) if atom else set()
+    n = policies if policies is not None else len(cores | atoms)
+    for i in range(n):
+        kind = "p" if i in cores or i not in atoms else ("lpe" if i in no_l3 else "e")
+        if not (i in atoms and i in no_l3):
+            os.makedirs(os.path.join(base, "system", "cpu", f"cpu{i}", "cache", "index3"), exist_ok=True)
+        pol = os.path.join(base, "system", "cpu", "cpufreq", f"policy{i}")
+        put(os.path.join(pol, "affected_cpus"), i)
+        put(os.path.join(pol, "cpuinfo_max_freq"), max_khz[kind])
+        put(os.path.join(pol, "cpuinfo_min_freq"), 400000)
+        put(os.path.join(pol, "scaling_max_freq"), max_khz[kind])
+        put(os.path.join(pol, "scaling_min_freq"), min_khz)
+
+
+def cap_path(ctx, policy="policy0") -> str:
+    return ctx.sys_path(f"/sys/devices/system/cpu/cpufreq/{policy}/scaling_max_freq")
+
+
+def soc(ctx, balance="03", offset="00", profile="balanced", name="SoC Power Slider", dev="platform-profile-0",
+        params=True) -> str:
+    """The SoC slider's module parameters and its platform-profile device; returns the device folder."""
+    if params:
+        base = ctx.sys_path("/sys/module/processor_thermal_soc_slider/parameters")
+        put(os.path.join(base, "slider_balance"), balance)
+        put(os.path.join(base, "slider_offset"), offset)
+    d = ctx.sys_path(f"/sys/class/platform-profile/{dev}")
+    put(os.path.join(d, "name"), name)
+    put(os.path.join(d, "profile"), profile)
+    put(os.path.join(d, "choices"), "low-power balanced performance")
+    return d
+
+
+def soc_param(ctx, which="balance") -> str:
+    return ctx.sys_path(f"/sys/module/processor_thermal_soc_slider/parameters/slider_{which}")
+
+
+def gpu_profile(ctx, value="base", card="card1", gt="gt0") -> str:
+    path = ctx.sys_path(f"/sys/class/drm/{card}/device/tile0/{gt}/freq0/power_profile")
+    put(path, "[base]    power_saving" if value == "base" else "base    [power_saving]" if value == "power_saving"
+        else value)
+    return path
+
+
+def energy(ctx, uj, max_uj=262143328850, zone="intel-rapl:0") -> None:
+    base = ctx.sys_path(f"/sys/class/powercap/{zone}")
+    put(os.path.join(base, "energy_uj"), int(uj))
+    put(os.path.join(base, "max_energy_range_uj"), int(max_uj))
+
+
+def hwmon(ctx, n: int, name: str, files: dict) -> str:
+    base = ctx.sys_path(f"/sys/class/hwmon/hwmon{n}")
+    put(os.path.join(base, "name"), name)
+    for k, v in files.items():
+        put(os.path.join(base, k), v)
+    return base
+
+
+def coretemp(ctx, milli=62000, label="Package id 0", n=3) -> str:
+    return hwmon(ctx, n, "coretemp", {"temp1_input": milli, "temp1_label": label, "temp2_input": 50000,
+                                      "temp2_label": "Core 0"})
+
+
+def gtidle(ctx, ms, card="card1", gt="gt0") -> None:
+    put(ctx.sys_path(f"/sys/class/drm/{card}/device/tile0/{gt}/gtidle/idle_residency_ms"), int(ms))
+
+
+def throttle(ctx, ms) -> None:
+    put(ctx.sys_path("/sys/devices/system/cpu/cpu0/thermal_throttle/package_throttle_total_time_ms"), int(ms))
+
+
+def oxp_ec_fan(ctx, rpm, n=5) -> str:
+    return hwmon(ctx, n, "oxp_ec", {"fan1_input": rpm, "pwm1_enable": 2, "pwm1": 0})
+
+
 class Writer:
     """powerhw._write's stand-in: records (path, text), then writes the file. fail[path-suffix] = errno (EACCES gives
     PermissionError) or a list of them used one per call; ignore: suffixes whose writes are dropped."""
@@ -195,6 +297,8 @@ class Writer:
             return
         if not os.path.isfile(path):
             raise FileNotFoundError(errno.ENOENT, "No such file or directory", path)
+        if path.endswith("/power_profile") and text in ("base", "power_saving"):   # shown as the xe driver does
+            text = "[base]    power_saving" if text == "base" else "base    [power_saving]"
         with open(path, "w") as f:
             f.write(text + "\n")
 
@@ -214,6 +318,10 @@ class Writer:
                 out.append("gpu/" + os.path.basename(p))
             elif p.endswith("energy_performance_preference"):
                 out.append(os.path.basename(os.path.dirname(p)) + "/epp")
+            elif p.endswith("scaling_max_freq"):
+                out.append(os.path.basename(os.path.dirname(p)) + "/cap")
+            elif "/platform-profile/" in p:
+                out.append("profile")
             else:
                 out.append(os.path.basename(p))
         return out

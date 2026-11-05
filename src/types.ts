@@ -1,3 +1,5 @@
+import type { ManagedKey } from "./launchopts";
+
 // The backend's answers, as DESIGN.md "Backend API" defines them. Oxp3Status, Oxp3Catalog and Oxp3Kernel are
 // oxp3-tool's own --json objects (oxp3_tool/cli.py status_data / catalog_data, kernel_cmd.py describe_data).
 
@@ -149,7 +151,10 @@ export type GameInfo = {
   dlls: GameDll[];
   last_run: GameLastRun | null;
   advice: string[];
+  /** What the automatic launch options may add (DESIGN.md "Automatic launch options"); older backends: absent. */
+  suggest?: GameSuggest[];
 };
+export type GameSuggest = { key: ManagedKey; value: string; why: string };
 export type GameInfoRes = Res & { game: GameInfo | null };
 
 // ---- jobs and misc -------------------------------------------------------------------------------------------------
@@ -160,17 +165,30 @@ export type JobListRes = Res & { jobs: Job[] };
 // ---- power (DESIGN.md "Power (TDP, GPU, CPU)") ---------------------------------------------------------------------
 
 export type Epp = "performance" | "balance_performance" | "balance_power" | "power";
+export type FanMode = "auto" | "quiet" | "max";
+export type ScxMode = "auto" | "gaming" | "powersave";
+export type GpuPowerProfile = "base" | "power_saving";
+export type CoreType = "p" | "e" | "lpe";
 export type PowerValues = {
   pl1_w: number | null; pl2_w: number | null; gpu_min_mhz: number | null; gpu_max_mhz: number | null;
   epp: Epp | null; turbo: boolean | null;              // null: the firmware's value
+  // 0.4 (DESIGN.md "Power 0.4")
+  cpu_max_pct: number | null; cpu_min_pct: number | null; soc_balance: number | null; soc_offset: number | null;
+  gpu_power_profile: GpuPowerProfile | null;
+  cpu_cap_p_mhz: number | null; cpu_cap_e_mhz: number | null; cpu_cap_lpe_mhz: number | null;
+  epp_p: Epp | null; epp_e: Epp | null; epp_lpe: Epp | null;
+  fan_mode: FanMode | null; scx_mode: ScxMode | null;  // applied by extras.py, also while TDP control is off
 };
 export type PowerProfile = { name: string | null; main: PowerValues; ac: PowerValues | null };
-export type PowerOptions = { per_game: boolean; split_ac: boolean; extended: boolean; ignore: string[] };
+export type PowerOptions = { per_game: boolean; split_ac: boolean; extended: boolean; ignore: string[];
+                             poll_s: number };    // 0 = Off, 2..60
 export type PowerRange = {
   pl1_min: number; pl1_max: number; pl2_max: number;    // for the AC state now (W)
   pl1_max_battery: number; pl1_max_ac: number; extended_max: number | null;   // extended_max: OXP3 only
   gpu_min: number | null; gpu_max: number | null; gpu_efficient: number | null;   // rpn, rp0, rpe (MHz)
   spec: "oxp3" | "firmware";
+  cpu_pct_min?: number; cpu_min_pct_fw?: number | null; cpu_min_pct_max?: number;     // 0.4: 30, firmware floor, 50
+  core_types?: Partial<Record<CoreType, { min_mhz: number; max_mhz: number; policies: number }>>;
 };
 export type PowerZone = {
   id: string; iface: "msr" | "mmio"; name: string;
@@ -193,8 +211,9 @@ export type PowerFixStep = { unit: string; action: "disable" | "stop" | "enable"
 export type PowerOverridden = { what: string; ours: string; now: string; since: number; suspects: string[] };
 export type PowerApply = {
   ok: boolean; error: string | null; written: string[];
-  failed: { id: string; error: string; locked: boolean }[];
+  failed: { id: string; error: string; locked: boolean; transient?: boolean }[];   // transient: retried (GPU busy: reset, resume, GuC error)
 };
+export type BlockedGroup = "epp" | "turbo" | "cpu_pct" | "cpu_caps" | "soc";
 export type PowerGpuNow = { min: number | null; max: number | null; act: number | null; reasons: string[] };
 export type PowerState = {
   enabled: boolean;
@@ -204,8 +223,15 @@ export type PowerState = {
   now: { pl1_w: number | null; pl2_w: number | null;     // effective: the lowest over the zones
          zones: PowerZone[];
          gpu: PowerGpuNow | null;
-         epp: Epp | "default" | "mixed" | null; turbo: boolean | null; governor: string | null };
+         epp: Epp | "default" | "mixed" | null; turbo: boolean | null; governor: string | null;
+         // 0.4
+         cpu_max_pct?: number | null; cpu_min_pct?: number | null;
+         caps_mhz?: Partial<Record<CoreType, number | null>>;      // first policy of each type
+         soc?: { balance: number; offset: number; profile: string | null; choices: string[] } | null;
+         gpu_profile?: GpuPowerProfile | null;
+         epp_types?: Partial<Record<CoreType, Epp | "default" | null>> };
   range: PowerRange;
+  blocked_fields?: Partial<Record<BlockedGroup, string[]>>;    // 0.4: conflict ids per field group
   overridden: PowerOverridden | null;
   blocked: string | null;                 // why nothing is written although enabled
   cpu_blocked: string | null;             // "<name> controls energy preference and CPU boost"
@@ -213,8 +239,10 @@ export type PowerState = {
   last: PowerApply | null;                // the last apply
 };
 export type PowerInfo = {
-  hw: { rapl: boolean; mmio: boolean; gpu: { card: string; gt: string; media_gt: string | null } | null;
-        cpu: { pstate: string | null; epp_choices: Epp[]; turbo: boolean } | null;
+  hw: { rapl: boolean; mmio: boolean;
+        gpu: { card: string; gt: string; media_gt: string | null; power_profile?: boolean } | null;
+        cpu: { pstate: string | null; epp_choices: Epp[]; turbo: boolean; perf_pct?: boolean; types?: CoreType[] } | null;
+        soc?: boolean;
         ac_supply: string | null; problems: string[] };
   options: PowerOptions;
   profiles: Record<string, PowerProfile>;  // "default" always present
@@ -233,3 +261,33 @@ export type PowerChangeRes = Res & { state: PowerState | null; applied: PowerApp
 export type PowerImportRes = Res & { imported: string[]; skipped: string[]; state: PowerState | null };
 export type PowerFixRes = Res & { steps: PowerFixStep[]; notes: string[]; state: PowerState | null;
                                   conflicts: PowerConflict[]; fixed: PowerFixed[]; applied: PowerApply | null };
+
+// ---- live readouts and extras (DESIGN.md "Live readouts", "Extras") -------------------------------------------------
+
+export type Live = {
+  t: number; package_w: number | null;
+  battery: { status: string; percent: number | null; draw_w: number | null; time_left_min: number | null;
+             time_to_full_min: number | null } | null;
+  cpu_temp_c: number | null;
+  gpu: { busy_pct: number | null; cur_mhz: number | null; act_mhz: number | null; reasons: string[] } | null;
+  throttle: { cpu_ms: number | null; cpu: boolean; gpu: string[] };
+  fan_rpm: number | null;
+};
+export type PowerLiveRes = Res & { live: Live | null };
+export type ChargeBehaviour = "auto" | "inhibit-charge-awake";
+export type ExtrasOptions = { charge_limit: number | null; charge_behaviour: ChargeBehaviour | null; lpmd_game_off: boolean };
+export type ExtrasWhat = "fan" | "scx" | "charge_limit" | "charge_behaviour";
+export type ExtrasState = {
+  board_ok: boolean; kernel: string;
+  charge: { available: boolean; why: string | null; limit: number | null; behaviour: string | null;
+            behaviours: ChargeBehaviour[];
+            overridden: { limit: string | null; behaviour: string | null }; error?: string | null };
+  fan: { available: boolean; why: string | null; rpm: number | null; mode_now: FanMode | "manual" | null;
+         ours: FanMode | null; reverted: string | null; overridden: string | null; sleep_watch: boolean };
+  scx: { shown: boolean; available: boolean; why: string | null; scheduler: string | null;
+         mode: "auto" | "gaming" | "powersave" | "lowlatency" | "server" | null; ours: ScxMode | null;
+         overridden: string | null; note?: string | null };
+  lpmd: { shown: boolean; paused: boolean; state: string | null; error: string | null };
+  options: ExtrasOptions;
+};
+export type ExtrasInfoRes = Res & { extras: ExtrasState | null };

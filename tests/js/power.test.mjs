@@ -3,6 +3,7 @@ import assert from "node:assert/strict";
 import { test } from "node:test";
 
 import {
+  CORE_TYPES, EMPTY, FIELDS, minPctRange, POLL_STEPS, pollIndex, pollText, pollValue, RESET, toCaps, toPct, usesCaps,
   blockers, clampW, editSlot, effectiveLine, eppOptions, failedLines, fwValues, gpuNotches, idText, makeWriter,
   overriddenText, pl1Change, pl2Floor, profileLine, profileOrder, reasonText, shown, suspects, watts,
 } from "../../src/power.ts";
@@ -219,12 +220,12 @@ test("editSlot: the active slot, AC only when split", () => {
 test("shown: the stored value, else the applied (firmware) one", () => {
   const s = shown({ pl1_w: 15, pl2_w: null, gpu_min_mhz: null, gpu_max_mhz: 1800, epp: null, turbo: false },
     stateWith().applied_values);
-  assert.deepEqual(s, { pl1_w: 15, pl2_w: 52, gpu_min_mhz: 100, gpu_max_mhz: 1800, epp: "balance_performance", turbo: false });
+  assert.deepEqual(s, { ...EMPTY, pl1_w: 15, pl2_w: 52, gpu_min_mhz: 100, gpu_max_mhz: 1800, epp: "balance_performance", turbo: false });
   assert.deepEqual(shown(null, null).pl1_w, null);
 });
 
 test("fwValues: the lowest boot value over the zones, the GPU's range", () => {
-  assert.deepEqual(fwValues(stateWith()), { pl1_w: 25, pl2_w: 52, gpu_min_mhz: 100, gpu_max_mhz: 2300, epp: null, turbo: null });
+  assert.deepEqual(fwValues(stateWith()), { ...EMPTY, pl1_w: 25, pl2_w: 52, gpu_min_mhz: 100, gpu_max_mhz: 2300 });
   const none = stateWith();
   none.now.zones = none.now.zones.map((z) => ({ ...z, boot_pl1_w: null, boot_pl2_w: null }));
   assert.equal(fwValues(none).pl1_w, 15, "no snapshot yet: what reads now");
@@ -329,4 +330,51 @@ test("blockers: blocking and not ignored", () => {
   const c = (id, kind, ignored) => ({ id, name: id, kind, ignorable: true, ignored, why: "", fix: "" });
   assert.deepEqual(blockers([c("a", "blocks", false), c("b", "blocks", true), c("c", "cpu", false), c("d", "suspect", false)]).map((x) => x.id), ["a"]);
   assert.deepEqual(blockers(undefined), []);
+});
+
+// ---- 0.4 ---------------------------------------------------------------------------------------------------------
+
+test("FIELDS and EMPTY have the 19 names of power.py, in its order", () => {
+  assert.deepEqual([...FIELDS], ["pl1_w", "pl2_w", "gpu_min_mhz", "gpu_max_mhz", "epp", "turbo",
+    "cpu_max_pct", "cpu_min_pct", "soc_balance", "soc_offset", "gpu_power_profile",
+    "cpu_cap_p_mhz", "cpu_cap_e_mhz", "cpu_cap_lpe_mhz", "epp_p", "epp_e", "epp_lpe", "fan_mode", "scx_mode"]);
+  assert.deepEqual(Object.keys(EMPTY).sort(), [...FIELDS].sort());
+  assert.ok(Object.values(EMPTY).every((v) => v === null));
+  // reset leaves the fan and the scheduler mode alone
+  assert.deepEqual(Object.keys(RESET).sort(), FIELDS.filter((f) => f !== "fan_mode" && f !== "scx_mode").sort());
+});
+
+test("the polling rate's index slider over POLL_STEPS", () => {
+  assert.deepEqual([...POLL_STEPS], [0, 2, 3, 5, 10, 15, 20, 30, 45, 60]);
+  POLL_STEPS.forEach((v, i) => { assert.equal(pollIndex(v), i); assert.equal(pollValue(i), v); });
+  assert.equal(pollIndex(undefined), 1, "unknown: the default (2 s)");
+  assert.equal(pollIndex(11), 4);
+  assert.equal(pollValue(-3), 0);
+  assert.equal(pollValue(99), 60);
+  assert.equal(pollText(0), "Off");
+  assert.equal(pollText(15), "15 s");
+});
+
+test("speed cap or per-core caps, switched in one change", () => {
+  assert.deepEqual([...CORE_TYPES], ["p", "e", "lpe"]);
+  assert.equal(usesCaps(EMPTY), false);
+  assert.equal(usesCaps({ ...EMPTY, cpu_cap_e_mhz: 2400 }), true);
+  assert.deepEqual(toCaps({ p: 3000 }), { cpu_max_pct: null, cpu_cap_p_mhz: 3000, cpu_cap_e_mhz: null, cpu_cap_lpe_mhz: null });
+  assert.deepEqual(toPct(70), { cpu_max_pct: 70, cpu_cap_p_mhz: null, cpu_cap_e_mhz: null, cpu_cap_lpe_mhz: null });
+});
+
+test("CPU minimum speed range: the firmware floor to 50, never above the cap", () => {
+  assert.deepEqual(minPctRange({ cpu_min_pct_fw: 9, cpu_min_pct_max: 50 }, 100), { lo: 9, hi: 50 });
+  assert.deepEqual(minPctRange({ cpu_min_pct_fw: 9, cpu_min_pct_max: 50 }, 40), { lo: 9, hi: 40 });
+  assert.deepEqual(minPctRange({ cpu_min_pct_fw: null }, null), { lo: 1, hi: 50 });
+  assert.deepEqual(minPctRange({ cpu_min_pct_fw: 30, cpu_min_pct_max: 50 }, 20), { lo: 30, hi: 30 });
+});
+
+test("transient failures (the GPU asleep) are not red rows; 'other' suspects read as Another program", () => {
+  const last = { ok: true, error: null, written: [], failed: [{ id: "gpu/profile", error: "EAGAIN", locked: false, transient: true }] };
+  assert.deepEqual(failedLines(last, []), []);
+  const o = { what: "cpu/max_pct", ours: "70", now: "100", since: 1, suspects: ["other"] };
+  assert.deepEqual(suspects(o, []), [{ name: "Another program", fix: "" }]);
+  assert.equal(idText("cpu/max_pct"), "CPU speed cap (max_perf_pct)");
+  assert.equal(idText("cpu/cap/policy4"), "Core speed cap (policy4)");
 });

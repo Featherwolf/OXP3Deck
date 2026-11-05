@@ -1,7 +1,7 @@
 // Power control's frontend logic, framework-free so node can test it (tests/js/power.test.mjs): the serial writer
 // behind the sliders and the texts the Power section shows (DESIGN.md "Power (TDP, GPU, CPU)", Frontend).
 import type {
-  Epp, PowerApply, PowerChangeRes, PowerConflict, PowerOptions, PowerOverridden, PowerRange, PowerState, PowerValues,
+  CoreType, Epp, PowerApply, PowerChangeRes, PowerConflict, PowerOptions, PowerOverridden, PowerRange, PowerState, PowerValues,
   PowerZone,
 } from "./types";
 
@@ -123,8 +123,62 @@ export const makeWriter = (send: Send, opts: WriterOpts = {}): Writer => {
 export const editSlot = (state: PowerState, options: PowerOptions | null | undefined): Slot =>
   options?.split_ac && state.active.slot === "ac" ? "ac" : "main";
 
-export const FIELDS = ["pl1_w", "pl2_w", "gpu_min_mhz", "gpu_max_mhz", "epp", "turbo"] as const;
-export const EMPTY: PowerValues = { pl1_w: null, pl2_w: null, gpu_min_mhz: null, gpu_max_mhz: null, epp: null, turbo: null };
+/** Every profile field, in power.py's FIELDS order (0.4: 19). */
+export const FIELDS = ["pl1_w", "pl2_w", "gpu_min_mhz", "gpu_max_mhz", "epp", "turbo",
+  "cpu_max_pct", "cpu_min_pct", "soc_balance", "soc_offset", "gpu_power_profile",
+  "cpu_cap_p_mhz", "cpu_cap_e_mhz", "cpu_cap_lpe_mhz", "epp_p", "epp_e", "epp_lpe", "fan_mode", "scx_mode"] as const;
+export const EMPTY: PowerValues = {
+  pl1_w: null, pl2_w: null, gpu_min_mhz: null, gpu_max_mhz: null, epp: null, turbo: null,
+  cpu_max_pct: null, cpu_min_pct: null, soc_balance: null, soc_offset: null, gpu_power_profile: null,
+  cpu_cap_p_mhz: null, cpu_cap_e_mhz: null, cpu_cap_lpe_mhz: null, epp_p: null, epp_e: null, epp_lpe: null,
+  fan_mode: null, scx_mode: null,
+};
+
+/** "Reset to device defaults": every field power control writes back to null; fan and scheduler mode stay. */
+export const RESET: Partial<PowerValues> = Object.fromEntries(
+  FIELDS.filter((f) => f !== "fan_mode" && f !== "scx_mode").map((f) => [f, null])) as Partial<PowerValues>;
+
+export const CORE_TYPES = ["p", "e", "lpe"] as const;
+export const CAP_FIELD: Record<CoreType, "cpu_cap_p_mhz" | "cpu_cap_e_mhz" | "cpu_cap_lpe_mhz"> =
+  { p: "cpu_cap_p_mhz", e: "cpu_cap_e_mhz", lpe: "cpu_cap_lpe_mhz" };
+export const EPP_FIELD: Record<CoreType, "epp_p" | "epp_e" | "epp_lpe"> = { p: "epp_p", e: "epp_e", lpe: "epp_lpe" };
+export const CORE_NAME: Record<CoreType, string> = { p: "Performance cores", e: "Efficient cores", lpe: "Low-power cores" };
+export const CORE_SHORT: Record<CoreType, string> = { p: "performance cores", e: "efficient cores", lpe: "low-power cores" };
+
+/** True when the values use a per-core cap (then the CPU speed cap is off: one or the other). */
+export const usesCaps = (v: Partial<PowerValues> | null | undefined): boolean =>
+  !!v && CORE_TYPES.some((t) => v[CAP_FIELD[t]] != null);
+
+/** The one change that switches to the per-core caps (`caps`: MHz per type) or back to the speed cap (`pct`). */
+export const toCaps = (caps: Partial<Record<CoreType, number>>): Partial<PowerValues> => {
+  const out: Partial<PowerValues> = { cpu_max_pct: null };
+  for (const t of CORE_TYPES) out[CAP_FIELD[t]] = caps[t] ?? null;
+  return out;
+};
+export const toPct = (pct: number | null): Partial<PowerValues> =>
+  ({ cpu_max_pct: pct, cpu_cap_p_mhz: null, cpu_cap_e_mhz: null, cpu_cap_lpe_mhz: null });
+
+/** The CPU minimum speed's slider range: the device's own floor up to 50 %, never above the speed cap. */
+export const minPctRange = (range: Pick<PowerRange, "cpu_min_pct_fw" | "cpu_min_pct_max">, cap: number | null | undefined): { lo: number; hi: number } => {
+  const lo = Math.max(1, Math.round(range.cpu_min_pct_fw ?? 1));
+  const hi = Math.max(lo, Math.min(range.cpu_min_pct_max ?? 50, Math.round(cap ?? 100)));
+  return { lo, hi };
+};
+
+// ---- the polling rate (DESIGN.md "Polling rate") -------------------------------------------------------------------
+
+/** The steps of "How often to check" (s); 0 = Off. */
+export const POLL_STEPS = [0, 2, 3, 5, 10, 15, 20, 30, 45, 60] as const;
+export const POLL_DEFAULT = 2;
+/** The slider index of a poll_s value (the nearest step; an unknown value: the default's). */
+export const pollIndex = (s: number | null | undefined): number => {
+  const v = typeof s === "number" && Number.isFinite(s) ? s : POLL_DEFAULT;
+  let best = 0;
+  for (let i = 1; i < POLL_STEPS.length; i++) if (Math.abs(POLL_STEPS[i] - v) < Math.abs(POLL_STEPS[best] - v)) best = i;
+  return best;
+};
+export const pollValue = (index: number): number => POLL_STEPS[Math.min(POLL_STEPS.length - 1, Math.max(0, Math.round(index)))];
+export const pollText = (s: number): string => (s === 0 ? "Off" : `${s} s`);
 
 /** What a control shows: the stored value, or (null: "firmware") the value applied for it. */
 export const shown = (values: PowerValues | null | undefined, applied: PowerValues | null | undefined): PowerValues => {
@@ -218,7 +272,12 @@ export const idText = (id: string): string => {
   if (m) return `${m[1] ? IFACE.mmio : IFACE.msr}${m[2] !== "0" ? ` ${m[2]}` : ""} ${m[3].toUpperCase()}`;
   const p = /^epp\/(policy\d+)$/.exec(id);
   if (p) return `Energy preference (EPP, ${p[1]})`;
-  return ({ "gpu/min": "GPU min clock", "gpu/max": "GPU max clock", epp: "Energy preference (EPP)", turbo: "CPU boost" } as Record<string, string>)[id] ?? id;
+  const c = /^cpu\/cap\/(policy\d+)$/.exec(id);
+  if (c) return `Core speed cap (${c[1]})`;
+  return ({ "gpu/min": "GPU min clock", "gpu/max": "GPU max clock", epp: "Energy preference (EPP)", turbo: "CPU boost",
+    "cpu/max_pct": "CPU speed cap (max_perf_pct)", "cpu/min_pct": "CPU minimum speed (min_perf_pct)",
+    "soc/balance": "CPU vs GPU balance (slider_balance)", "soc/offset": "Slider offset (slider_offset)",
+    "soc/profile": "SoC power profile (balanced)", "gpu/profile": "GPU power saving (power_profile)" } as Record<string, string>)[id] ?? id;
 };
 
 /**
@@ -238,7 +297,7 @@ export const failedLines = (last: PowerApply | null | undefined, zones?: PowerZo
     }
   }
   for (const f of last?.failed ?? []) {
-    if (lockedIds.has(f.id)) continue;
+    if (lockedIds.has(f.id) || f.transient) continue;
     out.push(f.locked ? `${idText(f.id)} is locked by firmware: the limit cannot go above its value (the CPU uses the lower of the two).`
       : `${idText(f.id)}: ${f.error}`);
   }
@@ -256,7 +315,10 @@ export const plainId = (id: string): string => {
   const m = /\/(pl\d)$/.exec(id);
   if (m) return ({ pl1: "Sustained power", pl2: "Boost power" } as Record<string, string>)[m[1]] ?? "Power limit";
   if (id.startsWith("epp")) return "Energy preference";
-  return ({ "gpu/min": "GPU minimum speed", "gpu/max": "GPU maximum speed", turbo: "CPU boost" } as Record<string, string>)[id] ?? id;
+  if (id.startsWith("cpu/cap/")) return "Core speed cap";
+  if (id.startsWith("soc/")) return "CPU vs GPU balance";
+  return ({ "gpu/min": "GPU minimum speed", "gpu/max": "GPU maximum speed", turbo: "CPU boost", "cpu/max_pct": "CPU speed cap",
+    "cpu/min_pct": "CPU minimum speed", "gpu/profile": "GPU power saving" } as Record<string, string>)[id] ?? id;
 };
 
 /**
@@ -278,7 +340,7 @@ export const capRows = (last: PowerApply | null | undefined, zones?: PowerZone[]
     }
   }
   for (const f of last?.failed ?? []) {
-    if (lockedIds.has(f.id)) continue;
+    if (lockedIds.has(f.id) || f.transient) continue;
     out.push(f.locked ? { label: `${plainId(f.id)}: capped`, line: "The device firmware won't allow a higher limit.", detail: full[i++] }
       : { label: `${plainId(f.id)} didn't apply`, line: null, detail: full[i++] });
   }
@@ -286,11 +348,13 @@ export const capRows = (last: PowerApply | null | undefined, zones?: PowerZone[]
 };
 
 export const STEAM_SUSPECT = { name: "Steam", fix: "Steam's own Performance settings: in Quick Access → Performance, turn off \"TDP limit\" and \"Manual GPU clock\"." };
+export const OTHER_SUSPECT = { name: "Another program", fix: "" };
 
 /** The suspects of a drift, with each one's guidance (from the active conflicts, or Steam's own controls). */
 export const suspects = (o: PowerOverridden, conflicts: PowerConflict[] | null | undefined): { name: string; fix: string }[] =>
   o.suspects.map((id) => {
     if (id === "steam") return STEAM_SUSPECT;
+    if (id === "other") return OTHER_SUSPECT;
     const c = (conflicts ?? []).find((x) => x.id === id);
     return c ? { name: c.name, fix: c.fix } : { name: id, fix: "" };
   });

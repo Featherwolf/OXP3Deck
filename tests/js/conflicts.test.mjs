@@ -158,3 +158,8 @@ test("controls and lockedLine", () => {
   assert.equal(lockedLine(["Power Profiles"]), "Locked by Power Profiles.");
   assert.equal(lockedLine([]), "Locked by another program.");
 });
+
+test("the Fix for me and Undo dialogs carry their effect tag (Now)", () => {
+  assert.equal(fixConfirm({ id: "ppd", name: "power-profiles-daemon", fix_units: ["power-profiles-daemon.service"] }).effect, "now");
+  assert.equal(undoConfirm({ id: "ppd", name: "x", units: [] }, "").effect, "now");
+});

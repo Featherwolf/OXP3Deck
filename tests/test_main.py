@@ -35,7 +35,8 @@ CALLS = {
     "power_info": (False,), "power_state": (), "power_enable": (True,), "power_options": ({"split_ac": True},),
     "power_set": ("default", "main", {"pl1_w": 15}), "power_profile": ("1091500", "Cyberpunk 2077", True),
     "power_game": ("1091500",), "power_take_control": (), "power_import_sdtdp": (),
-    "power_fix": ("ppd",), "power_unfix": ("ppd",),
+    "power_fix": ("ppd",), "power_unfix": ("ppd",), "power_live": (), "extras_info": (),
+    "extras_set": ({"lpmd_game_off": True},), "extras_take_control": ("fan",),
 }
 
 
@@ -93,7 +94,7 @@ class Base(unittest.TestCase):
         self.m = load_main(self.tmp.name)
         # nothing real runs (runuser, oxp3-tool, sysfs writes) unless a test says so (and Plugin()'s _after_restart
         # leaves the real /run alone)
-        for name in ("oxp3tool", "xess", "games", "power"):
+        for name in ("oxp3tool", "xess", "games", "power", "readouts", "extras"):
             setattr(self.m, name, Raising())
         self.p = self.m.Plugin()
         self.assertIsNone(self.p._broken)
@@ -319,6 +320,7 @@ class LifecycleTest(Base):
 
     def test_a_power_module_that_did_not_load_ends_the_loop(self):
         self.m.power = None
+        self.m.extras = None                     # neither part is left
         self.fake("xess", system_protons_need_shim=lambda ctx, settings: False)
 
         async def go():
@@ -351,6 +353,136 @@ class LifecycleTest(Base):
         for value, want in ((True, True), (False, False), ("yes", False), (None, False)):
             call(self.p, "power_info", value)
             self.assertIs(seen[-1], want)
+
+    def run_watch(self, seconds, power=None, extras=None):
+        """_main, `seconds` of the watch loop, _unload, with the given fake modules (None: not loaded)."""
+        self.m.power, self.m.extras = power, extras
+        self.fake("xess", system_protons_need_shim=lambda ctx, settings: False)
+
+        async def go():
+            with mock.patch.object(self.m, "POWER_TICK_S", 0.01):
+                await self.p._main()
+                task = self.p._watch
+                await asyncio.sleep(seconds)
+                done_early = task.done()
+                await self.p._unload()
+                return done_early
+
+        return asyncio.run(go())
+
+    def test_extras_tick_after_power_tick(self):
+        order = []
+        act = {"key": "default", "slot": "main", "app": None, "ac": False, "enabled": True, "values": {}}
+        power = types.SimpleNamespace(tick=lambda ctx: order.append("power"),
+                                      active=lambda ctx: order.append("active") or act,
+                                      refresh=lambda ctx: order.append("refresh") or {"ok": True})
+        seen = []
+
+        def tick(ctx, active):
+            seen.append(active)
+            order.append("extras")
+            return {"ok": True, "did": [], "lpmd_changed": len(seen) == 2}
+
+        extras = types.SimpleNamespace(tick=tick, unload=lambda ctx: order.append("unload"))
+        self.assertFalse(self.run_watch(0.3, power, extras))
+        self.assertEqual(order[:6], ["power", "active", "extras", "power", "active", "extras"])
+        self.assertEqual(order[6], "refresh")                 # the second tick changed intel_lpmd
+        self.assertEqual(order.count("refresh"), 1)
+        self.assertIs(seen[0], act)
+        self.assertEqual(order[-1], "unload")
+
+    def test_a_raising_or_missing_extras_keeps_power_going(self):
+        ticks = []
+        power = types.SimpleNamespace(tick=lambda ctx: ticks.append(1), active=lambda ctx: None,
+                                      refresh=lambda ctx: None)
+        self.assertFalse(self.run_watch(0.2, power, Raising()))
+        self.assertGreater(len(ticks), 2)
+        ticks.clear()
+        self.assertFalse(self.run_watch(0.2, power, None))
+        self.assertGreater(len(ticks), 2)
+
+    def test_a_hung_extras_step_does_not_stop_the_power_tick(self):
+        gate = threading.Event()
+        self.addCleanup(gate.set)
+        ticks, seen = [], []
+        power = types.SimpleNamespace(tick=lambda ctx: ticks.append(1), active=lambda ctx: None,
+                                      refresh=lambda ctx: None)
+        extras = types.SimpleNamespace(tick=lambda ctx, active: seen.append(1) or gate.wait(10) or {"ok": True},
+                                       unload=lambda ctx: None)
+        with self.assertLogs("oxp3deck", "WARNING"):
+            self.assertFalse(self.run_watch(0.3, power, extras))
+        gate.set()
+        self.assertGreater(len(ticks), 5)
+        self.assertEqual(len(seen), 1)                  # not started again while it hangs
+
+    def test_extras_go_on_without_power(self):
+        seen = []
+        extras = types.SimpleNamespace(tick=lambda ctx, active: seen.append(active) or {"ok": True},
+                                       unload=lambda ctx: None)
+        self.assertFalse(self.run_watch(0.2, None, extras))
+        self.assertGreater(len(seen), 2)
+        self.assertEqual(set(map(type, seen)), {type(None)})   # no power module: no active profile
+        seen.clear()
+        self.assertFalse(self.run_watch(0.2, Raising(), extras))
+        self.assertGreater(len(seen), 2)
+
+    def test_unload_puts_the_extras_back_within_its_budget(self):
+        done = []
+        self.fake("extras", unload=lambda ctx: done.append(ctx))
+        asyncio.run(self.p._unload())
+        self.assertEqual(done, [self.p.ctx])
+        slow = threading.Event()
+        self.addCleanup(slow.set)
+        self.fake("extras", unload=lambda ctx: slow.wait(5))
+        async def timed():
+            start = time.monotonic()
+            await self.p._unload()               # asyncio.run itself waits for the executor thread afterwards
+            return time.monotonic() - start
+
+        with mock.patch.object(self.m, "UNLOAD_EXTRAS_S", 0.05):
+            loop = asyncio.new_event_loop()
+            try:
+                self.assertLess(loop.run_until_complete(timed()), 2)
+            finally:
+                slow.set()
+                loop.close()
+
+    def test_power_changes_sync_the_extras(self):
+        answer = {"ok": True, "error": None, "state": {"enabled": True}, "applied": None}
+        act = {"key": "1091500", "app": "1091500", "values": {"fan_mode": "quiet"}}
+        refreshed = []
+        self.fake("power", set_values=lambda ctx, key, slot, values: dict(answer), enable=lambda ctx, on: dict(answer),
+                  options=lambda ctx, opts: dict(answer), profile=lambda ctx, appid, name, on: dict(answer),
+                  game=lambda ctx, appid: dict(answer), take_control=lambda ctx: dict(answer),
+                  active=lambda ctx: act, refresh=lambda ctx: refreshed.append(1))
+        synced = []
+        self.fake("extras", sync=lambda ctx, active: synced.append(active) or {"ok": True, "lpmd_changed": True})
+        for name in ("power_set", "power_enable", "power_options", "power_profile", "power_game",
+                     "power_take_control"):
+            self.assertEqual(call(self.p, name, *CALLS[name]), answer, name)
+        self.assertEqual(synced, [act] * 6)
+        self.assertEqual(len(refreshed), 6)
+        self.m.extras = Raising()                               # a raising sync never changes the power answer
+        self.assertEqual(call(self.p, "power_set", *CALLS["power_set"]), answer)
+        self.m.extras = None
+        self.assertEqual(call(self.p, "power_game", "1091500"), answer)
+
+    def test_extras_calls(self):
+        state = {"fan": {"ours": None}}
+        synced = []
+        self.fake("power", active=lambda ctx: {"key": "default", "values": {}}, refresh=lambda ctx: None)
+        self.fake("extras", info=lambda ctx: {"ok": True, "error": None, "extras": dict(state)},
+                  set_options=lambda ctx, opts: {"ok": True, "error": None, "extras": {"old": True}},
+                  take_control=lambda ctx, what: {"ok": what == "fan", "error": None if what == "fan" else "what?",
+                                                  "extras": {"old": True}},
+                  sync=lambda ctx, active: synced.append(active) or {"ok": True})
+        self.fake("readouts", sample=lambda ctx: {"ok": True, "error": None, "live": {"package_w": 18.4}})
+        self.assertEqual(call(self.p, "extras_info"), {"ok": True, "error": None, "extras": state})
+        self.assertEqual(call(self.p, "extras_set", {"lpmd_game_off": True})["extras"], state)   # after the sync
+        self.assertEqual(call(self.p, "extras_take_control", "fan")["extras"], state)
+        self.assertEqual(call(self.p, "extras_take_control", "x")["extras"], {"old": True})
+        self.assertEqual(len(synced), 3)
+        self.assertEqual(call(self.p, "power_live")["live"], {"package_w": 18.4})
 
     def test_unload_and_uninstall_change_nothing(self):
         with mock.patch.object(sysexec, "run", side_effect=AssertionError("ran a program")):

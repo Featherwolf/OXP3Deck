@@ -40,8 +40,25 @@ RUN_FILE = "power-run.json"
 OXP3_VENDOR, OXP3_PRODUCT = "ONE-NETBOOK", "ONEXPLAYER 3"   # main.py's _device
 
 EPP_CHOICES = powerhw.EPP_CHOICES
-FIELDS = ("pl1_w", "pl2_w", "gpu_min_mhz", "gpu_max_mhz", "epp", "turbo")
-OPTION_DEFAULTS = {"per_game": True, "split_ac": False, "extended": False}
+FIELDS = ("pl1_w", "pl2_w", "gpu_min_mhz", "gpu_max_mhz", "epp", "turbo",
+          "cpu_max_pct", "cpu_min_pct", "soc_balance", "soc_offset", "gpu_power_profile",
+          "cpu_cap_p_mhz", "cpu_cap_e_mhz", "cpu_cap_lpe_mhz", "epp_p", "epp_e", "epp_lpe", "fan_mode", "scx_mode")
+CORE_TYPES = powerhw.CORE_TYPES
+CAP_FIELDS = tuple(f"cpu_cap_{t}_mhz" for t in CORE_TYPES)
+EPP_TYPE_FIELDS = tuple(f"epp_{t}" for t in CORE_TYPES)
+# int fields: (low, high, unit) of what a profile may store
+_INT_BOUNDS = {"pl1_w": (MIN_W, MAX_W, "W"), "pl2_w": (MIN_W, MAX_W, "W"), "gpu_min_mhz": (0, MAX_MHZ, "MHz"),
+               "gpu_max_mhz": (0, MAX_MHZ, "MHz"), "cpu_max_pct": (30, 100, "%"), "cpu_min_pct": (1, 50, "%"),
+               "soc_balance": (1, 5, ""), "soc_offset": (0, 3, ""),
+               **{f: (400, 6000, "MHz") for f in CAP_FIELDS}}
+_CHOICE_FIELDS = {"epp": EPP_CHOICES, **{f: EPP_CHOICES for f in EPP_TYPE_FIELDS},
+                  "gpu_power_profile": powerhw.GPU_PROFILES, "fan_mode": ("auto", "quiet", "max"),
+                  "scx_mode": ("auto", "gaming", "powersave")}
+CPU_PCT_MIN, CPU_MIN_PCT_MAX = 30, 50
+EXCLUSIVE = "use either the CPU speed cap or the per-core caps, not both"
+OPTION_DEFAULTS = {"per_game": True, "split_ac": False, "extended": False, "poll_s": 2}
+POLL_MAX_S = 60                  # poll_s: 0 (Off) or 2..POLL_MAX_S
+PENDING_RETRIES = 30             # transient failures (the GPU asleep) retried at most this often per apply
 _APPID = re.compile(r"^\d{1,10}$")
 
 STEAM_FIX = ("Steam's own Performance settings: in Quick Access → Performance, turn off \"TDP limit\" and "
@@ -160,17 +177,19 @@ def _values_ok(name: str, v):
     """(True, normalised value) or (False, why)."""
     if v is None:
         return True, None
-    if name in ("pl1_w", "pl2_w", "gpu_min_mhz", "gpu_max_mhz"):
+    if name in _INT_BOUNDS:
         if isinstance(v, float) and v.is_integer():
             v = int(v)
         if isinstance(v, bool) or not isinstance(v, int):
             return False, f"{name} must be a whole number or null"
-        lo, hi, unit = (MIN_W, MAX_W, "W") if name.endswith("_w") else (0, MAX_MHZ, "MHz")
+        lo, hi, unit = _INT_BOUNDS[name]
         if not lo <= v <= hi:
-            return False, f"{name} must be {lo}..{hi} {unit}"
+            return False, f"{name} must be {lo}..{hi}{' ' + unit if unit else ''}"
         return True, v
-    if name == "epp":
-        return (True, v) if v in EPP_CHOICES else (False, f"epp must be one of {', '.join(EPP_CHOICES)} or null")
+    if name in _CHOICE_FIELDS:
+        choices = _CHOICE_FIELDS[name]
+        return (True, v) if isinstance(v, str) and v in choices else \
+            (False, f"{name} must be one of {', '.join(choices)} or null")
     if name == "turbo":
         return (True, v) if isinstance(v, bool) else (False, "turbo must be true, false or null")
     return False, f"unknown field {name}"
@@ -192,7 +211,19 @@ def _norm_values(raw, where: str) -> dict:
             out[f] = v
         else:
             log.warning("power.json: %s.%s = %r reads as null: %s", where, f, raw.get(f), v)
+    if _exclusive_broken(out):
+        log.warning("power.json: %s has both the CPU speed cap and per-core caps; the per-core caps read as null",
+                    where)
+        out.update({f: None for f in CAP_FIELDS})
     return out
+
+
+def _exclusive_broken(values: dict) -> bool:
+    return values.get("cpu_max_pct") is not None and any(values.get(f) is not None for f in CAP_FIELDS)
+
+
+def _poll_ok(v) -> bool:
+    return isinstance(v, int) and not isinstance(v, bool) and (v == 0 or 2 <= v <= POLL_MAX_S)
 
 
 def _norm_profile(raw, key: str) -> dict:
@@ -211,7 +242,10 @@ def _norm_data(raw) -> dict:
     raw = raw if isinstance(raw, dict) else {}
     data = {"version": VERSION, "enabled": raw.get("enabled") is True}
     for k, default in OPTION_DEFAULTS.items():
-        data[k] = raw[k] if isinstance(raw.get(k), bool) else default
+        if k == "poll_s":
+            data[k] = raw[k] if _poll_ok(raw.get(k)) else default
+        else:
+            data[k] = raw[k] if isinstance(raw.get(k), bool) else default
     ignore = raw.get("ignore")
     data["ignore"] = sorted({i for i in ignore if i in IGNORABLE}) if isinstance(ignore, list) else []
     profiles = {"default": _norm_profile((raw.get("profiles") or {}).get("default")
@@ -321,6 +355,9 @@ class _Power:
         self.grace_left = 0
         self.drift_seen: str | None = None   # the id that differed at the last tick (flagged when seen twice)
         self.run_warned = False
+        self.last_poll: float | None = None  # the last drift check (poll_s)
+        self.pending: list[str] = []         # ids that failed `transient` at the last apply (the GPU asleep)
+        self.pending_left = 0                # retries left for them
 
 
 def _get(ctx) -> _Power:
@@ -395,9 +432,17 @@ def _limits(ctx, p: _Power, hw: dict, ac, reading: dict | None = None) -> dict:
         pl1_max = bat
     pl2_max = max(fw_pl2 if fw_pl2 is not None else pl1_max, pl1_max)
     g = hw.get("gpu")
+    snap = p.run.get("snapshot") or {}
+    sperf = (snap.get("perf") if "perf" in snap else (reading or {}).get("perf")) or {}
+    cpu = hw.get("cpu") or {}
+    core_types = {t: {"min_mhz": r["min_mhz"], "max_mhz": r["max_mhz"],
+                      "policies": len((cpu.get("types") or {}).get(t) or [])}
+                  for t, r in (cpu.get("type_range") or {}).items()}
     return {"pl1_min": MIN_W, "pl1_max": pl1_max, "pl2_max": pl2_max, "pl1_max_battery": bat, "pl1_max_ac": acw,
             "extended_max": ext, "gpu_min": g["rpn"] if g else None, "gpu_max": g["rp0"] if g else None,
-            "gpu_efficient": g.get("rpe") if g else None, "spec": "oxp3" if oxp3 else "firmware"}
+            "gpu_efficient": g.get("rpe") if g else None, "spec": "oxp3" if oxp3 else "firmware",
+            "cpu_pct_min": CPU_PCT_MIN, "cpu_min_pct_fw": sperf.get("min") if isinstance(sperf.get("min"), int)
+            else None, "cpu_min_pct_max": CPU_MIN_PCT_MAX, "core_types": core_types}
 
 
 def _active(p: _Power, ac) -> tuple[str, str, dict]:
@@ -415,27 +460,115 @@ def _profile_name(p: _Power, key: str) -> str:
     return p.data["profiles"].get(key, {}).get("name") or f"App {key}"
 
 
-def _cpu_rows(p: _Power) -> list[dict]:
-    return [r for r in _present(p) if r["kind"] == "cpu" and not r["ignored"]]
+_CPU_KIND = tuple(k for k, v in CONFLICTS.items() if v[1] == "cpu")
+# Which active (not ignored) conflicts keep OXP3 Deck from writing a field group: power-profiles-daemon sets EPP
+# and boost but not the speed cap or the slider (it cooperates with the slider: its `balanced` uses our value)
+FIELD_BLOCKERS = {
+    "epp": _CPU_KIND,
+    "turbo": _CPU_KIND,
+    "cpu_pct": ("intel_lpmd", "tuned"),
+    "cpu_caps": ("intel_lpmd", "tuned"),
+    "soc": ("intel_lpmd",),
+    "gpu_profile": (),
+}
 
 
-def _cpu_blocked(p: _Power) -> str | None:
-    rows = _cpu_rows(p)
+def _lpmd_paused(ctx) -> bool:
+    """extras.py has intel_lpmd in LPM_FORCE_OFF for the running game (then it blocks nothing). Imported lazily:
+    a missing or failing extras module reads as False."""
+    try:
+        from . import extras
+        return extras.lpmd_paused(ctx) is True
+    except Exception:
+        return False
+
+
+def _blocking_rows(ctx, p: _Power) -> list[dict]:
+    """The active, not ignored "cpu" conflicts (intel_lpmd left out while extras has it paused)."""
+    rows = [r for r in _present(p) if r["kind"] == "cpu" and not r["ignored"]]
+    if any(r["id"] == "intel_lpmd" for r in rows) and _lpmd_paused(ctx):
+        rows = [r for r in rows if r["id"] != "intel_lpmd"]
+    return rows
+
+
+def _blocked_fields(ctx, p: _Power) -> dict:
+    """{field group: [conflict ids]} of the groups that are blocked now (only those)."""
+    rows = [r["id"] for r in _blocking_rows(ctx, p)]
+    out = {}
+    for group, ids in FIELD_BLOCKERS.items():
+        hit = [r for r in rows if r in ids]
+        if hit:
+            out[group] = hit
+    return out
+
+
+def _group(item: str) -> str | None:
+    """The field group of an `ours` id (None: power limits and GPU clocks, which only "blocks" conflicts stop)."""
+    if item == "epp" or item.startswith("epp/"):
+        return "epp"
+    if item == "turbo":
+        return "turbo"
+    if item in ("cpu/max_pct", "cpu/min_pct"):
+        return "cpu_pct"
+    if item.startswith("cpu/cap/"):
+        return "cpu_caps"
+    if item.startswith("soc/"):
+        return "soc"
+    if item == "gpu/profile":
+        return "gpu_profile"
+    return None
+
+
+def _cpu_rows(ctx, p: _Power) -> list[dict]:
+    """The conflicts behind cpu_blocked (EPP and boost)."""
+    ids = set((_blocked_fields(ctx, p).get("epp") or []))
+    return [r for r in _blocking_rows(ctx, p) if r["id"] in ids]
+
+
+def _cpu_blocked(ctx, p: _Power) -> str | None:
+    rows = _cpu_rows(ctx, p)
     if not rows:
         return None
     names = ", ".join(r["name"] for r in rows)
     return f"{names} {'controls' if len(rows) == 1 else 'control'} energy preference and CPU boost"
 
 
+def _snap_or(snap: dict, reading: dict | None, key: str):
+    """The snapshot's `key`, or (before one is taken) the reading's."""
+    if snap and key in snap:
+        return snap.get(key)
+    return (reading or {}).get(key)
+
+
+def _first_policies(hw: dict) -> dict:
+    """{core type: its first policy}."""
+    types = (hw.get("cpu") or {}).get("types") or {}
+    return {t: pols[0] for t, pols in types.items() if pols}
+
+
+def _policy_types(hw: dict) -> dict:
+    """{policy: core type}."""
+    out = {}
+    for t, pols in ((hw.get("cpu") or {}).get("types") or {}).items():
+        for pol in pols:
+            out[pol] = t
+    return out
+
+
+def _epp_split(values: dict) -> bool:
+    return any(values.get(f) is not None for f in EPP_TYPE_FIELDS)
+
+
 def _resolve(ctx, p: _Power, values: dict, ac, reading: dict | None = None) -> tuple[dict, dict]:
-    """(Target for powerhw.apply, the applied values in W/MHz): clamped to the range of the moment, nulls filled
-    with the boot snapshot (or, before one is taken, with `reading`)."""
+    """(Target for powerhw.apply, the applied values in W/MHz/%): clamped to the range of the moment, nulls filled
+    with the boot snapshot (or, before one is taken, with `reading`). A blocked field group is left out."""
     hw = _hw(ctx, p)
     rng = _limits(ctx, p, hw, ac, reading)
     snap = p.run.get("snapshot") or {}
-    if not snap and reading is None:
+    if (not snap or any(k not in snap for k in _SNAP_NEW)) and reading is None:
         reading = powerhw.read(ctx, hw, gpu=hw.get("gpu") is not None)
     base_rapl = snap.get("rapl") if snap else reading["rapl"]
+    blocked = _blocked_fields(ctx, p)
     target: dict = {}
     pl1, pl2 = values.get("pl1_w"), values.get("pl2_w")
     if pl1 is not None:
@@ -469,37 +602,146 @@ def _resolve(ctx, p: _Power, values: dict, ac, reading: dict | None = None) -> t
         tg = {k: v for k, v in (("min", lo), ("max", hi)) if v is not None}
         if tg:
             target["gpu"] = tg
+        if g.get("power_profile") and "gpu_profile" not in blocked:
+            gp = values.get("gpu_power_profile")
+            if gp is None:
+                gp = snap["gpu_profile"] if "gpu_profile" in snap else ((reading or {}).get("gpu") or {}).get("profile")
+            if gp in powerhw.GPU_PROFILES:
+                target["gpu_profile"] = gp
     cpu = hw.get("cpu") or {}
-    if _cpu_blocked(p) is None:
-        sepp = (snap.get("epp") if snap else (reading or {}).get("epp")) or {}
-        if cpu.get("epp"):
-            if values.get("epp") is not None:
-                target["epp"] = values["epp"]
-            else:
-                base = {k: v for k, v in sepp.items() if isinstance(v, str)}
-                if base:
-                    target["epp"] = base
-        sturbo = snap.get("turbo") if snap else (reading or {}).get("turbo")
-        if cpu.get("turbo"):
-            t = values.get("turbo") if values.get("turbo") is not None else sturbo
-            if isinstance(t, bool):
-                target["turbo"] = t
+    ptype = _policy_types(hw)
+    if "epp" not in blocked and cpu.get("epp"):
+        sepp = _snap_or(snap, reading, "epp") or {}
+        base = {k: v for k, v in sepp.items() if isinstance(v, str)}
+        if _epp_split(values):
+            want = {}
+            for pol in cpu.get("policies") or []:
+                v = values.get(f"epp_{ptype.get(pol, 'p')}") or values.get("epp") or base.get(pol)
+                if v is not None:
+                    want[pol] = v
+            if want:
+                target["epp"] = want
+        elif values.get("epp") is not None:
+            target["epp"] = values["epp"]
+        elif base:
+            target["epp"] = base
+    if "turbo" not in blocked and cpu.get("turbo"):
+        sturbo = _snap_or(snap, reading, "turbo")
+        t = values.get("turbo") if values.get("turbo") is not None else sturbo
+        if isinstance(t, bool):
+            target["turbo"] = t
+    sperf = _snap_or(snap, reading, "perf") or {}
+    if cpu.get("perf_pct") and "cpu_pct" not in blocked and isinstance(sperf.get("max"), int) \
+            and isinstance(sperf.get("min"), int):
+        mx = values.get("cpu_max_pct") if values.get("cpu_max_pct") is not None else sperf["max"]
+        mn = sperf["min"]
+        if ac is True and values.get("cpu_min_pct") is not None:      # the floor costs power: AC only
+            mn = _clamp(values["cpu_min_pct"], sperf["min"], max(sperf["min"], min(CPU_MIN_PCT_MAX, mx)))
+        target["perf"] = {"max": mx, "min": min(mn, mx)}
+    scaps = _snap_or(snap, reading, "caps") or {}
+    if ptype and "cpu_caps" not in blocked:
+        caps = {}
+        for pol, t in ptype.items():
+            v = values.get(f"cpu_cap_{t}_mhz")
+            v = v * 1000 if v is not None else scaps.get(pol)
+            if isinstance(v, int):
+                caps[pol] = v
+        if caps:
+            target["caps"] = caps
+    ssoc = _snap_or(snap, reading, "soc") or {}
+    if hw.get("soc") and "soc" not in blocked:
+        sb = values.get("soc_balance") if values.get("soc_balance") is not None else ssoc.get("balance")
+        so = values.get("soc_offset") if values.get("soc_offset") is not None else ssoc.get("offset")
+        ts = {k: v for k, v in (("balance", sb), ("offset", so)) if isinstance(v, int)}
+        if ts:
+            target["soc"] = ts
     pol0 = (cpu.get("policies") or [None])[0]
     rt = (target.get("rapl") or {}).values()
     t1 = [t["pl1_uw"] for t in rt if "pl1_uw" in t]
     t2 = [t["pl2_uw"] for t in rt if "pl2_uw" in t]
     epp = target.get("epp")
+    firsts = _first_policies(hw)
+    perf = target.get("perf") or {}
+    caps = target.get("caps") or {}
+    soc = target.get("soc") or {}
     applied = {
         "pl1_w": _w(min(t1)) if t1 else None, "pl2_w": _w(min(t2)) if t2 else None,
         "gpu_min_mhz": (target.get("gpu") or {}).get("min"), "gpu_max_mhz": (target.get("gpu") or {}).get("max"),
         "epp": epp if isinstance(epp, str) else epp.get(pol0) if isinstance(epp, dict) else None,
         "turbo": target.get("turbo"),
+        "cpu_max_pct": perf.get("max"), "cpu_min_pct": perf.get("min"),
+        "soc_balance": soc.get("balance"), "soc_offset": soc.get("offset"),
+        "gpu_power_profile": target.get("gpu_profile"),
+        "fan_mode": values.get("fan_mode"), "scx_mode": values.get("scx_mode"),
     }
+    for t in CORE_TYPES:
+        pol = firsts.get(t)
+        cap = caps.get(pol) if pol else None
+        applied[f"cpu_cap_{t}_mhz"] = cap // 1000 if isinstance(cap, int) else None
+        applied[f"epp_{t}"] = (epp if isinstance(epp, str) else epp.get(pol) if isinstance(epp, dict) else None) \
+            if pol else None
     return target, applied
 
 
+_SNAP_NEW = ("perf", "caps", "soc", "gpu_profile")   # added in 0.4: filled into a 0.3 snapshot of this boot
+
+
+def _snap_new(r: dict) -> dict:
+    soc = r.get("soc")
+    caps = r.get("caps")
+    return {"perf": dict(r["perf"]) if r.get("perf") else None,
+            "caps": {k: v for k, v in caps.items() if isinstance(v, int)} if caps else None,
+            "soc": {"balance": soc["balance"], "offset": soc["offset"]} if soc else None,
+            "gpu_profile": (r.get("gpu") or {}).get("profile")}
+
+
+# The snapshot groups another program may already have rewritten (intel_lpmd's Panther Lake config sets
+# MinPerfPctAC 50 and its own slider values; tuned sets the cap): while one of them is present at snapshot time,
+# ignored or paused or not, its values are its leftovers, and stay until reboot even after it stops.
+_SNAP_TAINT = {"perf": FIELD_BLOCKERS["cpu_pct"], "soc": FIELD_BLOCKERS["soc"]}
+
+
+def _driver_floor(ctx, hw: dict) -> int | None:
+    """intel_pstate's own min_perf_pct while nobody has changed it: min_pstate * 100 // turbo_pstate of CPU 0 (as
+    min_perf_pct_min()), from policy0's cpuinfo frequencies, plus 1 so a rounding difference stays inside the
+    driver's range."""
+    pol = ((hw.get("cpu") or {}).get("policies") or ["policy0"])[0]
+    lo = powerhw._int(powerhw._read(powerhw._policy_file(ctx, pol, "cpuinfo_min_freq")))
+    hi = powerhw._int(powerhw._read(powerhw._policy_file(ctx, pol, "cpuinfo_max_freq")))
+    if not lo or not hi or lo >= hi:
+        return None
+    return min(CPU_MIN_PCT_MAX, lo * 100 // hi + 1)
+
+
+def _snap_untaint(ctx, p: _Power, hw: dict, new: dict) -> None:
+    """Replace the tainted groups of a new snapshot with the drivers' defaults (cap 100, the driver's floor,
+    slider 3 offset 0)."""
+    present = {r["id"] for r in _rows(ctx, p) if r["kind"] == "cpu"}
+    for key, ids in _SNAP_TAINT.items():
+        hit = sorted(present & set(ids))
+        if not hit or not new.get(key):
+            continue
+        if key == "perf":
+            fl = _driver_floor(ctx, hw)
+            cur = new["perf"].get("min")
+            new["perf"] = {"max": 100, "min": min(fl, cur) if isinstance(cur, int) and fl else fl or cur}
+        else:
+            new["soc"] = {"balance": 3, "offset": 0}
+        log.info("power: boot snapshot: %s present, %s taken as the driver defaults %s", ", ".join(hit), key,
+                 new[key])
+
+
 def _ensure_snapshot(ctx, p: _Power) -> None:
-    if p.run.get("snapshot"):
+    snap = p.run.get("snapshot")
+    if snap:
+        missing = [k for k in _SNAP_NEW if k not in snap]
+        if missing:      # a plugin upgraded in the middle of a boot: fill the missing keys only, never retake
+            hw = _hw(ctx, p)
+            new = _snap_new(powerhw.read(ctx, hw, gpu=False))
+            _snap_untaint(ctx, p, hw, new)
+            snap.update({k: new[k] for k in missing})
+            log.info("power: boot snapshot filled in: %s", {k: new[k] for k in missing})
+            _save_run(ctx, p)
         return
     hw = _hw(ctx, p)
     r = powerhw.read(ctx, hw, gpu=hw.get("gpu") is not None)
@@ -508,6 +750,8 @@ def _ensure_snapshot(ctx, p: _Power) -> None:
     # is the firmware's.
     pl2s = [v.get("pl2_uw") for v in r["rapl"].values() if isinstance(v.get("pl2_uw"), int) and v["pl2_uw"] > 0]
     top = max(pl2s) if pl2s else None
+    new = _snap_new(r)
+    _snap_untaint(ctx, p, hw, new)
     p.run["snapshot"] = {
         "taken_at": time.time(),
         "rapl": {zid: {"pl1_uw": v.get("pl1_uw"), "pl2_uw": top if isinstance(v.get("pl2_uw"), int) and
@@ -516,12 +760,13 @@ def _ensure_snapshot(ctx, p: _Power) -> None:
         "gpu": {"min": r["gpu"]["min"], "max": r["gpu"]["max"]} if r.get("gpu") else None,
         "epp": dict(r["epp"]) if r.get("epp") else None,
         "turbo": r.get("turbo"),
+        **new,
     }
     log.info("power: boot snapshot taken: %s", p.run["snapshot"])
     _save_run(ctx, p)
 
 
-def _ours(hw: dict, target: dict, res: dict, locked: list) -> dict:
+def _ours(hw: dict, target: dict, res: dict, locked: list, split: bool = False) -> dict:
     """What the apply left in place (written, or already equal), as read back."""
     failed = {f["id"] for f in res["failed"]}
     reading = res["reading"]
@@ -538,25 +783,54 @@ def _ours(hw: dict, target: dict, res: dict, locked: list) -> dict:
             ours[f"gpu/{k}"] = got
     pol0 = ((hw.get("cpu") or {}).get("policies") or [None])[0]
     if "epp" in target and not any(f == "epp" or f.startswith("epp/") for f in failed):
-        got = (reading.get("epp") or {}).get(pol0)
-        if got is not None:
-            ours["epp"] = got
+        if split:
+            for pol in _first_policies(hw).values():
+                got = (reading.get("epp") or {}).get(pol)
+                if got is not None:
+                    ours[f"epp/{pol}"] = got
+        else:
+            got = (reading.get("epp") or {}).get(pol0)
+            if got is not None:
+                ours["epp"] = got
     if "turbo" in target and "turbo" not in failed and reading.get("turbo") is not None:
         ours["turbo"] = reading["turbo"]
+    perf = reading.get("perf") or {}
+    for k in ("max", "min"):
+        item = f"cpu/{k}_pct"
+        want = (target.get("perf") or {}).get(k)
+        if want is not None and item not in failed and perf.get(k) == want:
+            ours[item] = perf[k]
+    caps = reading.get("caps") or {}
+    for pol in _first_policies(hw).values():
+        item = f"cpu/cap/{pol}"
+        if pol in (target.get("caps") or {}) and item not in failed and caps.get(pol) is not None:
+            ours[item] = caps[pol]
+    soc = reading.get("soc") or {}
+    for k in ("balance", "offset"):      # only when it reads what was asked (slider_balance reads its old value
+        item = f"soc/{k}"                # until a profile write)
+        want = (target.get("soc") or {}).get(k)
+        if want is not None and item not in failed and soc.get(k) == want:
+            ours[item] = want
+    gp = target.get("gpu_profile")
+    if gp is not None and "gpu/profile" not in failed and (reading.get("gpu") or {}).get("profile") == gp:
+        ours["gpu/profile"] = gp
     return ours
 
 
-def _do_apply(ctx, p: _Power, target: dict) -> dict:
+def _do_apply(ctx, p: _Power, target: dict, split: bool = False, retry: bool = False) -> dict:
     hw = _hw(ctx, p)
     res = powerhw.apply(ctx, hw, target, p.run["locked"])
     newly = [f["id"] for f in res["failed"] if f.get("locked")]
     if newly:
         log.warning("power: locked by firmware this boot: %s", ", ".join(newly))
     p.run["locked"] = sorted(set(p.run["locked"]) | set(newly))
-    p.run["ours"] = _ours(hw, target, res, p.run["locked"])
+    p.run["ours"] = _ours(hw, target, res, p.run["locked"], split)
     p.last = {"ok": res["ok"], "error": res["error"], "written": res["written"], "failed": res["failed"]}
     p.started = True
     p.drift_seen = None
+    p.pending = [f["id"] for f in res["failed"] if f.get("transient")]
+    if not retry:
+        p.pending_left = PENDING_RETRIES
     if res["written"] or res["failed"]:
         log.info("power: wrote %s%s", ", ".join(res["written"]) or "nothing",
                  f"; failed: {res['error']}" if res["failed"] else "")
@@ -564,22 +838,23 @@ def _do_apply(ctx, p: _Power, target: dict) -> dict:
     return p.last
 
 
-def _apply(ctx, p: _Power) -> dict:
+def _apply(ctx, p: _Power, retry: bool = False) -> dict:
     """Resolve the active profile and write it."""
     _hw(ctx, p)
     _ensure_snapshot(ctx, p)
     ac = powerhw.ac_online(ctx)
     _key, _slot, values = _active(p, ac)
     target, _applied = _resolve(ctx, p, values, ac)
-    return _do_apply(ctx, p, target)
+    return _do_apply(ctx, p, target, split=_epp_split(values) and "epp" in target, retry=retry)
 
 
 def _restore(ctx, p: _Power) -> dict | None:
-    """Write the boot snapshot back ("TDP control" off)."""
+    """Write the boot snapshot back ("TDP control" off); a blocked field group is left to its program."""
     snap = p.run.get("snapshot")
     if not snap:
         return None
     hw = _hw(ctx, p)
+    blocked = _blocked_fields(ctx, p)
     target: dict = {}
     rapl = {zid: {k: v for k, v in vals.items() if k in ("pl1_uw", "pl2_uw") and isinstance(v, int)}
             for zid, vals in (snap.get("rapl") or {}).items() if isinstance(vals, dict)}
@@ -590,21 +865,39 @@ def _restore(ctx, p: _Power) -> dict | None:
         tg = {k: v for k, v in snap["gpu"].items() if k in ("min", "max") and isinstance(v, int)}
         if tg:
             target["gpu"] = tg
-    if _cpu_blocked(p) is None:
-        if isinstance(snap.get("epp"), dict):
-            e = {k: v for k, v in snap["epp"].items() if isinstance(v, str)}
-            if e:
-                target["epp"] = e
-        if isinstance(snap.get("turbo"), bool):
-            target["turbo"] = snap["turbo"]
+    if "epp" not in blocked and isinstance(snap.get("epp"), dict):
+        e = {k: v for k, v in snap["epp"].items() if isinstance(v, str)}
+        if e:
+            target["epp"] = e
+    if "turbo" not in blocked and isinstance(snap.get("turbo"), bool):
+        target["turbo"] = snap["turbo"]
+    cpu = hw.get("cpu") or {}
+    perf = snap.get("perf")
+    if cpu.get("perf_pct") and "cpu_pct" not in blocked and isinstance(perf, dict) \
+            and isinstance(perf.get("max"), int) and isinstance(perf.get("min"), int):
+        target["perf"] = {"max": perf["max"], "min": perf["min"]}
+    caps = snap.get("caps")
+    if "cpu_caps" not in blocked and isinstance(caps, dict):
+        tc = {k: v for k, v in caps.items() if k in (cpu.get("policies") or []) and isinstance(v, int)}
+        if tc:
+            target["caps"] = tc
+    soc = snap.get("soc")
+    if hw.get("soc") and "soc" not in blocked and isinstance(soc, dict):
+        ts = {k: soc[k] for k in ("balance", "offset") if isinstance(soc.get(k), int)}
+        if ts:
+            target["soc"] = ts
+    if (hw.get("gpu") or {}).get("power_profile") and snap.get("gpu_profile") in powerhw.GPU_PROFILES:
+        target["gpu_profile"] = snap["gpu_profile"]
     res = _do_apply(ctx, p, target)
     p.run["ours"] = {}
+    p.pending = []
     _save_run(ctx, p)
     return res
 
 
 def _whole_failure(p: _Power, applied: dict | None) -> bool:
-    real = [f for f in (applied or {}).get("failed") or [] if not f["id"].endswith("/pl4")]   # pl4: a warning
+    # pl4 is a warning; a transient failure (the GPU asleep) is retried by tick, not an error
+    real = [f for f in (applied or {}).get("failed") or [] if not f["id"].endswith("/pl4") and not f.get("transient")]
     return bool(applied and real and not applied["written"])
 
 
@@ -816,34 +1109,53 @@ def _update_blocked(ctx, p: _Power) -> bool:
 def _fmt(item: str, v) -> str:
     if v is None:
         return "unreadable"
+    if item.startswith("cpu/cap/"):
+        return f"{v // 1000} MHz" if isinstance(v, int) else str(v)
+    if item in ("cpu/max_pct", "cpu/min_pct"):
+        return f"{v} %"
+    if item == "gpu/profile" or item.startswith("soc/") or item == "epp" or item.startswith("epp/"):
+        return str(v)
     if item.startswith("gpu/"):
         return f"{v} MHz"
     if item == "turbo":
         return "on" if v else "off"
-    if item == "epp":
-        return str(v)
     return f"{_w(v):g} W"
 
 
 def _drift(p: _Power, reading: dict, gpu_only: bool) -> tuple | None:
-    """(id, ours, now) of the first value that differs from what the last apply left, else None."""
+    """(id, ours, now) of the first value that differs from what the last apply left, else None. gpu_only: the GPU
+    clocks only (they wake the GPU, so only state() reads them)."""
     hw = p.hw or {}
     pol0 = ((hw.get("cpu") or {}).get("policies") or [None])[0]
     for item, want in sorted(p.run["ours"].items()):
-        if item.startswith("gpu/"):
+        if item in ("gpu/min", "gpu/max"):
             got = (reading.get("gpu") or {}).get(item[4:])
             differs = got is not None and abs(got - want) > powerhw.GPU_TOLERANCE_MHZ
         elif gpu_only:
             continue
-        elif item == "epp":
-            got = (reading.get("epp") or {}).get(pol0)
+        elif item == "gpu/profile":
+            got = (reading.get("gpu") or {}).get("profile")
+            differs = got is not None and got != want
+        elif item == "epp" or item.startswith("epp/"):
+            got = (reading.get("epp") or {}).get(pol0 if item == "epp" else item[4:])
             differs = got is not None and got != want
         elif item == "turbo":
             got = reading.get("turbo")
             differs = got is not None and got != want
+        elif item in ("cpu/max_pct", "cpu/min_pct"):
+            got = (reading.get("perf") or {}).get(item[4:7])
+            differs = got is not None and got != want
+        elif item.startswith("cpu/cap/"):
+            got = (reading.get("caps") or {}).get(item[len("cpu/cap/"):])
+            differs = got is not None and isinstance(want, int) and abs(got - want) > powerhw.CAP_TOLERANCE_KHZ
+        elif item.startswith("soc/"):
+            # the slider's values, not the platform profile: power-profiles-daemon switching the profile is its
+            # own business, not drift
+            got = (reading.get("soc") or {}).get(item[4:])
+            differs = got is not None and got != want
         else:
             zid, _, k = item.rpartition("/")
-            got = reading["rapl"].get(zid, {}).get(f"{k}_uw")
+            got = (reading.get("rapl") or {}).get(zid, {}).get(f"{k}_uw")
             differs = got is not None and abs(got - want) > powerhw.RAPL_TOLERANCE_UW
         if differs:
             return item, want, got
@@ -851,10 +1163,20 @@ def _drift(p: _Power, reading: dict, gpu_only: bool) -> tuple | None:
 
 
 def _suspects(p: _Power, item: str) -> list[str]:
-    """Conflict ids that can change `item`: EPP and turbo the "cpu" kind, power limits and GPU clocks the "blocks"
-    kind (ignored ones too: one may have been ignored by mistake); else Steam's own controls."""
-    kind = "cpu" if item in ("epp", "turbo") else "blocks"
-    return [r["id"] for r in _present(p) if r["kind"] == kind] or ["steam"]
+    """Conflict ids that can change `item` (ignored ones too: one may have been ignored by mistake): EPP and turbo
+    the "cpu" kind; the CPU speed controls and the slider the "cpu" kind and Handheld Daemon; power limits and GPU
+    settings the "blocks" kind. None found: Steam's own controls for power limits and GPU clocks, else "other"."""
+    rows = _present(p)
+    group = _group(item)
+    if group in ("epp", "turbo"):
+        found = [r["id"] for r in rows if r["kind"] == "cpu"]
+    elif group in ("cpu_pct", "cpu_caps", "soc"):
+        found = [r["id"] for r in rows if r["kind"] == "cpu" or r["id"] == "hhd"]
+    else:
+        found = [r["id"] for r in rows if r["kind"] == "blocks"]
+    if found:
+        return found
+    return ["other"] if group is not None else ["steam"]
 
 
 def _on_drift(ctx, p: _Power, d: tuple, now: float, confirm: bool) -> str:
@@ -866,9 +1188,11 @@ def _on_drift(ctx, p: _Power, d: tuple, now: float, confirm: bool) -> str:
     if p.blocked:
         p.drift_seen = None
         return "blocked"
-    if item in ("epp", "turbo") and _cpu_blocked(p):
-        for k in ("epp", "turbo"):      # left to the CPU daemon that has just started: no longer ours
-            p.run["ours"].pop(k, None)
+    group = _group(item)
+    blocked = _blocked_fields(ctx, p)
+    if group is not None and group in blocked:
+        # left to the CPU daemon that has just started: every field group it blocks is no longer ours
+        p.run["ours"] = {k: v for k, v in p.run["ours"].items() if _group(k) not in blocked}
         p.drift_seen = None
         _save_run(ctx, p)
         return "nothing"
@@ -921,6 +1245,10 @@ def _state(ctx, p: _Power, reading: dict | None = None) -> dict:
     pl1s = [z["pl1_w"] for z in zones if z["pl1_w"] is not None]
     pl2s = [z["pl2_w"] for z in zones if z["pl2_w"] is not None]
     g = reading.get("gpu")
+    firsts = _first_policies(hw)
+    perf = reading.get("perf") or {}
+    caps = reading.get("caps") or {}
+    epp_now = reading.get("epp")
     return {
         "enabled": p.data["enabled"],
         "active": {"key": key, "name": _profile_name(p, key), "slot": slot, "app": p.run.get("app"), "ac": ac},
@@ -929,12 +1257,20 @@ def _state(ctx, p: _Power, reading: dict | None = None) -> dict:
         "now": {"pl1_w": min(pl1s) if pl1s else None, "pl2_w": min(pl2s) if pl2s else None, "zones": zones,
                 "gpu": {"min": g["min"], "max": g["max"], "act": g["act"], "reasons": g["reasons"]} if g else None,
                 "epp": _epp_summary(reading.get("epp")), "turbo": reading.get("turbo"),
-                "governor": reading.get("governor")},
+                "governor": reading.get("governor"),
+                "cpu_max_pct": perf.get("max"), "cpu_min_pct": perf.get("min"),
+                "caps_mhz": {t: caps[pol] // 1000 if isinstance(caps.get(pol), int) else None
+                             for t, pol in firsts.items()},
+                "soc": dict(reading["soc"]) if reading.get("soc") else None,
+                "gpu_profile": g.get("profile") if g else None,
+                "epp_types": {t: (epp_now or {}).get(pol) if epp_now is not None else None
+                              for t, pol in firsts.items()}},
         "range": _limits(ctx, p, hw, ac, reading),
         "overridden": p.run.get("overridden"),
         "blocked": p.blocked,
-        "cpu_blocked": _cpu_blocked(p),
-        "cpu_blocked_by": [r["id"] for r in _cpu_rows(p)],
+        "blocked_fields": _blocked_fields(ctx, p),
+        "cpu_blocked": _cpu_blocked(ctx, p),
+        "cpu_blocked_by": [r["id"] for r in _cpu_rows(ctx, p)],
         "last": p.last,
     }
 
@@ -999,11 +1335,16 @@ def info(ctx, refresh: bool) -> dict:
         return {"ok": True, "error": None, "info": {
             "hw": {"rapl": any(z["iface"] == "msr" for z in hw["rapl"]),
                    "mmio": any(z["iface"] == "mmio" for z in hw["rapl"]),
-                   "gpu": {k: hw["gpu"][k] for k in ("card", "gt", "media_gt")} if hw.get("gpu") else None,
-                   "cpu": {"pstate": cpu["pstate"], "epp_choices": list(cpu["epp_choices"]), "turbo": cpu["turbo"]}
+                   "gpu": dict({k: hw["gpu"][k] for k in ("card", "gt", "media_gt")},
+                               power_profile=bool(hw["gpu"].get("power_profile"))) if hw.get("gpu") else None,
+                   "cpu": {"pstate": cpu["pstate"], "epp_choices": list(cpu["epp_choices"]), "turbo": cpu["turbo"],
+                           "perf_pct": bool(cpu.get("perf_pct")),
+                           "types": [t for t in CORE_TYPES if t in (cpu.get("types") or {})]}
                    if cpu else None,
+                   "soc": hw.get("soc") is not None,
                    "ac_supply": hw.get("ac_supply"), "problems": list(hw.get("problems") or [])},
-            "options": {k: copy.deepcopy(p.data[k]) for k in ("per_game", "split_ac", "extended", "ignore")},
+            "options": {k: copy.deepcopy(p.data[k]) for k in ("per_game", "split_ac", "extended", "ignore",
+                                                              "poll_s")},
             "profiles": copy.deepcopy(p.data["profiles"]),
             "conflicts": rows,
             "fixed": _fixed_all(p),
@@ -1071,7 +1412,11 @@ def options(ctx, opts) -> dict:
             return _refuse(ctx, p, "power_options: opts must be an object")
         new = {}
         for k, v in opts.items():
-            if k in OPTION_DEFAULTS:
+            if k == "poll_s":
+                if not _poll_ok(v):
+                    return _refuse(ctx, p, f"power_options: poll_s must be 0 (Off) or 2..{POLL_MAX_S} seconds")
+                new[k] = v
+            elif k in OPTION_DEFAULTS:
                 if not isinstance(v, bool):
                     return _refuse(ctx, p, f"power_options: {k} must be true or false")
                 new[k] = v
@@ -1091,9 +1436,12 @@ def options(ctx, opts) -> dict:
             p.data.update(old)
             return _refuse(ctx, p, err)
         applied = None
-        if p.data["enabled"]:
+        if "poll_s" in new:
+            p.last_poll = None           # the next tick checks with the new rate
+        writes = {k: v for k, v in new.items() if k != "poll_s"}
+        if p.data["enabled"] and writes:
             cleared = _update_blocked(ctx, p) if "ignore" in new else False
-            if (cleared or new != old) and _may_write(ctx, p):
+            if (cleared or writes != {k: old[k] for k in writes}) and _may_write(ctx, p):
                 applied = _apply(ctx, p)
         return _changed(ctx, p, applied)
 
@@ -1117,6 +1465,10 @@ def set_values(ctx, key, slot, values) -> dict:
             clean[f] = nv
         old = copy.deepcopy(p.data["profiles"][key])
         prof = p.data["profiles"][key]
+        merged = dict(prof["main"] if slot == "ac" and prof["ac"] is None else prof[slot])
+        merged.update(clean)
+        if _exclusive_broken(merged):
+            return _refuse(ctx, p, f"power_set: {EXCLUSIVE}")
         if slot == "ac" and prof["ac"] is None:
             prof["ac"] = dict(prof["main"])
         prof[slot].update(clean)
@@ -1261,7 +1613,12 @@ def _after_change(ctx, p: _Power, apply_cpu: bool) -> dict | None:
     return None
 
 
-def _lpmd_note(ctx) -> str | None:
+def _lpmd_note(ctx, p: _Power) -> str | None:
+    # OXP3 Deck's own speed cap is not a leftover. Not "cpu/max_pct in ours": the cap is always in the target (a
+    # blank cap is the snapshot's value), so that would hide intel_lpmd's leftover.
+    if p.data["enabled"] and "cpu/max_pct" in p.run["ours"] and \
+            _active(p, powerhw.ac_online(ctx))[2].get("cpu_max_pct") is not None:
+        return None
     raw = _text(ctx.sys_path("/sys/devices/system/cpu/intel_pstate/max_perf_pct"), 16)
     if raw.isdigit() and int(raw) < 100:
         return f"Intel's low-power daemon left the CPU's top speed at {int(raw)} %; a reboot restores it"
@@ -1348,7 +1705,7 @@ def fix(ctx, cid) -> dict:
         applied = _after_change(ctx, p, CONFLICTS[cid][1] == "cpu")
         notes = []
         if cid == "intel_lpmd":
-            note = _lpmd_note(ctx)
+            note = _lpmd_note(ctx, p)
             if note:
                 notes.append(note)
         gone = all(r["id"] != cid for r in p.rows or [])
@@ -1458,11 +1815,43 @@ def tick(ctx) -> dict:
             return {"ok": True, "error": None, "did": "applied"}
         if p.grace_until is not None and now >= p.grace_until:
             p.grace_until = None
-        d = _drift(p, powerhw.read(ctx, p.hw, gpu=False), gpu_only=False)
-        if d is None:
-            p.drift_seen = None
+        # the drift check and the retry of what the device did not take: every poll_s (0: Off), and every tick
+        # inside a grace window (after AC or resume)
+        poll = p.data["poll_s"]
+        due = p.grace_until is not None or (poll > 0 and (p.last_poll is None or now - p.last_poll >= poll))
+        if not due:
             return {"ok": True, "error": None, "did": "nothing"}
-        return {"ok": True, "error": None, "did": _on_drift(ctx, p, d, now, confirm=True)}
+        p.last_poll = now
+        d = _drift(p, powerhw.read(ctx, p.hw, gpu=False), gpu_only=False)
+        if d is not None:
+            return {"ok": True, "error": None, "did": _on_drift(ctx, p, d, now, confirm=True)}
+        p.drift_seen = None
+        if p.pending and p.pending_left > 0:
+            p.pending_left -= 1
+            res = _apply(ctx, p, retry=True)      # writes only what differs: never over another program (no drift)
+            return {"ok": True, "error": None, "did": "applied" if res["written"] else "nothing"}
+        return {"ok": True, "error": None, "did": "nothing"}
+
+
+def active(ctx) -> dict:
+    """The active profile for extras.py: {key, slot, app, ac, enabled, values} (the stored slot, whether or not TDP
+    control is on). No hardware read but ac_online."""
+    with _LOCK:
+        p = _get(ctx)
+        ac = powerhw.ac_online(ctx)
+        key, slot, values = _active(p, ac)
+        return {"key": key, "slot": slot, "app": p.run.get("app"), "ac": ac, "enabled": p.data["enabled"],
+                "values": dict(values)}
+
+
+def refresh(ctx) -> dict:
+    """Apply at the next tick (when writing is allowed): main.py calls it after extras paused or resumed
+    intel_lpmd, which stops or starts blocking fields."""
+    with _LOCK:
+        p = _get(ctx)
+        if _may_write(ctx, p):
+            p.apply_at = _monotonic()
+        return {"ok": True, "error": None}
 
 
 def summary(ctx) -> dict:

@@ -5,8 +5,8 @@
 import { callable } from "@decky/api";
 
 import type {
-  ApplyOpts, CatalogRes, DriversRes, GameInfoRes, JobListRes, JobRes, JobStart, KernelRes, Overview, Oxp3UpdateCheck,
-  PlanRes, PowerChangeRes, PowerFixRes, PowerImportRes, PowerInfoRes, PowerOptions, PowerStateRes, PowerValues, Res,
+  ApplyOpts, CatalogRes, DriversRes, ExtrasInfoRes, ExtrasOptions, ExtrasWhat, GameInfoRes, JobListRes, JobRes, JobStart, KernelRes, Overview, Oxp3UpdateCheck,
+  PlanRes, PowerChangeRes, PowerFixRes, PowerImportRes, PowerInfoRes, PowerLiveRes, PowerOptions, PowerStateRes, PowerValues, Res,
   ShimRes, StatusRes, XessStateRes, XessUpdateCheck,
 } from "./types";
 
@@ -50,6 +50,10 @@ export const power_take_control = callable<[], PowerChangeRes>("power_take_contr
 export const power_import_sdtdp = callable<[], PowerImportRes>("power_import_sdtdp");
 export const power_fix = callable<[cid: string], PowerFixRes>("power_fix");
 export const power_unfix = callable<[cid: string], PowerFixRes>("power_unfix");
+export const power_live = callable<[], PowerLiveRes>("power_live");
+export const extras_info = callable<[], ExtrasInfoRes>("extras_info");
+export const extras_set = callable<[opts: Partial<ExtrasOptions>], ExtrasInfoRes>("extras_set");
+export const extras_take_control = callable<[what: ExtrasWhat], ExtrasInfoRes>("extras_take_control");
 
 // ---- jobs and misc -----------------------------------------------------------------------------------------------
 export const job_status = callable<[id: string | null], JobRes>("job_status");

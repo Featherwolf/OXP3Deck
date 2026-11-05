@@ -6,7 +6,8 @@ import { FC } from "react";
 import { blockedBy, rebootNow, started, useAction } from "../actions";
 import { oxp3_kernel, oxp3_kernel_keep, oxp3_kernel_try } from "../backend";
 import { confirm, paragraphs } from "../components/confirm";
-import { explain, INFO, Problem, Status, WithDetails } from "../components/Hint";
+import { explainWhen, INFO, Problem, Status, WithDetails } from "../components/Hint";
+import { EFFECTS } from "../effects";
 import { JobView, TaskSection } from "../components/JobView";
 import { useCurrentJob, useResource } from "../store";
 import type { KernelRes, Oxp3KernelEntry } from "../types";
@@ -20,7 +21,7 @@ const WHY: Record<string, string> = {
 
 const tryKernel = async (k: Oxp3KernelEntry, now: string): Promise<string | null> => {
   const ok = await confirm({
-    title: `Boot ${k.package} once?`, ok: "Boot it once",
+    title: `Boot ${k.package} once?`, ok: "Boot it once", effect: EFFECTS["kernel.try"],
     text: (
       <>
         <div>oxp3-tool makes {now}, the kernel running now, the one every power-on boots, and asks Limine to boot {k.package} ({k.release})
@@ -36,7 +37,7 @@ const tryKernel = async (k: Oxp3KernelEntry, now: string): Promise<string | null
 
 const keepKernel = async (now: string): Promise<string | null> => {
   const ok = await confirm({
-    title: `Keep booting ${now}?`, ok: "Keep",
+    title: `Keep booting ${now}?`, ok: "Keep", effect: EFFECTS["kernel.keep"],
     text: "oxp3-tool puts limine.conf's remember_last_entry and default_entry back as they were and cancels a pending one-time boot, so Limine keeps booting the kernel running now.",
   });
   if (!ok) return null;
@@ -71,7 +72,7 @@ export const KernelTab: FC = () => {
               <WithDetails details={{ title: "Try once", body: `Boots ${x.package} at the next restart only; every later power-on boots ${now} until you keep it. If it does not start, hold the power button to turn off, then power on again. Asks first.` }}>
                 <ButtonItem layout="below" disabled={!!act.busy || running}
                   onClick={() => act.run(`try-${x.package}`, async () => blockedBy() ?? tryKernel(x, now))}
-                  description={explain("Next restart only. Hold power to go back.")}>
+                  description={explainWhen("Next restart only. Hold power to go back.", EFFECTS["kernel.try"], running ? "Wait for the running task." : null)}>
                   {act.busy === `try-${x.package}` ? "Working…" : `Try once${INFO}`}
                 </ButtonItem>
               </WithDetails>
@@ -88,7 +89,7 @@ export const KernelTab: FC = () => {
             {oneshot && (
               <ButtonItem layout="below" disabled={!!act.busy || running}
                 onClick={() => act.run("reboot", () => rebootNow(`Boots ${k.next_boot.package} once. Save your game first.`))}
-                description={explain(`Reboots into ${k.next_boot.package} now. Asks first.`)}>
+                description={explainWhen(`Reboots into ${k.next_boot.package} now. Asks first.`, EFFECTS["reboot"], running ? "Wait for the running task." : null)}>
                 Reboot now
               </ButtonItem>
             )}
@@ -96,7 +97,7 @@ export const KernelTab: FC = () => {
               <WithDetails details={{ title: "Keep this kernel", body: `Keeps booting ${now}, the kernel running now${oneshot ? ", and cancels the pending one-time boot" : ""}. Takes effect at the next reboot; asks first.` }}>
                 <ButtonItem layout="below" disabled={!!act.busy || running}
                   onClick={() => act.run("keep", async () => blockedBy() ?? keepKernel(now))}
-                  description={explain("Always boot the kernel running now.")}>
+                  description={explainWhen("Always boot the kernel running now.", EFFECTS["kernel.keep"], running ? "Wait for the running task." : null)}>
                   {act.busy === "keep" ? "Working…" : `Keep this kernel${INFO}`}
                 </ButtonItem>
               </WithDetails>

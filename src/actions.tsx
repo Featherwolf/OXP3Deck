@@ -5,7 +5,8 @@ import { useState } from "react";
 
 import { oxp3_apply, oxp3_install, oxp3_plan, oxp3_revert, reboot, xess_install, xess_state, xess_uninstall } from "./backend";
 import { confirm } from "./components/confirm";
-import { currentJob, noteJob } from "./store";
+import { EFFECTS, EffectSpec, fixEffect, strongest } from "./effects";
+import { afterJob, currentJob, notePending, noteJob } from "./store";
 import type { ApplyOpts, Job, JobStart, XessState } from "./types";
 import { toast } from "./util";
 import { installLines, installTitle, XessOffer } from "./xessoffer";
@@ -47,6 +48,10 @@ export const started = (r: JobStart): string | null => {
 
 type FixLike = { id: string; title: string; takes_effect: string; level?: string; pending?: string | null };
 
+/** The tag of applying (or undoing) these fixes: the strongest of theirs; the buttons without a restart: Reboot. */
+export const fixesEffect = (fixes: FixLike[], opts: ApplyOpts = {}): EffectSpec =>
+  strongest(fixes.map((f) => (f.id === "buttons" && opts.no_restart ? EFFECTS["buttons.layout_reboot"] : fixEffect(f))));
+
 /** Apply fixes once the user has seen what oxp3-tool would change (apply --dry-run). */
 export const applyFixes = async (fixes: FixLike[], opts: ApplyOpts = {}, title = "Apply fixes"): Promise<string | null> => {
   const ids = fixes.map((f) => f.id);
@@ -54,8 +59,9 @@ export const applyFixes = async (fixes: FixLike[], opts: ApplyOpts = {}, title =
   if (!plan.ok) return plan.error || "oxp3-tool's dry run failed";
   if (!plan.plan?.length) { toast("Nothing to change"); return null; }
   const experimental = fixes.filter((f) => f.level === "experimental").map((f) => f.title);
+  const effect = fixesEffect(fixes, opts);
   const ok = await confirm({
-    title, ok: "Apply", lines: plan.plan, linesTitle: "oxp3-tool will:",
+    title, ok: "Apply", lines: plan.plan, linesTitle: "oxp3-tool will:", effect,
     text: (
       <>
         {fixes.map((f) => <div key={f.id}>{f.title}: takes effect {f.takes_effect}.</div>)}
@@ -69,13 +75,21 @@ export const applyFixes = async (fixes: FixLike[], opts: ApplyOpts = {}, title =
     ),
   });
   if (!ok) return null;
-  return started(await oxp3_apply(ids, opts));
+  const r = await oxp3_apply(ids, opts);
+  const err = started(r);
+  // a log-out waits: no backend flag says so (a reboot one does: "Reboot to finish"); only once the job has done it
+  const session = fixes.filter((f) => fixEffect(f) === "session");
+  if (!err && r.job && session.length) afterJob(r.job.id, (j) => {
+    if (j.state === "done") for (const f of session) notePending({ id: `fix.${f.id}`, effect: "session", label: f.title });
+  });
+  return err;
 };
 
 /** Revert fixes: oxp3-tool removes what it installed and puts back the files it replaced. */
 export const revertFixes = async (fixes: FixLike[]): Promise<string | null> => {
   const ok = await confirm({
     title: fixes.length === 1 ? `Revert ${fixes[0].title}?` : `Revert ${fixes.length} fixes?`, ok: "Revert", destructive: true,
+    effect: fixesEffect(fixes),
     text: (
       <>
         <div>oxp3-tool removes the files it installed for this, puts back the ones it replaced and disables its services.</div>
@@ -88,7 +102,7 @@ export const revertFixes = async (fixes: FixLike[]): Promise<string | null> => {
 };
 
 export const rebootNow = async (why: string): Promise<string | null> => {
-  const ok = await confirm({ title: "Reboot now?", text: why, ok: "Reboot" });
+  const ok = await confirm({ title: "Reboot now?", text: why, ok: "Reboot", effect: EFFECTS["reboot"] });
   if (!ok) return null;
   const r = await reboot();
   return r.ok ? null : r.error || "the reboot did not start";
@@ -96,7 +110,7 @@ export const rebootNow = async (why: string): Promise<string | null> => {
 
 export const installOxp3 = async (source: "bundled" | "online", version: string | null, update: boolean): Promise<string | null> => {
   const ok = await confirm({
-    title: update ? "Update oxp3-tool?" : "Install oxp3-tool?", ok: update ? "Update" : "Install",
+    title: update ? "Update oxp3-tool?" : "Install oxp3-tool?", ok: update ? "Update" : "Install", effect: EFFECTS["oxp3.install"],
     text: (
       <>
         <div>Installs oxp3-tool {version ?? ""} {source === "bundled" ? "from this plugin" : "from GitHub (checked against its sha256)"} as
@@ -121,6 +135,7 @@ export const installXess = async (offer: XessOffer, x: XessState | null, user: s
   const ok = await confirm({
     title: installTitle(offer),
     ok: offer.kind === "update" ? "Update" : offer.kind === "repair" ? "Repair" : "Install",
+    effect: offer.kind === "update" ? EFFECTS["xess.update"] : offer.kind === "repair" ? EFFECTS["xess.repair"] : EFFECTS["xess.install"],
     text: <>{installLines(offer, state, user).map((l, i) => <div key={i} style={i ? { marginTop: 8 } : undefined}>{l}</div>)}</>,
   });
   if (!ok) return null;
@@ -129,7 +144,7 @@ export const installXess = async (offer: XessOffer, x: XessState | null, user: s
 
 export const uninstallXess = async (x: XessState | null): Promise<string | null> => {
   const ok = await confirm({
-    title: "Uninstall xess-xmx-linux?", ok: "Uninstall", destructive: true,
+    title: "Uninstall xess-xmx-linux?", ok: "Uninstall", destructive: true, effect: EFFECTS["xess.uninstall"],
     text: (
       <>
         <div>Runs the package's uninstall.sh as your user: it removes the session driver setting, the Proton hooks and the shims in the

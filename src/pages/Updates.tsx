@@ -5,8 +5,10 @@ import { FC, useState } from "react";
 import { blockedBy, installOxp3, installXess, started, useAction } from "../actions";
 import { get_overview, job_list, job_status, oxp3_diagnose, oxp3_update_check, xess_check_update, xess_state } from "../backend";
 import type { DetailsSpec } from "../components/confirm";
-import { Code, explain, INFO, Note, Problem, Status, WithDetails } from "../components/Hint";
+import { Code, explain, explainWhen, INFO, Note, Problem, Status, WithDetails } from "../components/Hint";
+import { EFFECTS } from "../effects";
 import { JobView, TaskSection } from "../components/JobView";
+import { useRunningApp } from "../steam";
 import { useCurrentJob, useResource } from "../store";
 import { firstSentence, fitsOneLine } from "../text";
 import type { Job, JobListRes, Overview, Oxp3UpdateCheck, XessStateRes, XessUpdateCheck } from "../types";
@@ -49,6 +51,7 @@ export const UpdatesTab: FC = () => {
   const jl = useResource<JobListRes>("jobs", job_list, { fresh: true });
   const job = useCurrentJob();
   const running = job?.state === "running";
+  const game = useRunningApp();        // the XeSS installer is refused while a game runs
   const oxp = useAction();
   const xes = useAction();
   const diag = useAction();
@@ -93,7 +96,7 @@ export const UpdatesTab: FC = () => {
           {offer && (
             <ButtonItem layout="below" disabled={running || !!oxp.busy}
               onClick={() => oxp.run("install", async () => blockedBy() ?? installOxp3(offer.source, offer.version, offer.update))}
-              description={explain("Takes a few seconds.")}>
+              description={explainWhen("Takes a few seconds.", EFFECTS["oxp3.install"], running ? "Wait for the running task." : null)}>
               {oxp.busy === "install" ? "Working…" : `${offer.update ? "Update" : "Install"} fixes tool${offer.version ? ` ${offer.version}` : ""}`}
             </ButtonItem>
           )}
@@ -114,9 +117,11 @@ export const UpdatesTab: FC = () => {
           {xOffer.kind && (x || o) && (
             <WithDetails details={{ title: offerLabel(xOffer), body: xOffer.kind === "update" ? `Updates ${xVersion ?? ""} to ${xOffer.latest}. Then log out and back in; asks first.`
               : xOffer.kind === "repair" ? `${repairText(xOffer)} Asks first.` : "Installs the newest release. Then log out and back in; asks first." }}>
-              <ButtonItem layout="below" disabled={running || !!xes.busy}
+              <ButtonItem layout="below" disabled={running || !!game || !!xes.busy}
                 onClick={() => xes.run("install", async () => blockedBy() ?? installXess(xOffer, x, o?.user ?? null))}
-                description={explain(xOffer.kind === "repair" ? "Runs the installer again." : "Log out and back in afterwards.")}>
+                description={explainWhen(xOffer.kind === "repair" ? "Runs the installer again." : "Log out and back in afterwards.",
+                  xOffer.kind === "update" ? EFFECTS["xess.update"] : xOffer.kind === "repair" ? EFFECTS["xess.repair"] : EFFECTS["xess.install"],
+                  running ? "Wait for the running task." : game ? `Quit ${game.name} first.` : null)}>
                 {xes.busy === "install" ? "Working…" : `${offerLabel(xOffer)}${INFO}`}
               </ButtonItem>
             </WithDetails>

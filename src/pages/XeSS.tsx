@@ -6,10 +6,14 @@ import { FC, useMemo, useState } from "react";
 import { blockedBy, installXess, uninstallXess, useAction } from "../actions";
 import { get_overview, xess_check_update, xess_remove_folder, xess_set_driver, xess_shim_system_protons, xess_state } from "../backend";
 import { confirm, DetailsSpec, paragraphs } from "../components/confirm";
-import { Code, explain, INFO, Note, Problem, Status, WithDetails } from "../components/Hint";
+import { AutoGlobalToggle } from "../components/AutoLaunch";
+import { Pending } from "../components/Effect";
+import { Code, explain, explainWhen, INFO, Note, Problem, Status, WithDetails } from "../components/Hint";
+import { EFFECTS } from "../effects";
+import { runningApp, useRunningApp } from "../steam";
 import { JobView, TaskSection } from "../components/JobView";
 import { driverPrefix } from "../launchopts";
-import { invalidate, useCurrentJob, useResource } from "../store";
+import { invalidate, notePending, useCurrentJob, useResource } from "../store";
 import { firstSentence, fitsOneLine } from "../text";
 import type { Overview, XessDriver, XessStateRes, XessUpdateCheck } from "../types";
 import { listText, toast } from "../util";
@@ -22,20 +26,20 @@ const prefixFor = (d: XessDriver, all: XessDriver[]) => {
   return all.filter((x) => driverPrefix(x.version) === p).length > 1 ? d.version : p;
 };
 
-const OldFolder: FC<{ path: string; disabled: boolean }> = ({ path, disabled }) => {
+const OldFolder: FC<{ path: string; why: string | null }> = ({ path, why }) => {
   const act = useAction();
   return (
     <>
-      <ButtonItem layout="below" disabled={disabled || !!act.busy}
+      <ButtonItem layout="below" disabled={!!why || !!act.busy}
         onClick={() => act.run("remove", async () => {
-          const ok = await confirm({ title: "Remove this folder?", ok: "Remove", destructive: true,
+          const ok = await confirm({ title: "Remove this folder?", ok: "Remove", destructive: true, effect: EFFECTS["xess.remove_folder"],
             text: <>Deletes <Code>{path}</Code>, an earlier xess-xmx-linux package nothing uses any more (the plugin checks that first).</> });
           if (!ok) return null;
           const r = await xess_remove_folder(path);
           if (r.ok) { toast("Old folder removed"); invalidate("xess"); }
           return r.ok ? null : r.error;
         })}
-        description={explain(path.split("/").pop() ?? path)}>
+        description={explainWhen(path.split("/").pop() ?? path, EFFECTS["xess.remove_folder"], why)}>
         {act.busy ? "Removing…" : "Remove old folder"}
       </ButtonItem>
       <Problem what="Remove" error={act.error} />
@@ -49,6 +53,9 @@ export const XessTab: FC = () => {
   const chk = useResource<XessUpdateCheck>("manual:xess-check", xess_check_update, { skip: true });
   const job = useCurrentJob();
   const running = job?.state === "running";
+  const game = useRunningApp();
+  // install / update / repair / uninstall are refused while a game runs (the scripts copy DLLs into its prefix)
+  const pkgWhy = running ? "Wait for the running task." : game ? `Quit ${game.name} first.` : null;
   const inst = useAction();
   const drv = useAction();
   const shim = useAction();
@@ -113,9 +120,11 @@ export const XessTab: FC = () => {
           {offer.kind && (
             <WithDetails details={{ title: offerLabel(offer), body: offer.kind === "update" ? `Updates ${version ?? ""} to ${offer.latest} in a new folder; the old one is uninstalled first. Then log out and back in; asks first.`
               : offer.kind === "repair" ? `${repairText(offer)} Asks first.` : "Downloads the newest release of xess-xmx-linux and runs its installer as your user. Then log out and back in; asks first." }}>
-              <ButtonItem layout="below" disabled={busy || !xs.data || (!x && !sum)}
+              <ButtonItem layout="below" disabled={busy || !!game || !xs.data || (!x && !sum)}
                 onClick={() => inst.run("install", async () => blockedBy() ?? installXess(offer, x, user))}
-                description={explain(offer.kind === "repair" ? "Runs the installer again." : "Faster XeSS upscaling and frame generation in games.")}>
+                description={explainWhen(offer.kind === "repair" ? "Runs the installer again." : "Faster XeSS upscaling and frame generation in games.",
+                  offer.kind === "update" ? EFFECTS["xess.update"] : offer.kind === "repair" ? EFFECTS["xess.repair"] : EFFECTS["xess.install"],
+                  pkgWhy)}>
                 {inst.busy === "install" ? "Working…" : `${offerLabel(offer)}${INFO}`}
               </ButtonItem>
             </WithDetails>
@@ -127,9 +136,9 @@ export const XessTab: FC = () => {
           </ButtonItem>
           {x?.installed && (
             <WithDetails details={{ title: "Uninstall", body: "Runs the package's uninstaller as your user; the folder stays. Log out and back in afterwards; asks first." }}>
-              <ButtonItem layout="below" disabled={busy}
+              <ButtonItem layout="below" disabled={busy || !!game}
                 onClick={() => inst.run("uninstall", async () => blockedBy() ?? uninstallXess(x))}
-                description={explain("Log out and back in afterwards.")}>
+                description={explainWhen("Log out and back in afterwards.", EFFECTS["xess.uninstall"], pkgWhy)}>
                 {inst.busy === "uninstall" ? "Working…" : `Uninstall${INFO}`}
               </ButtonItem>
             </WithDetails>
@@ -138,6 +147,11 @@ export const XessTab: FC = () => {
         </PanelSectionRow>
         {inst.job && <JobView job={inst.job} lines={6} />}
       </PanelSection>
+      {x?.installed && (
+        <PanelSection title="Launch options">
+          <PanelSectionRow><AutoGlobalToggle /></PanelSectionRow>
+        </PanelSection>
+      )}
       {x?.installed && drivers.length > 0 && (
         <PanelSection title="Default driver">
           <PanelSectionRow>
@@ -148,18 +162,22 @@ export const XessTab: FC = () => {
               onChange={(o) => drv.run("driver", async () => {
                 const d = drivers.find((v) => v.version === o.data);
                 if (!d || d.default) return null;
-                const ok = await confirm({ title: `Make Mesa ${d.version} the default?`, ok: "Switch",
+                const ok = await confirm({ title: `Make Mesa ${d.version} the default?`, ok: "Switch", effect: EFFECTS["xess.driver"],
                   text: `switch-driver.sh tests the driver first, then every game without MESA=… in its launch options uses it from its next start. No re-login needed; OXP3 Deck sets it again after an update.` });
                 if (!ok) { setDrvRev((n) => n + 1); return null; }
                 const r = await xess_set_driver(prefixFor(d, drivers));
-                if (r.ok) toast(`Default driver: Mesa ${d.version}. Applies at each game's next start.`);
-                else setDrvRev((n) => n + 1);
+                if (r.ok) {
+                  toast(`Default driver: Mesa ${d.version}. Applies at each game's next start.`);
+                  const g = runningApp();
+                  if (g) notePending({ id: "xess.driver", effect: EFFECTS["xess.driver"], label: "Default graphics driver", appid: g.appid, game: g.name });
+                } else setDrvRev((n) => n + 1);
                 invalidate("xess");
                 return r.ok ? null : r.error;
               })}
-              description={explain("Used by every game unless it picks its own.")} />
+              description={explainWhen("Used by every game unless it picks its own.", EFFECTS["xess.driver"], running ? "Wait for the running task." : null)} />
             </WithDetails>
             {drv.busy && <Status ok={null} label="Testing and switching the driver…" />}
+            <Pending ids={["xess.driver"]} />
             <Problem what="Default driver" error={drv.error} />
           </PanelSectionRow>
         </PanelSection>
@@ -174,7 +192,7 @@ export const XessTab: FC = () => {
             {unshimmed.length > 0 && (
               <ButtonItem layout="below" disabled={running || !!shim.busy}
                 onClick={() => shim.run("shim", async () => {
-                  const ok = await confirm({ title: "Add the XMX shim to the system Protons?", ok: "Add",
+                  const ok = await confirm({ title: "Add the XMX shim to the system Protons?", ok: "Add", effect: EFFECTS["xess.shim"],
                     text: <>Copies the package's igdext64.dll into {listText(unshimmed.map((p) => p.name))} (keeping
                       the original as igdext64.dll.stock), as install.sh asks for these read-only folders. A package update of these Protons
                       brings the stock file back; tap this again then.</> });
@@ -185,7 +203,7 @@ export const XessTab: FC = () => {
                   if (r.ok && r.done?.length) toast(`Shim added to ${r.done.length} system Proton${r.done.length === 1 ? "" : "s"}`);
                   return r.ok ? (r.failed?.length ? `not done: ${listText(r.failed)}` : null) : r.error;
                 })}
-                description={explain("Lets games on these Protons use fast mode.")}>
+                description={explainWhen("Lets games on these Protons use fast mode.", EFFECTS["xess.shim"], running ? "Wait for the running task." : null)}>
                 {shim.busy ? "Working…" : `Add XeSS to system Protons (${unshimmed.length})`}
               </ButtonItem>
             )}
@@ -214,7 +232,7 @@ export const XessTab: FC = () => {
               <Note key={k.path} label="Left to you" details={{ title: "Left to you", body: `This folder ${k.why}.`, lines: [k.path] }}>{k.path.split("/").pop()}</Note>
             ))}
           </PanelSectionRow>
-          {x.old_folders.map((p) => <PanelSectionRow key={p}><OldFolder path={p} disabled={running || x.relogin_needed} /></PanelSectionRow>)}
+          {x.old_folders.map((p) => <PanelSectionRow key={p}><OldFolder path={p} why={running ? "Wait for the running task." : x.relogin_needed ? "Log out and back in first." : null} /></PanelSectionRow>)}
         </PanelSection>
       )}
     </>

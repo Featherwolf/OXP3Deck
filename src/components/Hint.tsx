@@ -4,6 +4,7 @@
 import { Field, Focusable } from "@decky/ui";
 import { FC, ReactNode } from "react";
 
+import { EffectSpec, effectText } from "../effects";
 import { firstSentence } from "../text";
 import { DetailsSpec, showDetails } from "./confirm";
 
@@ -11,6 +12,16 @@ export type { DetailsSpec };
 
 /** The one-line description of a control: what it does, in plain words. Anything more goes in its Details. */
 export const explain = (does: ReactNode): ReactNode => <span style={{ whiteSpace: "normal" }}>{does}</span>;
+
+export const MUTED = "#9aa4b1";
+
+/**
+ * A setting's one line with its "When it takes effect" tag (DESIGN.md "When it takes effect"): `does`, then a muted
+ * " · <tag>". `why` set: the control is greyed out, and the line says why instead (the tag stays).
+ */
+export const explainWhen = (does: ReactNode, effect: EffectSpec, why?: string | null): ReactNode => (
+  <span style={{ whiteSpace: "normal" }}>{why || does}<span style={{ color: MUTED }}>{` · ${effectText(effect)}`}</span></span>
+);
 
 /** The mark a label carries when the row has Details. */
 export const INFO = " ⓘ";

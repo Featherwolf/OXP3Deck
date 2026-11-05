@@ -48,6 +48,8 @@ oxp3tool = _load("oxp3tool")
 xess = _load("xess")
 games = _load("games")
 power = _load("power")              # (powerhw is imported by power)
+readouts = _load("readouts")
+extras = _load("extras")
 
 OXP3_VENDOR = "ONE-NETBOOK"          # oxp3_tool/detect.py OXP3_SYS_VENDOR / OXP3_PRODUCT_NAME
 OXP3_PRODUCT = "ONEXPLAYER 3"
@@ -56,6 +58,7 @@ UI_KEY = re.compile(r"^ui_[A-Za-z0-9_]{1,60}$")
 MAX_SETTING_BYTES = 4096
 MAX_UI_KEYS = 64
 POWER_TICK_S = 2                     # the power watch loop's period: power.TICK_S (a test keeps them equal)
+UNLOAD_EXTRAS_S = 3                  # extras.unload's budget: Decky kills the process 5 s after asking it to stop
 REBOOT_KEY = "oxp3_reboot_pending"   # settings.json: {boot_id, value} from the last oxp3-tool status
 OXP3_STILL_RUNNING = ("the plugin restarted while oxp3-tool was running; it may still be running: read the status "
                       "when it has ended")
@@ -244,25 +247,92 @@ class Plugin:
             self._watch = asyncio.get_running_loop().create_task(self._power_watch())
 
     async def _power_watch(self):
-        """AC changes, resume, the boot apply and drift are seen here (DESIGN.md "Events"), in the executor. An
-        error is logged (the same text once in a row) and the loop goes on; a power module that did not load ends
-        it."""
-        last = None
-        while True:
-            await asyncio.sleep(POWER_TICK_S)
+        """AC changes, resume, the boot apply and drift are seen here (DESIGN.md "Events"), then the extras' tick
+        (fan safety, fan and scheduler mode, intel_lpmd, charge), in the executor. An error is logged (the same text
+        once in a row) and the loop goes on; a module that did not load ends its own part, and the loop ends when
+        neither part is left. A part still running after POWER_TICK_S (a D-Bus service that hangs) is not waited
+        for: the other part goes on, and the slow one is started again only once it has finished."""
+        last = {"power": None, "extras": None}
+        parts = {"power": self._power_tick, "extras": self._extras_tick}
+        running: dict = {}
+
+        def finished(name, fut) -> None:
             try:
-                await asyncio.get_running_loop().run_in_executor(None, _mod("power").tick, self.ctx)
-                last = None
+                fut.result()
+                last[name] = None
             except Unavailable as e:
-                log.error("power watch stopped: %s", e)
-                return
-            except asyncio.CancelledError:
-                raise
+                log.error("%s watch stopped: %s", name, e)
+                parts.pop(name, None)
             except Exception as e:
                 text = f"{type(e).__name__}: {e}"
-                if text != last:
-                    log.error("power watch: %s", traceback.format_exc())
-                last = text
+                if text != last[name]:
+                    log.error("%s watch: %s", name, "".join(traceback.format_exception(e)))
+                last[name] = text
+
+        while parts:
+            await asyncio.sleep(POWER_TICK_S)
+            for name, step in list(parts.items()):
+                fut = running.get(name)
+                if fut is not None:
+                    if not fut.done():
+                        continue                       # still busy: skip this pass
+                    del running[name]
+                    finished(name, fut)
+                    if name not in parts:
+                        continue
+                fut = asyncio.get_running_loop().run_in_executor(None, step)
+                await asyncio.wait({fut}, timeout=POWER_TICK_S)
+                if fut.done():
+                    finished(name, fut)
+                else:
+                    running[name] = fut
+                    log.warning("%s watch: a step takes longer than %s s; the other part goes on", name,
+                                POWER_TICK_S)
+
+    def _power_tick(self) -> None:
+        _mod("power").tick(self.ctx)
+
+    def _power_active(self):
+        """power.active(ctx), or None when the power module is not there or fails (the extras then act on no
+        profile: only the charge settings and the safety rules)."""
+        try:
+            return _mod("power").active(self.ctx)
+        except Unavailable:
+            return None
+        except Exception:
+            log.error("power.active failed:\n%s", traceback.format_exc())
+            return None
+
+    def _after_extras(self, res) -> None:
+        """intel_lpmd stopped or started blocking fields: power applies again at its next tick."""
+        if isinstance(res, dict) and res.get("lpmd_changed"):
+            try:
+                _mod("power").refresh(self.ctx)
+            except Unavailable:
+                pass
+            except Exception:
+                log.error("power.refresh failed:\n%s", traceback.format_exc())
+
+    def _extras_tick(self) -> None:
+        _mod("extras")                      # Unavailable (before power.active) ends the extras part of the loop
+        active = self._power_active()
+        self._after_extras(_mod("extras").tick(self.ctx, active))
+
+    def _sync_extras(self) -> None:
+        """After a power or extras change: the extras follow the active profile at once. Never raises."""
+        try:
+            _mod("extras")
+            active = self._power_active()
+            self._after_extras(_mod("extras").sync(self.ctx, active))
+        except Unavailable:
+            pass
+        except Exception:
+            log.error("extras sync failed:\n%s", traceback.format_exc())
+
+    def _synced(self, res):
+        """res (a power answer), after the extras' sync, which never changes it."""
+        self._sync_extras()
+        return res
 
     def _reshim(self) -> None:
         x = _mod("xess")
@@ -282,6 +352,16 @@ class Plugin:
         if self._watch is not None:
             self._watch.cancel()
             self._watch = None
+        # The extras are the exception (DESIGN.md "Extras"): the fan back to Auto, the scheduler mode and
+        # intel_lpmd put back, the sleep watch stopped.
+        if self._broken is None and extras is not None:
+            try:
+                await asyncio.wait_for(asyncio.get_running_loop().run_in_executor(
+                    None, _mod("extras").unload, self.ctx), UNLOAD_EXTRAS_S)
+            except asyncio.TimeoutError:
+                log.error("extras unload did not end within %d s", UNLOAD_EXTRAS_S)
+            except Exception:
+                log.error("extras unload failed:\n%s", traceback.format_exc())
         log.info("OXP3Deck unloading")
 
     async def _uninstall(self):
@@ -429,22 +509,24 @@ class Plugin:
         return await self._call("power_state", lambda: _mod("power").state(self.ctx))
 
     async def power_enable(self, on):
-        return await self._call("power_enable", lambda: _mod("power").enable(self.ctx, on))
+        return await self._call("power_enable", lambda: self._synced(_mod("power").enable(self.ctx, on)))
 
     async def power_options(self, opts):
-        return await self._call("power_options", lambda: _mod("power").options(self.ctx, opts))
+        return await self._call("power_options", lambda: self._synced(_mod("power").options(self.ctx, opts)))
 
     async def power_set(self, key, slot, values):
-        return await self._call("power_set", lambda: _mod("power").set_values(self.ctx, key, slot, values))
+        return await self._call("power_set",
+                                lambda: self._synced(_mod("power").set_values(self.ctx, key, slot, values)))
 
     async def power_profile(self, appid, name, on):
-        return await self._call("power_profile", lambda: _mod("power").profile(self.ctx, appid, name, on))
+        return await self._call("power_profile",
+                                lambda: self._synced(_mod("power").profile(self.ctx, appid, name, on)))
 
     async def power_game(self, appid):
-        return await self._call("power_game", lambda: _mod("power").game(self.ctx, appid))
+        return await self._call("power_game", lambda: self._synced(_mod("power").game(self.ctx, appid)))
 
     async def power_take_control(self):
-        return await self._call("power_take_control", lambda: _mod("power").take_control(self.ctx))
+        return await self._call("power_take_control", lambda: self._synced(_mod("power").take_control(self.ctx)))
 
     async def power_import_sdtdp(self):
         return await self._call("power_import_sdtdp", lambda: _mod("power").import_sdtdp(self.ctx))
@@ -456,6 +538,33 @@ class Plugin:
     async def power_unfix(self, cid):
         """Undo of power_fix: enable and start again exactly what it turned off."""
         return await self._call("power_unfix", lambda: _mod("power").unfix(self.ctx, cid))
+
+    async def power_live(self):
+        """Live readouts (package W, battery, temperature, GPU busy and clocks, throttling, fan): read only; the
+        frontend asks every second while a panel shows."""
+        return await self._call("power_live", lambda: _mod("readouts").sample(self.ctx))
+
+    # ---- extras (battery, fan, scheduler mode, intel_lpmd; not jobs) -----------------------------------------------
+
+    async def extras_info(self):
+        return await self._call("extras_info", lambda: _mod("extras").info(self.ctx))
+
+    def _extras_changed(self, res):
+        """After extras_set / extras_take_control: the sync, then the answer's state again (intel_lpmd may have
+        changed)."""
+        self._sync_extras()
+        if isinstance(res, dict) and res.get("ok"):
+            fresh = _mod("extras").info(self.ctx)
+            if isinstance(fresh, dict) and fresh.get("ok"):
+                res["extras"] = fresh.get("extras")
+        return res
+
+    async def extras_set(self, opts):
+        return await self._call("extras_set", lambda: self._extras_changed(_mod("extras").set_options(self.ctx, opts)))
+
+    async def extras_take_control(self, what):
+        return await self._call("extras_take_control",
+                                lambda: self._extras_changed(_mod("extras").take_control(self.ctx, what)))
 
     # ---- jobs and misc -------------------------------------------------------------------------------------------
 

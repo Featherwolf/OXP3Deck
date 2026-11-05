@@ -6,7 +6,8 @@ import { FC, useMemo, useState } from "react";
 
 import { applyFixes, blockedBy, useAction } from "../actions";
 import { DetailsSpec, paragraphs } from "../components/confirm";
-import { explain, label, Note, Problem, Status, WithDetails } from "../components/Hint";
+import { explainWhen, label, Note, Problem, Status, WithDetails } from "../components/Hint";
+import { EFFECTS } from "../effects";
 import { firstSentence } from "../text";
 import { JobView, TaskSection } from "../components/JobView";
 import type { ApplyOpts, ButtonKey, Oxp3Fix } from "../types";
@@ -68,6 +69,8 @@ export const ButtonsTab: FC = () => {
     if (!restart) opts.no_restart = true;
     return applyFixes(helper && xboxFix ? [buttons, xboxFix] : [buttons], opts, "Apply the button layout");
   });
+  const layoutFx = restart ? EFFECTS["buttons.layout"] : EFFECTS["buttons.layout_reboot"];
+  const why = !changeable ? "This system can't be changed." : running ? "Wait for the running task." : null;
   const fpsD: DetailsSpec = { title: "Frame limit for the key", body: `What the Frame limit key switches Steam's frame limit to (default ${catalog.fps_limit.default}); a second press turns it off. Changes when you tap Apply layout.` };
   const restartD: DetailsSpec = { title: "Apply without reboot", body: "On: the controller service restarts and the layout works at once (the controller stops for a few seconds). Off: the layout loads at the next reboot. If the buttons act like an Xbox controller afterwards, reboot.", lines: ["systemctl restart inputplumber"] };
   const applyD: DetailsSpec = { title: "Apply layout", body: `Applies the button layout${helper ? " and the Xbox key helper" : ""} with the choices above. You see the plan first. Takes effect ${buttons.takes_effect}.`, lines: [helper ? "oxp3-tool apply buttons xbox-key" : "oxp3-tool apply buttons"] };
@@ -95,7 +98,7 @@ export const ButtonsTab: FC = () => {
                 <DropdownItem label={label(KEY_LABEL[k] ?? meta.label, keyD)} menuLabel={KEY_LABEL[k] ?? meta.label}
                   layout="below" childrenContainerWidth="max" bottomSeparator="none" disabled={!changeable || running}
                   rgOptions={options} selectedOption={v} onChange={(o) => setPick((p) => ({ ...p, [k]: o.data }))}
-                  description={explain(firstSentence(catalog.button_actions[v] ?? actionLabel(v)))} />
+                  description={explainWhen(firstSentence(catalog.button_actions[v] ?? actionLabel(v), 60), layoutFx, why)} />
               </WithDetails>
             );
           })}
@@ -103,17 +106,17 @@ export const ButtonsTab: FC = () => {
             <WithDetails details={fpsD}>
               <SliderField label={label("Frame limit for the key", fpsD)} value={fpsValue} min={catalog.fps_limit.min} max={catalog.fps_limit.max} step={1}
                 showValue valueSuffix=" fps" disabled={!changeable || running} onChange={setFps}
-                description={explain("Press again to turn it off.")} />
+                description={explainWhen("Press again to turn it off.", layoutFx, why)} />
             </WithDetails>
           )}
           {xboxNote(helper, value("xbox"))}
           <WithDetails details={restartD}>
             <ToggleField label={label("Apply without reboot", restartD)} checked={restart} disabled={!changeable || running} onChange={setRestart}
-              description={explain("The controller stops for a few seconds.")} />
+              description={explainWhen("The controller stops for a few seconds.", EFFECTS["buttons.restart"], why)} />
           </WithDetails>
           <WithDetails details={applyD}>
             <ButtonItem layout="below" disabled={!changeable || running || !!act.busy} onClick={apply}
-              description={explain("Shows what changes first.")}>
+              description={explainWhen("Shows what changes first.", layoutFx, why)}>
               {act.busy ? "Reading the plan…" : label("Apply layout", applyD)}
             </ButtonItem>
           </WithDetails>

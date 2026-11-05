@@ -54,6 +54,19 @@ them is in OXP3 Deck:
 - [ONEXPLAYER 3 SteamOS setup](https://github.com/HHHHanasak1/onexplayer3-steamos-setup) (MIT): the finding that the
   Arc GPU follows the MSR PL1, not the MMIO one.
 
+## Sources for the extras (scheduler mode, intel_lpmd)
+
+`extras.py` calls two D-Bus services. Their names, arguments and behaviour were taken from their sources; no code from
+them is in OXP3 Deck:
+
+- [scx-loader](https://github.com/sched-ext/scx-loader) (GPL-2.0-only), read at commit 259bb6c
+  (`configs/org.scx.Loader.xml`, `crates/scx_loader/src/dbus.rs`): the `org.scx.Loader` properties
+  `CurrentScheduler`, `SchedulerMode` and `CurrentSchedulerArgs` and the methods `SwitchScheduler` and
+  `SwitchSchedulerWithArgs`, which set CachyOS's scx_lavd mode.
+- [intel-lpmd](https://github.com/intel/intel-lpmd) (GPL-2.0), read at commit 9ece012
+  (`src/intel_lpmd_dbus_interface.xml`, `src/lpmd_dbus_server.c`): the methods `LPM_FORCE_OFF`, `LPM_AUTO`,
+  `LPM_FORCE_ON` and `GetState`. They need root, and the daemon takes only one such call every 2 seconds.
+
 ## xess-xmx-linux
 
 [xess-xmx-linux](https://github.com/HHHHanasak1/xess-xmx-linux) by HHHHanasak1 runs XeSS super resolution and frame

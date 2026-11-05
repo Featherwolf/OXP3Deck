@@ -5,11 +5,12 @@
 import { ButtonItem, PanelSection, PanelSectionRow } from "@decky/ui";
 import { FC, useEffect } from "react";
 
-import { applyFixes, blockedBy, installOxp3, installXess, useAction } from "../actions";
+import { applyFixes, blockedBy, fixesEffect, installOxp3, installXess, useAction } from "../actions";
 import { get_overview, oxp3_status, xess_check_update, xess_state } from "../backend";
 import { GameControls } from "../components/GameControls";
 import { DetailsSpec, paragraphs } from "../components/confirm";
-import { explain, INFO, Note, Problem, Status, WithDetails } from "../components/Hint";
+import { explain, explainWhen, INFO, Note, Problem, Status, WithDetails } from "../components/Hint";
+import { EFFECTS } from "../effects";
 import { JobView } from "../components/JobView";
 import { PowerSection } from "../components/PowerControls";
 import { RebootRow } from "../components/Reboot";
@@ -109,7 +110,7 @@ const Oxp3Section: FC<{ o: Overview; st: StatusRes | undefined; loading: boolean
           <WithDetails details={instD}>
             <ButtonItem layout="below" disabled={!!inst.busy || !!act.busy || running}
               onClick={() => inst.run("oxp3-tool", async () => blockedBy() ?? installOxp3(offer.source, offer.version, offer.update))}
-              description={explain("Takes a few seconds.")}>
+              description={explainWhen("Takes a few seconds.", EFFECTS["oxp3.install"], running ? "Wait for the running task." : null)}>
               {inst.busy ? "Working…" : `${offer.update ? "Update" : "Install"} fixes tool${INFO}`}
             </ButtonItem>
           </WithDetails>
@@ -129,7 +130,7 @@ const Oxp3Section: FC<{ o: Overview; st: StatusRes | undefined; loading: boolean
             <WithDetails details={applyD}>
               <ButtonItem layout="below" disabled={!!act.busy || !!inst.busy || running}
                 onClick={() => act.run("apply", async () => blockedBy() ?? applyFixes(recommended, {}, "Apply the recommended fixes"))}
-                description={explain("Shows what will change before anything happens.")}>
+                description={explainWhen("Shows what will change before anything happens.", fixesEffect(recommended), running ? "Wait for the running task." : null)}>
                 {act.busy === "apply" ? "Reading the plan…" : `Apply recommended (${recommended.length})${INFO}`}
               </ButtonItem>
             </WithDetails>
@@ -160,6 +161,7 @@ const XessSection: FC<{ o: Overview }> = ({ o }) => {
   // the button and its confirmation both go by the overview's summary (FE-4); only a newer tag is an update (FE-1)
   const offer = xessOffer(o.xess.installed, o.xess.version, x, chk.data);
   const busy = !!act.busy || job?.state === "running";
+  const game = useRunningApp();        // the installer is refused while a game runs
   return (
     <PanelSection title="XeSS">
       <PanelSectionRow>
@@ -168,9 +170,11 @@ const XessSection: FC<{ o: Overview }> = ({ o }) => {
           <WithDetails details={{ title: offerLabel(offer), body: offer.kind === "update" ? `Updates xess-xmx-linux ${o.xess.version ?? ""} to ${offer.latest}. Then log out and back in; asks first.`
             : offer.kind === "repair" ? `${repairText(offer)} Asks first.`
             : "Installs xess-xmx-linux (XeSS upscaling and frame generation on the XMX cores) from GitHub. Then log out and back in; asks first." }}>
-            <ButtonItem layout="below" disabled={busy}
+            <ButtonItem layout="below" disabled={busy || !!game}
               onClick={() => act.run("xess", async () => blockedBy() ?? installXess(offer, x, o.user))}
-              description={explain(offer.kind === "repair" ? "Runs the installer again." : "Faster XeSS upscaling and frame generation in games.")}>
+              description={explainWhen(offer.kind === "repair" ? "Runs the installer again." : "Faster XeSS upscaling and frame generation in games.",
+                offer.kind === "update" ? EFFECTS["xess.update"] : offer.kind === "repair" ? EFFECTS["xess.repair"] : EFFECTS["xess.install"],
+                job?.state === "running" ? "Wait for the running task." : game ? `Quit ${game.name} first.` : null)}>
               {act.busy === "xess" ? "Working…" : `${offer.kind === "install" ? "Install XeSS fast mode" : offerLabel(offer)}${INFO}`}
             </ButtonItem>
           </WithDetails>

@@ -2,6 +2,8 @@
 import { ConfirmModal, showModal } from "@decky/ui";
 import { ReactNode } from "react";
 
+import { confirmLine, EffectSpec } from "../effects";
+
 export type ConfirmOpts = {
   title: string;
   text?: ReactNode;          // what happens, and when it takes effect
@@ -9,6 +11,7 @@ export type ConfirmOpts = {
   linesTitle?: string;
   ok?: string;
   destructive?: boolean;
+  effect?: EffectSpec;       // "Takes effect: …", after text (DESIGN.md "When it takes effect")
 };
 
 const Lines = ({ lines, title }: { lines: string[]; title: string }) => (
@@ -30,6 +33,7 @@ export const confirm = (o: ConfirmOpts): Promise<boolean> => new Promise((resolv
   const body = (
     <div style={{ whiteSpace: "normal", maxHeight: "60vh", overflowY: "auto" }}>
       {o.text}
+      {o.effect && <div style={{ marginTop: 8, fontWeight: "bold" }}>{confirmLine(o.effect)}</div>}
       {!!o.lines?.length && <Lines lines={o.lines} title={o.linesTitle ?? "Planned changes:"} />}
     </div>
   );

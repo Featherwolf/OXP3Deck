@@ -7,7 +7,8 @@ import { rebootNow, useAction } from "../actions";
 import { useCurrentJob } from "../store";
 import type { Overview, Oxp3Status } from "../types";
 import { listText } from "../util";
-import { explain, label, Problem, Status, WithDetails } from "./Hint";
+import { EFFECTS } from "../effects";
+import { explainWhen, label, Problem, Status, WithDetails } from "./Hint";
 
 export const RebootRow: FC<{ o: Overview | null | undefined; st: Oxp3Status | null | undefined }> = ({ o, st }) => {
   const act = useAction();
@@ -37,7 +38,7 @@ export const RebootRow: FC<{ o: Overview | null | undefined; st: Oxp3Status | nu
       <WithDetails details={details}>
         <ButtonItem layout="below" disabled={!!act.busy || job?.state === "running"}
           onClick={() => act.run("Reboot", () => rebootNow(`This finishes ${what}. Save your game first.`))}
-          description={explain("Some changes need a restart.")}>
+          description={explainWhen("Some changes need a restart.", EFFECTS["reboot"], job?.state === "running" ? "Wait for the running task." : null)}>
           {act.busy ? "Rebooting…" : label("Reboot to finish", details)}
         </ButtonItem>
       </WithDetails>

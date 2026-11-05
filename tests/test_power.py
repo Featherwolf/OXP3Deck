@@ -4,7 +4,9 @@ import errno
 import json
 import logging
 import os
+import sys
 import tempfile
+import types
 import unittest
 from unittest import mock
 
@@ -258,7 +260,8 @@ class SettingsTest(Base):
             if content is not None:
                 self.write(content)
             i = self.info()
-            self.assertEqual(i["options"], {"per_game": True, "split_ac": False, "extended": False, "ignore": []})
+            self.assertEqual(i["options"], {"per_game": True, "split_ac": False, "extended": False, "ignore": [],
+                                            "poll_s": 2})
             self.assertEqual(i["profiles"], {"default": {"name": None, "main": power._empty_values(), "ac": None}})
             self.assertFalse(i["state"]["enabled"])
 
@@ -587,8 +590,7 @@ class ImportTest(Base):
         self.assertIn("Default: smt", res["skipped"])
         i = power.info(self.ctx, False)["info"]
         d = i["profiles"]["default"]
-        self.assertEqual(d["main"], {"pl1_w": 12, "pl2_w": None, "gpu_min_mhz": None, "gpu_max_mhz": None,
-                                     "epp": "balance_power", "turbo": False})
+        self.assertEqual(d["main"], dict(power._empty_values(), pl1_w=12, epp="balance_power", turbo=False))
         self.assertEqual((d["ac"]["pl1_w"], d["ac"]["gpu_min_mhz"], d["ac"]["gpu_max_mhz"], d["ac"]["turbo"]),
                          (28, 400, 2000, True))
         g = i["profiles"]["1091500"]
@@ -1147,6 +1149,462 @@ class NothingThereTest(Base):
         self.assertTrue(rows)
         for r in rows:
             self.assertEqual(set(r), ts_fields("PowerConflict"))
+
+
+# ---- 0.4: CPU speed cap and floor, per-core caps, EPP split, SoC slider, GPU power profile, polling rate ---------
+
+class NewBase(Base):
+    """The OXP3 with the 0.4 controls: 4 P (policy0-3), 6 E (policy4-9), 4 LP-E (policy10-13) cores, intel_pstate
+    max/min_perf_pct 100/9, the SoC slider (03/00, balanced), the GPU power profile (base)."""
+
+    def setUp(self):
+        super().setUp()
+        pf.types(self.ctx, p="0-3", atom="4-13", no_l3=(10, 11, 12, 13))
+        pf.perf(self.ctx)
+        self.soc = pf.soc(self.ctx)
+        self.gprof = pf.gpu_profile(self.ctx)
+
+    def pct(self, which="max"):
+        return int(pf.get(pf.perf_path(self.ctx, which)))
+
+    def cap(self, policy):
+        return int(pf.get(pf.cap_path(self.ctx, policy)))
+
+    def param(self, which="balance"):
+        return pf.get(pf.soc_param(self.ctx, which))
+
+    def refused(self, error_part, key="default", slot="main", **values):
+        res = power.set_values(self.ctx, key, slot, values)
+        self.assertFalse(res["ok"], res)
+        self.assertIn(error_part, res["error"])
+        return res
+
+
+class NewFieldsTest(NewBase):
+    def test_bounds_and_nulls(self):
+        for field, bad, good in (("cpu_max_pct", 29, 30), ("cpu_max_pct", 101, 100), ("cpu_min_pct", 51, 50),
+                                 ("cpu_min_pct", 0, 1), ("soc_balance", 0, 1), ("soc_balance", 6, 5),
+                                 ("soc_offset", 4, 3), ("cpu_cap_p_mhz", 399, 400), ("cpu_cap_lpe_mhz", 6001, 6000),
+                                 ("gpu_power_profile", "fast", "power_saving"), ("epp_e", "default", "power"),
+                                 ("fan_mode", "loud", "quiet"), ("scx_mode", "lowlatency", "gaming"),
+                                 ("soc_balance", True, 3), ("cpu_max_pct", "70", 70)):
+            self.refused(field, **{field: bad})
+            self.set(**{field: good})
+            self.set(**{field: None})
+        self.assertEqual(len(power.FIELDS), 19)
+
+    def test_bad_values_in_the_file_read_as_null(self):
+        main = dict(power._empty_values(), cpu_max_pct=20, soc_balance=4, fan_mode="loud", epp_p="power",
+                    cpu_cap_e_mhz=2000)
+        with open(os.path.join(self.ctx.settings_dir, "power.json"), "w") as f:
+            json.dump({"profiles": {"default": {"main": main}}, "poll_s": 7}, f)
+        info = power.info(self.ctx, False)["info"]
+        got = info["profiles"]["default"]["main"]
+        self.assertEqual((got["cpu_max_pct"], got["soc_balance"], got["fan_mode"], got["epp_p"],
+                          got["cpu_cap_e_mhz"]), (None, 4, None, "power", 2000))
+        self.assertEqual(info["options"]["poll_s"], 7)
+
+    def test_a_file_with_both_caps_reads_the_per_core_caps_as_null(self):
+        main = dict(power._empty_values(), cpu_max_pct=70, cpu_cap_p_mhz=2400)
+        with open(os.path.join(self.ctx.settings_dir, "power.json"), "w") as f:
+            json.dump({"profiles": {"default": {"main": main}}}, f)
+        got = power.info(self.ctx, False)["info"]["profiles"]["default"]["main"]
+        self.assertEqual((got["cpu_max_pct"], got["cpu_cap_p_mhz"]), (70, None))
+
+    def test_speed_cap_and_per_core_caps_are_exclusive(self):
+        self.on()
+        self.set(cpu_max_pct=70)
+        self.refused("either the CPU speed cap or the per-core caps", cpu_cap_p_mhz=2400)
+        self.assertIsNone(power.info(self.ctx, False)["info"]["profiles"]["default"]["main"]["cpu_cap_p_mhz"])
+        self.assertEqual(self.pct(), 70)
+        res = self.set(cpu_max_pct=None, cpu_cap_p_mhz=2400)        # the switch, as one change
+        self.assertEqual((self.pct(), self.cap("policy0"), self.cap("policy4")), (100, 2400000, 3800000))
+        self.assertEqual(res["state"]["applied_values"]["cpu_cap_p_mhz"], 2400)
+        self.assertEqual(res["state"]["now"]["caps_mhz"], {"p": 2400, "e": 3800, "lpe": 2500})
+        self.refused("either", cpu_max_pct=60)
+        power.profile(self.ctx, "7", None, True)                    # a copy of default: still one of them
+        self.refused("either", key="7", slot="ac", cpu_max_pct=60)
+
+    def test_speed_cap_and_floor_floor_on_ac_only(self):
+        self.on()
+        self.set(cpu_max_pct=70, cpu_min_pct=40)
+        self.tick()
+        self.assertEqual((self.pct(), self.pct("min")), (70, 9))     # battery: the firmware floor
+        res = power.state(self.ctx)["state"]
+        self.assertEqual((res["applied_values"]["cpu_min_pct"], res["now"]["cpu_min_pct"]), (9, 9))
+        self.assertEqual((res["range"]["cpu_pct_min"], res["range"]["cpu_min_pct_fw"],
+                          res["range"]["cpu_min_pct_max"]), (30, 9, 50))
+        self.plug(True)
+        self.tick()
+        self.assertEqual(self.tick(), "applied")
+        self.assertEqual((self.pct(), self.pct("min")), (70, 40))
+        self.set(cpu_max_pct=35, cpu_min_pct=50)                    # never above the cap
+        self.assertEqual((self.pct(), self.pct("min")), (35, 35))
+        self.plug(False)
+        for _ in range(3):
+            self.tick()
+        self.assertEqual((self.pct(), self.pct("min")), (35, 9))
+
+    def test_soc_slider(self):
+        self.on()
+        self.set(soc_balance=4, soc_offset=2)
+        self.assertEqual((self.param(), self.param("offset")), ("04", "02"))
+        names = self.w.names(self.ctx)
+        self.assertEqual(names[-3:], ["slider_offset", "slider_balance", "profile"])
+        self.assertEqual(self.w.calls[-1][1], "balanced")
+        st = power.state(self.ctx)["state"]
+        self.assertEqual(st["now"]["soc"]["balance"], 4)
+        self.assertEqual(st["applied_values"]["soc_balance"], 4)
+        pf.put(os.path.join(self.soc, "profile"), "performance")    # power-profiles-daemon's choice
+        n = len(self.w.calls)
+        self.set(soc_balance=2)
+        self.assertEqual(self.param(), "02")
+        self.assertEqual(len(self.w.calls) - n, 1)                   # the profile is left alone
+        self.assertEqual(pf.get(os.path.join(self.soc, "profile")), "performance")
+
+    def test_gpu_power_profile_and_its_retry(self):
+        self.on()
+        self.w.fail["power_profile"] = errno.EIO                    # the GPU asleep
+        res = self.set(gpu_power_profile="power_saving")
+        self.assertTrue(res["ok"], res)
+        self.assertEqual([(f["id"], f["transient"]) for f in res["applied"]["failed"]], [("gpu/profile", True)])
+        self.assertEqual(power._get(self.ctx).pending, ["gpu/profile"])
+        self.w.fail.clear()
+        self.assertEqual(self.tick(), "applied")                    # the first tick: retried
+        self.assertEqual(pf.get(self.gprof), "base    [power_saving]")
+        self.assertEqual(power._get(self.ctx).pending, [])
+
+    def test_pending_retries_are_limited(self):
+        self.on()
+        self.w.fail["power_profile"] = errno.EIO
+        self.set(gpu_power_profile="power_saving")
+        for _ in range(power.PENDING_RETRIES + 5):
+            self.tick()
+        tries = [c for c in self.w.calls if c[0] == self.gprof]
+        self.assertEqual(len(tries), 1 + power.PENDING_RETRIES)
+
+    def test_epp_split_by_core_type(self):
+        self.on()
+        res = self.set(epp="balance_performance", epp_e="power")
+        got = [pf.get(pf.epp_path(self.ctx, f"policy{i}")) for i in (0, 3, 4, 9, 10, 13)]
+        self.assertEqual(got, ["balance_performance"] * 2 + ["power"] * 2 + ["balance_performance"] * 2)
+        ours = power._get(self.ctx).run["ours"]
+        self.assertEqual({k: v for k, v in ours.items() if k.startswith("epp")},
+                         {"epp/policy0": "balance_performance", "epp/policy4": "power",
+                          "epp/policy10": "balance_performance"})
+        self.assertEqual(res["state"]["now"]["epp_types"], {"p": "balance_performance", "e": "power",
+                                                            "lpe": "balance_performance"})
+        self.assertEqual(res["state"]["applied_values"]["epp_e"], "power")
+        self.set(epp=None, epp_e=None, epp_lpe="balance_power")      # no epp: the snapshot for the others
+        self.assertEqual(pf.get(pf.epp_path(self.ctx, "policy4")), "balance_performance")
+        self.assertEqual(pf.get(pf.epp_path(self.ctx, "policy12")), "balance_power")
+        pf.put(pf.epp_path(self.ctx, "policy4"), "performance")      # drift on one type
+        self.tick()
+        self.tick()
+        self.assertEqual(power.state(self.ctx)["state"]["overridden"]["what"], "epp/policy4")
+
+    def test_fan_and_scx_are_stored_and_copied_never_written(self):
+        self.on()
+        n = len(self.w.calls)
+        self.set(fan_mode="quiet", scx_mode="gaming")
+        self.assertEqual(len(self.w.calls), n)
+        power.profile(self.ctx, "7", None, True)
+        prof = power.info(self.ctx, False)["info"]["profiles"]["7"]["main"]
+        self.assertEqual((prof["fan_mode"], prof["scx_mode"]), ("quiet", "gaming"))
+        power.game(self.ctx, "7")
+        a = power.active(self.ctx)
+        self.assertEqual(a, {"key": "7", "slot": "main", "app": "7", "ac": False, "enabled": True,
+                             "values": prof})
+        self.assertFalse([p for p in self.w.paths() if "hwmon" in p or "pwm" in p])
+
+    def test_info_hw_and_range(self):
+        info = power.info(self.ctx, True)["info"]
+        self.assertEqual((info["hw"]["cpu"]["perf_pct"], info["hw"]["cpu"]["types"], info["hw"]["soc"],
+                          info["hw"]["gpu"]["power_profile"]), (True, ["p", "e", "lpe"], True, True))
+        self.assertEqual(info["state"]["range"]["core_types"],
+                         {"p": {"min_mhz": 400, "max_mhz": 5100, "policies": 4},
+                          "e": {"min_mhz": 400, "max_mhz": 3800, "policies": 6},
+                          "lpe": {"min_mhz": 400, "max_mhz": 2500, "policies": 4}})
+        self.assertEqual(info["state"]["now"]["gpu_profile"], "base")
+        self.assertEqual(info["state"]["blocked_fields"], {})
+
+
+class NewSnapshotTest(NewBase):
+    def test_restore_writes_the_new_values_back(self):
+        self.on()
+        self.set(cpu_max_pct=50, soc_balance=5, soc_offset=1, gpu_power_profile="power_saving")
+        snap = power._get(self.ctx).run["snapshot"]
+        self.assertEqual((snap["perf"], snap["soc"], snap["gpu_profile"], snap["caps"]["policy4"]),
+                         ({"max": 100, "min": 9}, {"balance": 3, "offset": 0}, "base", 3800000))
+        self.assertEqual(pf.get(self.gprof), "base    [power_saving]")
+        self.w.calls.clear()
+        res = power.enable(self.ctx, False)
+        self.assertTrue(res["ok"], res)
+        self.assertEqual((self.pct(), self.param(), self.param("offset"), pf.get(self.gprof)),
+                         (100, "03", "00", "[base]    power_saving"))
+        names = self.w.names(self.ctx)
+        self.assertLess(names.index("max_perf_pct"), names.index("slider_offset"))
+        self.assertEqual(names[names.index("slider_offset"):names.index("slider_offset") + 3],
+                         ["slider_offset", "slider_balance", "profile"])
+
+    def test_caps_restored(self):
+        self.on()
+        self.set(cpu_cap_e_mhz=2000, cpu_cap_lpe_mhz=1500)
+        self.assertEqual((self.cap("policy0"), self.cap("policy4"), self.cap("policy13")), (5100000, 2000000,
+                                                                                           1500000))
+        power.enable(self.ctx, False)
+        self.assertEqual((self.cap("policy4"), self.cap("policy13")), (3800000, 2500000))
+
+    def test_an_old_snapshot_gets_the_new_keys_filled_not_retaken(self):
+        p = power._get(self.ctx)
+        p.run["snapshot"] = {"taken_at": 5.0, "rapl": {MSR: {"pl1_uw": 20 * MW, "pl2_uw": 52 * MW}},
+                             "gpu": {"min": 850, "max": 2300}, "epp": None, "turbo": True}   # written by 0.3
+        power._save_run(self.ctx, p)
+        self.restart()
+        pf.perf(self.ctx, max=90, min=9)
+        self.on()
+        snap = power._get(self.ctx).run["snapshot"]
+        self.assertEqual((snap["taken_at"], snap["rapl"][MSR]["pl1_uw"], snap["perf"], snap["soc"]),
+                         (5.0, 20 * MW, {"max": 90, "min": 9}, {"balance": 3, "offset": 0}))
+        pf.perf(self.ctx, max=60, min=9)
+        self.set(cpu_max_pct=70)
+        self.assertEqual(power._get(self.ctx).run["snapshot"]["perf"], {"max": 90, "min": 9})   # never retaken
+
+
+class NewDriftTest(NewBase):
+    def setUp(self):
+        super().setUp()
+        self.units = units("none")
+        self.on()
+        self.set(cpu_max_pct=70, soc_balance=4, gpu_power_profile="power_saving")
+        self.tick()
+
+    def test_ours_has_the_new_ids(self):
+        ours = power._get(self.ctx).run["ours"]
+        self.assertEqual({k: ours[k] for k in ("cpu/max_pct", "cpu/min_pct", "soc/balance", "soc/offset",
+                                                "gpu/profile")},
+                         {"cpu/max_pct": 70, "cpu/min_pct": 9, "soc/balance": 4, "soc/offset": 0,
+                          "gpu/profile": "power_saving"})
+        self.assertEqual(sorted(k for k in ours if k.startswith("cpu/cap/")),
+                         ["cpu/cap/policy0", "cpu/cap/policy10", "cpu/cap/policy4"])
+
+    def test_drift_on_the_speed_cap_names_another_program(self):
+        pf.put(pf.perf_path(self.ctx), 60)
+        self.assertEqual(self.tick(), "nothing")
+        self.assertEqual(self.tick(), "overridden")
+        o = power.state(self.ctx)["state"]["overridden"]
+        self.assertEqual((o["what"], o["ours"], o["now"], o["suspects"]), ("cpu/max_pct", "70 %", "60 %", ["other"]))
+
+    def test_an_ignored_lpmd_is_the_suspect(self):
+        self.units = units("cachyos-lpmd")
+        power.options(self.ctx, {"ignore": ["intel_lpmd"]})
+        self.tick(power.CONFLICT_RECHECK_S)
+        pf.put(pf.soc_param(self.ctx), "02")
+        self.tick()
+        self.tick()
+        self.assertEqual(power.state(self.ctx)["state"]["overridden"]["suspects"], ["intel_lpmd"])
+
+    def test_a_platform_profile_switch_is_not_drift(self):
+        for word in ("performance", "low-power", "balanced"):
+            pf.put(os.path.join(self.soc, "profile"), word)
+            self.assertEqual(self.tick(), "nothing")
+            self.assertEqual(self.tick(), "nothing")
+        self.assertIsNone(power.state(self.ctx)["state"]["overridden"])
+
+    def test_gpu_profile_drift_is_seen_by_tick(self):
+        pf.gpu_profile(self.ctx, "base")
+        self.tick()
+        self.assertEqual(self.tick(), "overridden")
+        self.assertEqual(power.state(self.ctx)["state"]["overridden"]["suspects"], ["other"])
+
+    def test_lpmd_starting_drops_its_fields_and_keeps_the_rest(self):
+        self.units = units("cachyos-lpmd")
+        pf.put(pf.perf_path(self.ctx), 60)
+        self.tick()
+        self.assertEqual(self.tick(), "nothing")
+        ours = power._get(self.ctx).run["ours"]
+        self.assertFalse([k for k in ours if k.startswith(("cpu/", "soc/", "epp", "turbo"))], ours)
+        self.assertIn("gpu/profile", ours)
+        self.assertIsNone(power.state(self.ctx)["state"]["overridden"])
+        self.assertEqual(self.pct(), 60)                            # left to it
+
+
+class BlockersTest(NewBase):
+    def test_ppd_blocks_epp_and_boost_only(self):
+        self.units = units("ppd")
+        self.on()
+        res = self.set(cpu_max_pct=60, soc_balance=2, epp="power")
+        self.assertEqual(res["state"]["blocked_fields"], {"epp": ["ppd"], "turbo": ["ppd"]})
+        self.assertEqual((self.pct(), self.param()), (60, "02"))
+        self.assertEqual(pf.get(pf.epp_path(self.ctx)), "balance_performance")
+        self.assertIn("power-profiles-daemon", res["state"]["cpu_blocked"])
+
+    def test_tuned_blocks_the_cpu_speed_controls_not_the_slider(self):
+        self.units = units("tuned")
+        self.on()
+        res = self.set(cpu_max_pct=60, soc_balance=2)
+        self.assertEqual(set(res["state"]["blocked_fields"]), {"epp", "turbo", "cpu_pct", "cpu_caps"})
+        self.assertEqual((self.pct(), self.param()), (100, "02"))
+
+    def test_lpmd_blocks_cpu_speed_caps_and_slider_unless_paused(self):
+        self.units = units("cachyos-lpmd")
+        self.on()
+        res = self.set(cpu_max_pct=60, soc_balance=2, cpu_min_pct=None, gpu_power_profile="power_saving")
+        self.assertEqual(res["state"]["blocked_fields"],
+                         {k: ["intel_lpmd"] for k in ("epp", "turbo", "cpu_pct", "cpu_caps", "soc")})
+        self.assertEqual((self.pct(), self.param(), pf.get(self.gprof)), (100, "03", "base    [power_saving]"))
+        with mock.patch.object(power, "_lpmd_paused", lambda ctx: True):
+            self.assertTrue(power.refresh(self.ctx)["ok"])
+            self.assertEqual(self.tick(), "applied")
+            self.assertEqual((self.pct(), self.param()), (60, "02"))
+            st = power.state(self.ctx)["state"]
+            self.assertEqual((st["blocked_fields"], st["cpu_blocked"]), ({}, None))
+        self.assertIn("cpu_pct", power.state(self.ctx)["state"]["blocked_fields"])
+
+    def test_a_snapshot_taken_under_lpmd_uses_the_driver_defaults(self):
+        """intel_lpmd's leftovers (floor 50, slider 1) are not the snapshot: once it is paused (or fixed), blank
+        fields go to the driver defaults, the floor is not left at 50 on battery and its range is not 50..50."""
+        self.units = units("cachyos-lpmd")
+        pf.perf(self.ctx, max=80, min=50)
+        pf.soc(self.ctx, balance="01", offset="00")
+        self.plug(False)
+        self.on()
+        self.set(pl1_w=15)
+        snap = power._get(self.ctx).run["snapshot"]
+        self.assertEqual((snap["perf"], snap["soc"]), ({"max": 100, "min": 8}, {"balance": 3, "offset": 0}))
+        self.assertEqual((self.pct(), self.pct("min"), self.param()), (80, 50, "01"))     # left to intel_lpmd
+        with mock.patch.object(power, "_lpmd_paused", lambda ctx: True):
+            self.assertTrue(power.refresh(self.ctx)["ok"])
+            self.assertEqual(self.tick(), "applied")
+            self.assertEqual((self.pct(), self.pct("min"), self.param()), (100, 8, "03"))
+            rng = power.state(self.ctx)["state"]["range"]
+            self.assertEqual(rng["cpu_min_pct_fw"], 8)
+
+    def test_lpmd_note_not_hidden_by_a_blank_cap(self):
+        p = power._get(self.ctx)
+        p.data["enabled"] = True
+        p.run["ours"] = {"cpu/max_pct": 60}           # a blank cap is always in the target
+        pf.put(pf.perf_path(self.ctx), 60)
+        self.assertIn("60 %", power._lpmd_note(self.ctx, p))
+        p.data["profiles"]["default"]["main"]["cpu_max_pct"] = 60
+        self.assertIsNone(power._lpmd_note(self.ctx, p))
+
+    def test_lpmd_paused_reads_extras_lazily(self):
+        fake = types.ModuleType("oxp3deck.extras")
+        fake.lpmd_paused = lambda ctx: True
+        with mock.patch.dict(sys.modules, {"oxp3deck.extras": fake}):
+            import oxp3deck
+            had = getattr(oxp3deck, "extras", None)
+            oxp3deck.extras = fake
+            try:
+                self.assertTrue(power._lpmd_paused(self.ctx))
+                fake.lpmd_paused = lambda ctx: 1 / 0
+                self.assertFalse(power._lpmd_paused(self.ctx))
+            finally:
+                if had is None:
+                    del oxp3deck.extras
+                else:
+                    oxp3deck.extras = had
+
+    def test_lpmd_fix_note_not_for_our_own_cap(self):
+        self.units = units("cachyos-lpmd")
+        power.options(self.ctx, {"ignore": ["intel_lpmd"]})
+        self.on()
+        self.set(cpu_max_pct=60)
+        self.assertIsNone(power._lpmd_note(self.ctx, power._get(self.ctx)))
+        power._get(self.ctx).run["ours"].pop("cpu/max_pct")
+        self.assertIn("60 %", power._lpmd_note(self.ctx, power._get(self.ctx)))
+
+
+class PollTest(NewBase):
+    def setUp(self):
+        super().setUp()
+        self.units = units("none")
+        self.on()
+        self.set(pl1_w=15)
+        self.tick()
+        self.checks = 0
+        real = power._drift
+
+        def counting(p, reading, gpu_only):
+            self.checks += 1
+            return real(p, reading, gpu_only)
+
+        patcher = mock.patch.object(power, "_drift", counting)
+        patcher.start()
+        self.addCleanup(patcher.stop)
+
+    def test_refused_values(self):
+        for bad in (1, 61, -2, True, 2.5, "5", None):
+            res = power.options(self.ctx, {"poll_s": bad})
+            self.assertFalse(res["ok"], bad)
+        for good in (0, 2, 60):
+            self.assertTrue(power.options(self.ctx, {"poll_s": good})["ok"])
+        self.assertEqual(power.info(self.ctx, False)["info"]["options"]["poll_s"], 60)
+
+    def test_default_checks_every_tick(self):
+        for _ in range(5):
+            self.tick()
+        self.assertEqual(self.checks, 5)
+
+    def test_ten_seconds_is_one_check_every_five_ticks(self):
+        power.options(self.ctx, {"poll_s": 10})
+        for _ in range(10):
+            self.tick()
+        self.assertEqual(self.checks, 2)
+
+    def test_off_checks_only_inside_a_grace_window(self):
+        n = len(self.w.calls)
+        power.options(self.ctx, {"poll_s": 0})
+        self.assertEqual(len(self.w.calls), n)                      # changing the rate writes nothing
+        pf.set_watts(self.ctx, MSR, "long_term", 35)
+        for _ in range(5):
+            self.assertEqual(self.tick(), "nothing")
+        self.assertEqual(self.checks, 0)
+        self.plug(True)
+        self.tick()
+        self.assertEqual(self.tick(), "applied")                    # the AC apply
+        pf.set_watts(self.ctx, MMIO, "long_term", 35)
+        self.assertEqual(self.tick(), "applied")                    # grace: checked every tick
+        self.assertGreater(self.checks, 0)
+
+    def test_off_does_not_retry_pending_outside_grace(self):
+        power.options(self.ctx, {"poll_s": 0})
+        self.w.fail["power_profile"] = errno.EIO
+        self.set(gpu_power_profile="power_saving")
+        self.w.fail.clear()
+        for _ in range(3):
+            self.tick()
+        self.assertEqual(pf.get(self.gprof), "[base]    power_saving")
+        power.options(self.ctx, {"poll_s": 2})
+        self.tick()
+        self.assertEqual(pf.get(self.gprof), "base    [power_saving]")
+
+
+class ActiveRefreshTest(NewBase):
+    def test_active_shape(self):
+        a = power.active(self.ctx)
+        self.assertEqual(set(a), {"key", "slot", "app", "ac", "enabled", "values"})
+        self.assertEqual((a["key"], a["slot"], a["app"], a["ac"], a["enabled"]), ("default", "main", None, False,
+                                                                                    False))
+        self.assertEqual(set(a["values"]), set(power.FIELDS))
+        power.options(self.ctx, {"split_ac": True})
+        power.set_values(self.ctx, "default", "ac", {"fan_mode": "max"})
+        self.plug(True)
+        a = power.active(self.ctx)
+        self.assertEqual((a["slot"], a["ac"], a["values"]["fan_mode"]), ("ac", True, "max"))
+        power.profile(self.ctx, "9", None, True)
+        power.game(self.ctx, "9")
+        self.assertEqual(power.active(self.ctx)["key"], "9")
+        power.options(self.ctx, {"per_game": False})
+        self.assertEqual(power.active(self.ctx)["key"], "default")
+
+    def test_refresh_only_when_writing_is_allowed(self):
+        self.assertTrue(power.refresh(self.ctx)["ok"])
+        self.assertIsNone(power._get(self.ctx).apply_at)              # TDP control off
+        self.on()
+        power.refresh(self.ctx)
+        self.assertEqual(power._get(self.ctx).apply_at, self.t)
 
 
 if __name__ == "__main__":

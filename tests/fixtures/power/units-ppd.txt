@@ -1,0 +1,2 @@
+power-profiles-daemon.service                         loaded    active   running Power Profiles daemon
+intel_lpmd.service                                    loaded    inactive dead    Intel Linux Energy Optimizer (lpmd) Service

@@ -84,13 +84,13 @@ test("power-state is polled only while active (it wakes the GPU)", () => {
   const fn = s.slice(s.indexOf("export const usePowerState"));
   assert.match(fn, /\{ skip: !active/);
   assert.match(fn, /if \(!active\) return undefined;/);
-  assert.match(src("components/PowerControls.tsx"), /usePower\(!quick \|\| visible\)/);
+  assert.match(src("components/PowerControls.tsx"), /const shows = !quick \|\| visible;\n\s*const p = usePower\(shows\);/);
 });
 
 test("every power call in api.ts is wrapped in backend.ts with an empty state", () => {
   const api = src("api.ts");
   const names = [...api.matchAll(/callable<.*?>\("(power_[a-z_]+)"\)/g)].map((m) => m[1]);
-  assert.equal(names.length, 11);
+  assert.equal(names.length, 12);
   const b = src("backend.ts");
   for (const n of names) assert.match(b, new RegExp(`export const ${n} = guard\\("${n}", `), n);
 });
@@ -201,4 +201,91 @@ test("a fix's answer refreshes the caches at once and once more after the backen
   assert.match(fn, /put<PowerInfoRes>\("power-info", \{ \.\.\.cur, info: \{ \.\.\.cur\.info, conflicts: r\.conflicts, fixed: r\.fixed, state: r\.state \} \}\)/);
   assert.match(fn, /setTimeout\(\(\) => invalidate\("power-info"\), FIX_RELOAD_MS\)/);
   assert.match(src("components/ConflictRow.tsx"), /const err = notePowerFix\(r\);/);
+});
+
+// ---- 0.4: "When it takes effect", live readouts, extras, automatic launch options -----------------------------------
+
+/** Selectors that change nothing carry no tag (DESIGN.md "When it takes effect"). */
+const SELECTORS = ["Profile to edit", "Edit values for", "Show 5x–8x", "Show advanced CPU options"];
+
+test("every setting control shows its effect tag (explainWhen), except the selectors", () => {
+  let n = 0;
+  for (const name of allSources().filter((x) => x.endsWith(".tsx"))) {
+    const s = src(name);
+    for (const m of s.matchAll(/<(ToggleField|SliderField|DropdownItem)\b/g)) {
+      const end = s.indexOf("/>", m.index);
+      const el = s.slice(m.index, end);
+      if (SELECTORS.some((l) => el.includes(`"${l}`))) continue;
+      n++;
+      assert.match(el, /description=\{explainWhen\(/, `${name}: ${el.slice(0, 120)}… has no explainWhen`);
+    }
+  }
+  assert.ok(n >= 30, `only ${n} controls found`);
+});
+
+test("every confirm dialog says when it takes effect", () => {
+  let n = 0;
+  for (const name of allSources()) {
+    if (name === "components/confirm.tsx") continue;
+    const s = src(name);
+    for (const m of s.matchAll(/\bconfirm\(/g)) {
+      if (/(const|export const) $/.test(s.slice(m.index - 13, m.index)) || /\w$/.test(s.slice(m.index - 1, m.index))) continue;
+      const a = callArgs(s, m.index + "confirm".length);
+      n++;
+      assert.match(a.text, /\beffect[:,]|\beffect\b/, `${name}: confirm(${a.text.slice(0, 80)}…) has no effect`);
+    }
+  }
+  assert.ok(n >= 15, `only ${n} confirms found`);
+  // the dialogs built elsewhere carry it too
+  assert.match(src("conflicts.ts"), /ok: "Turn it off",\n\s*effect: "now",/);
+  assert.match(src("conflicts.ts"), /ok: "Turn it back on",\n\s*effect: "now",/);
+  assert.match(src("components/confirm.tsx"), /\{o\.effect && <div[^>]*>\{confirmLine\(o\.effect\)\}<\/div>\}/);
+});
+
+test("automatic launch options never write while that game runs", () => {
+  const s = src("components/AutoLaunch.tsx");
+  const calls = [...s.matchAll(/setLaunchOptions\(appid/g)];
+  assert.equal(calls.length, 2);
+  for (const m of calls) {
+    const before = s.slice(Math.max(0, m.index - 400), m.index);
+    assert.match(before, /if \(isRunning\(appid\)\) \{?\s*(return|setErr)/, "a running check right before the write");
+    const fnStart = Math.max(s.lastIndexOf("export const autoApply", m.index), s.lastIndexOf("const doUndo", m.index));
+    assert.ok(before.length && s.slice(fnStart, m.index).includes("isRunning(appid)"), "in the same function");
+  }
+  // only AutoLaunch.tsx and GameControls (the user's own picks) write launch options
+  const writers = allSources().filter((n) => !["steam.ts"].includes(n) && /\bsetLaunchOptions\(/.test(src(n)));
+  assert.deepEqual(writers.sort(), ["components/AutoLaunch.tsx", "components/GameControls.tsx"]);
+  assert.match(src("index.tsx"), /const stopAuto = watchGameExits\(\);/);
+  assert.match(src("index.tsx"), /stopAuto\(\);/);
+});
+
+test("the live readouts are read only by useLive, only while active", () => {
+  const users = allSources().filter((n) => n !== "api.ts" && n !== "backend.ts" && /\bpower_live\(/.test(src(n)));
+  assert.deepEqual(users, ["store.ts"]);
+  const s = src("store.ts");
+  const fn = s.slice(s.indexOf("export const useLive"), s.indexOf("// ---- extras"));
+  assert.match(fn, /if \(!active \|\| stopped\) return undefined;/);
+  assert.match(fn, /power_live\(\)/);
+  assert.match(fn, /LIVE_MS/);
+  assert.match(s, /export const LIVE_MS = 1000;/);
+  assert.match(src("components/PowerControls.tsx"), /<LiveRow active=\{shows\} \/>/);
+});
+
+test("the charge behaviour is never inhibit-charge (only auto and inhibit-charge-awake)", () => {
+  for (const name of allSources()) {
+    assert.doesNotMatch(src(name), /["']inhibit-charge["']/, `${name}: "inhibit-charge"`);
+  }
+  const s = src("components/ExtrasControls.tsx");
+  for (const m of s.matchAll(/extras_set\(\{([^}]*)\}/g)) {
+    if (m[1].includes("charge_behaviour")) assert.match(m[1], /charge_behaviour: on \? "inhibit-charge-awake" : "auto"/);
+  }
+});
+
+test("the extras calls are in api.ts and wrapped in backend.ts", () => {
+  const api = src("api.ts");
+  const b = src("backend.ts");
+  for (const n of ["power_live", "extras_info", "extras_set", "extras_take_control"]) {
+    assert.match(api, new RegExp(`export const ${n} = callable<`), n);
+    assert.match(b, new RegExp(`export const ${n} = guard\\("${n}", \\{ (live|extras): null \\}\\)`), n);
+  }
 });

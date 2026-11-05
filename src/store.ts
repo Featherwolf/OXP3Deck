@@ -4,9 +4,10 @@
 // and someone is looking at it.
 import { useEffect, useReducer, useRef } from "react";
 
-import { job_status, power_set, power_state } from "./backend";
+import { extras_info, job_status, power_live, power_set, power_state } from "./backend";
+import type { EffectSpec } from "./effects";
 import { makeWriter } from "./power";
-import type { Job, PowerChangeRes, PowerFixRes, PowerInfoRes, PowerStateRes } from "./types";
+import type { ExtrasInfoRes, Job, Live, PowerChangeRes, PowerFixRes, PowerInfoRes, PowerStateRes } from "./types";
 
 type Entry = { data: unknown; inflight: Promise<unknown> | null; subs: Set<() => void>;
                loader: (() => Promise<unknown>) | null; stale: boolean };
@@ -83,6 +84,7 @@ export const invalidate = (prefix = "") => {
 let current: Job | null = null;
 const jobSubs = new Set<() => void>();
 const endSubs = new Set<(j: Job) => void>();
+const afterSubs = new Map<string, ((j: Job) => void)[]>();
 let pollers = 0;
 let timer: ReturnType<typeof setTimeout> | null = null;
 let failures = 0;
@@ -102,6 +104,9 @@ export const noteJob = (j: Job | null | undefined) => {
   if (prev && prev.id === j.id && prev.state === "running" && j.state !== "running") {
     invalidate();
     endSubs.forEach((f) => { try { f(j); } catch { /* a dead subscriber */ } });
+    const once = afterSubs.get(j.id) ?? [];
+    afterSubs.delete(j.id);
+    once.forEach((f) => { try { f(j); } catch { /* a failing callback */ } });
   }
   schedule();
 };
@@ -144,6 +149,11 @@ export const useJobPolling = (active: boolean) => {
   }, [active]);
 };
 
+/** fn(job) once, when job `id` (one this frontend follows) ends, whether a page is open or not. */
+export const afterJob = (id: string, fn: (j: Job) => void) => {
+  afterSubs.set(id, [...(afterSubs.get(id) ?? []), fn]);
+};
+
 /** fn(job) whenever a job this frontend followed ends. */
 export const useJobEnded = (fn: (j: Job) => void) => {
   const latest = useRef(fn);
@@ -172,7 +182,13 @@ export const useClaim = (id: string | null | undefined) => {
 };
 
 /** For onDismount: stop the poll timer. */
-export const stopPolling = () => { stopped = true; if (timer) clearTimeout(timer); timer = null; };
+export const stopPolling = () => {
+  stopped = true;
+  if (timer) clearTimeout(timer);
+  timer = null;
+  liveStops.forEach((f) => { try { f(); } catch { /* already stopped */ } });
+  liveStops.clear();
+};
 
 // ---- power ----------------------------------------------------------------------------------------------------------
 
@@ -183,7 +199,7 @@ export const stopPolling = () => { stopped = true; if (timer) clearTimeout(timer
 export const powerWriter = makeWriter(power_set, {
   onState: (state) => put<PowerStateRes>("power-state", { ok: true, error: null, state }),
   onAnswer: (r, stale) => {
-    if (!stale) invalidate("power-info");
+    if (!stale) { invalidate("power-info"); extrasSoon(); }
     if (!r.ok) powerErrors.forEach((f) => { try { f(r.error); } catch { /* a dead subscriber */ } });
   },
 });
@@ -205,6 +221,7 @@ export const notePower = (r: PowerChangeRes): string | null => {
   if (r.state) put<PowerStateRes>("power-state", { ok: true, error: null, state: r.state });
   invalidate("power-info");
   invalidate("overview");
+  extrasSoon();
   return r.ok ? null : r.error || "refused";
 };
 
@@ -251,4 +268,84 @@ export const usePowerState = (active: boolean) => {
     return () => { clearInterval(t); flushPower(); };
   }, [active]);
   return res;
+};
+
+// ---- live readouts (DESIGN.md "Live readouts") --------------------------------------------------------------------
+
+/** How often the live readouts are read while a panel shows them. */
+export const LIVE_MS = 1000;
+const liveStops = new Set<() => void>();
+
+/**
+ * The live readouts: power_live() every LIVE_MS, only while mounted and `active` (the quick panel or the Power tab
+ * shows), one call in flight at a time; stopped on unmount, when it goes inactive and by stopPolling.
+ */
+export const useLive = (active: boolean): { live: Live | null; error: string | null } => {
+  const [state, set] = useReducer((_: { live: Live | null; error: string | null }, n: { live: Live | null; error: string | null }) => n,
+    { live: null, error: null });
+  useEffect(() => {
+    if (!active || stopped) return undefined;
+    let alive = true;
+    let handle: ReturnType<typeof setTimeout> | null = null;
+    const step = async () => {
+      handle = null;
+      if (!alive) return;
+      const r = await power_live();
+      if (!alive) return;
+      set(r.ok ? { live: r.live, error: null } : { live: null, error: r.error });
+      if (alive && !stopped) handle = setTimeout(step, LIVE_MS);
+    };
+    const stop = () => { alive = false; if (handle) clearTimeout(handle); handle = null; };
+    liveStops.add(stop);
+    step();
+    return () => { stop(); liveStops.delete(stop); };
+  }, [active]);
+  return state;
+};
+
+// ---- extras (DESIGN.md "Extras") ----------------------------------------------------------------------------------
+
+/** The extras' state, read again on every mount (cheap: the backend caches its D-Bus answers for 10 s). */
+export const useExtras = () => useResource<ExtrasInfoRes>("extras-info", extras_info, { fresh: true });
+
+/** An extras answer into the cache; its error text (or null). */
+export const noteExtras = (r: ExtrasInfoRes): string | null => {
+  if (r.extras) put<ExtrasInfoRes>("extras-info", r);
+  else invalidate("extras-info");
+  extrasSoon();
+  return r.ok ? null : r.error || "refused";
+};
+
+let extrasTimer: ReturnType<typeof setTimeout> | null = null;
+/** Reload extras-info 2 s after a power or extras change (the sync applied fan and scheduler; this catches lpmd). */
+export const extrasSoon = () => {
+  if (extrasTimer) clearTimeout(extrasTimer);
+  extrasTimer = setTimeout(() => { extrasTimer = null; invalidate("extras-info"); }, 2000);
+};
+
+// ---- pending rows (DESIGN.md "When it takes effect": "Restart the game to apply", ...) -----------------------------
+
+export type Pending = { id: string; effect: EffectSpec; label?: string; appid?: string | null; game?: string | null };
+const pendings = new Map<string, Pending>();
+const pendingSubs = new Set<() => void>();
+const pendingKey = (p: Pick<Pending, "id" | "appid">) => `${p.id}@${p.appid ?? ""}`;
+
+/** A change that takes effect later: its row shows under the control until it applies (or the frontend reloads). */
+export const notePending = (p: Pending) => { pendings.set(pendingKey(p), p); notify(pendingSubs); };
+/** Drop the pending rows of a setting (it was changed back, or it applied). */
+export const clearPending = (id: string, appid?: string | null) => {
+  if (pendings.delete(pendingKey({ id, appid }))) notify(pendingSubs);
+};
+/** `appid` started: its "Restart the game" rows are done. */
+export const clearPendingFor = (appid: string | null) => {
+  if (!appid) return;
+  let changed = false;
+  pendings.forEach((p, k) => { if (p.appid === appid) { pendings.delete(k); changed = true; } });
+  if (changed) notify(pendingSubs);
+};
+/** The pending rows of these setting ids (for appid, when given), re-rendered on every change. */
+export const usePending = (ids: string[], appid?: string | null): Pending[] => {
+  const [, bump] = useReducer((n: number) => n + 1, 0);
+  useEffect(() => { pendingSubs.add(bump); return () => { pendingSubs.delete(bump); }; }, []);
+  return [...pendings.values()].filter((p) => ids.includes(p.id) && (appid === undefined || (p.appid ?? null) === (appid ?? null)));
 };

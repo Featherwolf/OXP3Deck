@@ -3,10 +3,12 @@
 import { ButtonItem, PanelSection, PanelSectionRow, SliderField, ToggleField } from "@decky/ui";
 import { FC, useState } from "react";
 
-import { applyFixes, blockedBy, revertFixes, useAction } from "../actions";
+import { applyFixes, blockedBy, fixesEffect, revertFixes, useAction } from "../actions";
 import { get_overview, oxp3_catalog, oxp3_status } from "../backend";
 import { DetailsSpec, paragraphs } from "../components/confirm";
-import { explain, label, Note, Problem, Status, WithDetails } from "../components/Hint";
+import { Pending } from "../components/Effect";
+import { explain, explainWhen, label, Note, Problem, Status, WithDetails } from "../components/Hint";
+import { EFFECTS, effectText } from "../effects";
 import { JobView, TaskSection } from "../components/JobView";
 import { RebootRow } from "../components/Reboot";
 import { openPage } from "../nav";
@@ -85,6 +87,8 @@ const FixRow: FC<{ f: Oxp3Fix; c: Oxp3CatalogFix | undefined; cat: Oxp3Catalog |
       lines: [`oxp3-tool fix id: ${f.id}`],
     };
     const short = f.pending ? "Reboot pending" : STATE_SHORT[f.state] ?? f.state;
+    const effect = fixesEffect([f], opts);
+    const why = running ? "Wait for the running task." : null;
     const refreshD: DetailsSpec | null = cat ? { title: "Lowest refresh rate", body: `The lowest refresh rate the display profile offers Game Mode (default ${cat.min_refresh.default ?? cat.min_refresh.max} Hz; below that is untested). Takes effect the next time Game Mode starts.` } : null;
     const ssdD: DetailsSpec = { title: "Apply even without the problem", body: "The fixes tool applies this only with the Predator GM7 SSD or a logged resume failure; this applies it anyway. Costs a little battery while asleep; takes effect after a reboot.", lines: ["--any-ssd"] };
     const applyD: DetailsSpec = { title: appliedLike ? "Apply again" : "Apply", body: paragraphs([c?.details ? c.details.replace(/\n/g, " ") : f.summary, `Takes effect ${f.takes_effect}. You see the plan first.`]) };
@@ -93,19 +97,19 @@ const FixRow: FC<{ f: Oxp3Fix; c: Oxp3CatalogFix | undefined; cat: Oxp3Catalog |
       <>
         <PanelSectionRow>
           <Status ok={f.state === "applied" ? true : f.state === "damaged" || f.state === "incomplete" ? false : null}
-            label={f.title} detail={short} details={fixD} />
+            label={f.title} detail={`${short} · ${effectText(effect)}`} details={fixD} />
           {f.id === "oled-profile" && cat && canApply && (
             <WithDetails details={refreshD}>
               <SliderField label={label("Lowest refresh rate", refreshD)} value={minRefresh ?? Number(f.options?.min_refresh ?? cat.min_refresh.default ?? cat.min_refresh.max)}
                 min={cat.min_refresh.min} max={cat.min_refresh.max} step={1} showValue valueSuffix=" Hz" disabled={disabled}
                 onChange={setMinRefresh}
-                description={explain("Used when you tap Apply.")} />
+                description={explainWhen("Used when you tap Apply.", EFFECTS["fix.oled-profile.min_refresh"], why)} />
             </WithDetails>
           )}
           {f.id === "nvme-resume" && canApply && !appliedLike && f.state !== "recommended" && (
             <WithDetails details={ssdD}>
               <ToggleField label={label("Apply even without the problem", ssdD)} checked={anySsd} disabled={disabled} onChange={setAnySsd}
-                description={explain("Costs a little battery during sleep.")} />
+                description={explainWhen("Costs a little battery during sleep.", EFFECTS["fix.nvme-resume.any_ssd"], why)} />
             </WithDetails>
           )}
           {f.id === "buttons" && (
@@ -116,7 +120,7 @@ const FixRow: FC<{ f: Oxp3Fix; c: Oxp3CatalogFix | undefined; cat: Oxp3Catalog |
             <WithDetails details={applyD}>
               <ButtonItem layout="below" disabled={disabled}
                 onClick={() => act.run("apply", async () => blockedBy() ?? applyFixes([f], opts, `${appliedLike ? "Re-apply" : "Apply"}: ${f.title}`))}
-                description={explain("Shows what changes first.")}>
+                description={explainWhen("Shows what changes first.", effect, why)}>
                 {act.busy === "apply" ? "Reading the plan…" : label(appliedLike ? "Apply again" : "Apply", applyD)}
               </ButtonItem>
             </WithDetails>
@@ -125,12 +129,13 @@ const FixRow: FC<{ f: Oxp3Fix; c: Oxp3CatalogFix | undefined; cat: Oxp3Catalog |
             <WithDetails details={revertD}>
               <ButtonItem layout="below" disabled={disabled}
                 onClick={() => act.run("revert", async () => blockedBy() ?? revertFixes([f]))}
-                description={explain("Puts the original files back.")}>
+                description={explainWhen("Puts the original files back.", effect, why)}>
                 {act.busy === "revert" ? "Working…" : label("Undo this fix", revertD)}
               </ButtonItem>
             </WithDetails>
           )}
           <Problem what={f.title} error={act.error} />
+          <Pending ids={[`fix.${f.id}`]} />
         </PanelSectionRow>
         {act.job && <JobView job={act.job} lines={6} />}
       </>

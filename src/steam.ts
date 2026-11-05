@@ -27,6 +27,21 @@ export const runningApp = (): RunningApp | null => {
   }
 };
 
+/**
+ * True while `appid` runs (Router.RunningApps, else the main running app). When Steam cannot tell, true: the callers
+ * use it to refuse writing a running game's launch options, so not knowing must not let a write through.
+ */
+export const isRunning = (appid: string): boolean => {
+  try {
+    if (runningApp()?.appid === appid) return true;
+    const apps = (Router as any)?.RunningApps;
+    if (!Array.isArray(apps)) return runningApp() !== null;
+    return apps.some((a: any) => String(a?.appid) === appid);
+  } catch {
+    return true;
+  }
+};
+
 /** The last game seen running, for the Games tab when none runs now. */
 export const lastGame = (): RunningApp | null => {
   try {

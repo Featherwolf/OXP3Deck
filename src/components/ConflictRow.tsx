@@ -11,7 +11,8 @@ import { notePower, notePowerFix, powerWriter } from "../store";
 import type { PowerConflict, PowerFixed, PowerFixRes, PowerInfo } from "../types";
 import { when } from "../util";
 import { confirm, DetailsSpec, paragraphs, showDetails } from "./confirm";
-import { explain, Note, Problem, Status } from "./Hint";
+import { EFFECTS } from "../effects";
+import { explain, explainWhen, Note, Problem, Status } from "./Hint";
 
 // ---- the fixes made while the quick panel is open (it shows Undo only for those) ------------------------------------
 
@@ -53,7 +54,7 @@ const useFix = (info?: PowerInfo | null) => {
   const act = useAction();
   const fix = (row: PowerConflict) => act.run(`fix:${row.id}`, async () => {
     const d = fixConfirm(row, !!info?.state?.enabled);
-    if (!(await confirm({ title: d.title, text: d.text, lines: d.lines, linesTitle: d.linesTitle, ok: d.ok }))) return null;
+    if (!(await confirm({ title: d.title, text: d.text, lines: d.lines, linesTitle: d.linesTitle, ok: d.ok, effect: d.effect }))) return null;
     await powerWriter.drain();
     const r = await power_fix(row.id);
     const err = notePowerFix(r);
@@ -62,7 +63,7 @@ const useFix = (info?: PowerInfo | null) => {
   });
   const undo = (rec: PowerFixed) => act.run(`undo:${rec.id}`, async () => {
     const d = undoConfirm(rec, when(rec.at));
-    if (!(await confirm({ title: d.title, text: d.text, lines: d.lines, linesTitle: d.linesTitle, ok: d.ok }))) return null;
+    if (!(await confirm({ title: d.title, text: d.text, lines: d.lines, linesTitle: d.linesTitle, ok: d.ok, effect: d.effect }))) return null;
     await powerWriter.drain();
     const r = await power_unfix(rec.id);
     const err = notePowerFix(r);
@@ -91,20 +92,20 @@ export const ConflictRow: FC<{ c: PowerConflict; info: PowerInfo | null; quick?:
         label={`${name}${c.ignored ? " (handled)" : ""}`} detail={oneLine(c)} details={details} />
       {units.length > 0 && !c.ignored && (
         <ButtonItem layout="below" disabled={busy} onClick={() => fix(c)}
-          description={explain(`Turns ${name} off. You can undo it.`)}>
+          description={explainWhen(`Turns ${name} off. You can undo it.`, EFFECTS["power.fix"])}>
           {act.busy === `fix:${c.id}` ? "Turning it off…" : came ? "Fix again" : "Fix for me"}
         </ButtonItem>
       )}
       {c.fixed && (!quick || rec.has(c.id)) && (
         <ButtonItem layout="below" disabled={busy} onClick={() => undo(c.fixed!)}
-          description={explain("Turns back on what OXP3 Deck turned off.")}>
+          description={explainWhen("Turns back on what OXP3 Deck turned off.", EFFECTS["power.unfix"])}>
           {act.busy === `undo:${c.id}` ? "Turning it on…" : "Undo"}
         </ButtonItem>
       )}
       {c.fixed && quick && !rec.has(c.id) && <Note>Undo is on the Power tab.</Note>}
       {c.ignorable && !c.ignored && (
         <ButtonItem layout="below" disabled={busy} onClick={ignore}
-          description={explain("Only once it no longer changes these settings.")}>
+          description={explainWhen("Only once it no longer changes these settings.", EFFECTS["power.ignore"])}>
           I've handled it
         </ButtonItem>
       )}
@@ -134,7 +135,7 @@ export const FixedRow: FC<{ rec: PowerFixed; notes?: string[] }> = ({ rec, notes
       <Status ok label={`${name} is off`} detail={`Turned off ${when(rec.at)}.`} details={fixedDetails(rec, notes)} />
       {(notes ?? []).map((n, i) => <Note key={i}>{n}</Note>)}
       <ButtonItem layout="below" disabled={!!act.busy} onClick={() => undo(rec)}
-        description={explain("Re-enables what OXP3 Deck turned off.")}>
+        description={explainWhen("Re-enables what OXP3 Deck turned off.", EFFECTS["power.unfix"])}>
         {act.busy ? "Turning it on…" : "Undo: turn it back on"}
       </ButtonItem>
       <Problem what={`Undo ${name}`} error={act.error} />

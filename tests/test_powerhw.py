@@ -112,7 +112,8 @@ class GpuTest(Base):
         real = powerhw._read
         with mock.patch.object(powerhw, "_read", lambda p: seen.append(p) or real(p)):
             r = powerhw.read(self.ctx, hw, gpu=False)
-            self.assertEqual(r["gpu"], {"min": None, "max": None, "act": None, "cur": None, "reasons": []})
+            self.assertEqual(r["gpu"], {"min": None, "max": None, "act": None, "cur": None, "reasons": [],
+                                        "profile": None})
             self.assertFalse([p for p in seen if "/drm/" in p], seen)
             seen.clear()
             r = powerhw.read(self.ctx, hw, gpu=True)
@@ -213,7 +214,8 @@ class RefusalTest(Base):
         self.w.fail[pf.limit(self.ctx, "intel-rapl:0", "long_term")] = errno.EACCES
         res = self.apply(self.target)
         self.assertFalse(res["ok"])
-        self.assertEqual(res["failed"], [{"id": "intel-rapl:0/pl1", "error": "locked by firmware", "locked": True}])
+        self.assertEqual(res["failed"], [{"id": "intel-rapl:0/pl1", "error": "locked by firmware", "locked": True,
+                                         "transient": False}])
         self.assertIn("intel-rapl-mmio:0/pl1", res["written"])
         self.assertIn("intel-rapl:0/pl2", res["written"])          # the other constraint of that zone is tried
         self.assertEqual(pf.watts(self.ctx, "intel-rapl-mmio:0", "long_term"), 15)
@@ -229,7 +231,7 @@ class RefusalTest(Base):
         self.w.ignore.add(pf.limit(self.ctx, "intel-rapl-mmio:0", "long_term"))
         res = self.apply(self.target)
         self.assertEqual(res["failed"], [{"id": "intel-rapl-mmio:0/pl1", "error": "did not take: reads 35 W",
-                                          "locked": False}])
+                                          "locked": False, "transient": False}])
         self.assertNotIn("intel-rapl-mmio:0/pl1", res["written"])
 
     def test_gpu_eagain_then_success_and_einval(self):
@@ -260,7 +262,7 @@ class RefusalTest(Base):
             pf.put(self.ctx.sys_path(f"/sys/devices/system/cpu/cpufreq/policy{i}/scaling_governor"), "performance")
         res = self.apply({"epp": "power"})
         self.assertEqual(res["failed"], [{"id": "epp", "error": "the CPU governor is performance: EPP cannot "
-                                                                "change", "locked": False}])
+                                                                "change", "locked": False, "transient": False}])
         self.assertEqual(self.w.calls, [])
 
     def test_epp_busy_on_one_policy(self):
@@ -282,7 +284,8 @@ class RefusalTest(Base):
         self.assertEqual(pf.get(pf.no_turbo_path(self.ctx)), "1")
         self.w.fail["no_turbo"] = errno.EPERM
         res = self.apply({"turbo": True})
-        self.assertEqual(res["failed"], [{"id": "turbo", "error": "firmware has turned turbo off", "locked": False}])
+        self.assertEqual(res["failed"], [{"id": "turbo", "error": "firmware has turned turbo off", "locked": False,
+                                          "transient": False}])
 
     def test_missing_pieces(self):
         tmp = tempfile.TemporaryDirectory()
@@ -355,3 +358,216 @@ class OwnerReadingsTest(Base):
             self.assertEqual((pf.watts(self.ctx, z, "long_term"), pf.watts(self.ctx, z, "short_term"),
                               pf.watts(self.ctx, z, "peak_power")), (30, 45, 160))
         self.assertFalse(any("/gt1/" in p for p in self.w.paths()))
+
+
+class CoreTypesTest(Base):
+    def test_p_e_and_lp_e_by_l3(self):
+        pf.cpu(self.ctx, policies=12)
+        pf.types(self.ctx)
+        cpu = self.hw()["cpu"]
+        self.assertEqual(cpu["types"], {"p": [f"policy{i}" for i in range(4)],
+                                        "e": [f"policy{i}" for i in range(4, 8)],
+                                        "lpe": [f"policy{i}" for i in range(8, 12)]})
+        self.assertEqual(cpu["type_range"], {"p": {"min_mhz": 400, "max_mhz": 5100},
+                                             "e": {"min_mhz": 400, "max_mhz": 3800},
+                                             "lpe": {"min_mhz": 400, "max_mhz": 2500}})
+
+    def test_not_hybrid_is_all_p_and_a_cpu_in_neither_list_is_p(self):
+        pf.cpu(self.ctx, policies=4)
+        pf.types(self.ctx, p=None, atom=None, policies=4)
+        self.assertEqual(self.hw()["cpu"]["types"], {"p": ["policy0", "policy1", "policy2", "policy3"]})
+        pf.put(self.ctx.sys_path("/sys/devices/cpu_core/cpus"), "0-1")
+        pf.put(self.ctx.sys_path("/sys/devices/cpu_atom/cpus"), "2")     # cpu3 is in neither: p
+        self.assertEqual(self.hw()["cpu"]["types"], {"p": ["policy0", "policy1", "policy3"], "e": ["policy2"]})
+
+    def test_cpulist(self):
+        self.assertEqual(powerhw._cpulist("0-3,8,10-11"), {0, 1, 2, 3, 8, 10, 11})
+        self.assertEqual(powerhw._cpulist(""), set())
+        self.assertEqual(powerhw._cpulist("x"), set())
+
+    def test_perf_pct_needs_both_files(self):
+        pf.cpu(self.ctx, policies=2)
+        self.assertFalse(self.hw()["cpu"]["perf_pct"])
+        pf.perf(self.ctx)
+        hw = self.hw()
+        self.assertTrue(hw["cpu"]["perf_pct"])
+        self.assertEqual(powerhw.read(self.ctx, hw, gpu=False)["perf"], {"max": 100, "min": 9})
+
+
+class SocTest(Base):
+    def test_found_by_name_among_two_devices(self):
+        pf.soc(self.ctx, dev="platform-profile-0", name="asus-wmi", params=False)
+        d = pf.soc(self.ctx, dev="platform-profile-1")
+        self.assertEqual(self.hw()["soc"]["profile"], d)
+
+    def test_none_when_the_name_differs_or_a_param_is_missing(self):
+        pf.soc(self.ctx, name="SoC power slider")
+        self.assertIsNone(self.hw()["soc"])
+        pf.soc(self.ctx)
+        os.remove(pf.soc_param(self.ctx, "offset"))
+        self.assertIsNone(self.hw()["soc"])
+
+    def test_hex_read_and_write(self):
+        pf.soc(self.ctx, balance="03", offset="00")
+        hw = self.hw()
+        self.assertEqual(powerhw.read(self.ctx, hw, gpu=False)["soc"],
+                         {"balance": 3, "offset": 0, "profile": "balanced",
+                          "choices": ["low-power", "balanced", "performance"]})
+        res = self.apply({"soc": {"balance": 4, "offset": 2}})
+        self.assertTrue(res["ok"], res)
+        self.assertEqual(self.w.calls[0], (pf.soc_param(self.ctx, "offset"), "02"))
+        self.assertEqual(self.w.calls[1], (pf.soc_param(self.ctx, "balance"), "04"))
+        self.assertEqual(self.w.calls[2][1], "balanced")
+        self.assertEqual(res["written"], ["soc/offset", "soc/balance", "soc/profile"])
+
+    def test_not_balanced_writes_the_params_only(self):
+        d = pf.soc(self.ctx, profile="performance")
+        res = self.apply({"soc": {"balance": 4, "offset": 0}})
+        self.assertTrue(res["ok"], res)
+        self.assertEqual(self.w.paths(), [pf.soc_param(self.ctx, "balance")])
+        self.assertEqual(pf.get(os.path.join(d, "profile")), "performance")
+        self.assertEqual(res["failed"], [])
+
+    def test_balance_reads_its_old_value_until_a_profile_write(self):
+        pf.soc(self.ctx, profile="low-power")
+        self.w.ignore.add("slider_balance")      # the kernel shows the old value until a profile is written
+        res = self.apply({"soc": {"balance": 4}})
+        self.assertEqual(res["failed"], [])
+        self.assertEqual(res["written"], ["soc/balance"])
+
+    def test_einval_and_equal_values(self):
+        pf.soc(self.ctx)
+        self.w.fail["slider_balance"] = errno.EINVAL
+        res = self.apply({"soc": {"balance": 4, "offset": 0}})
+        self.assertEqual([(f["id"], f["error"]) for f in res["failed"]], [("soc/balance", "the slider takes 1..5")])
+        self.w.calls.clear()
+        self.w.fail.clear()
+        res = self.apply({"soc": {"balance": 3, "offset": 0}})     # nothing differs: no profile write either
+        self.assertEqual(self.w.calls, [])
+
+    def test_never_another_profile_or_the_legacy_file(self):
+        pf.oxp3(self.ctx)
+        pf.soc(self.ctx)
+        pf.put(self.ctx.sys_path("/sys/firmware/acpi/platform_profile"), "balanced")
+        for b in (1, 5, 3):
+            self.apply({"soc": {"balance": b, "offset": 1}})
+        for path, text in self.w.calls:
+            self.assertNotIn(text, ("performance", "low-power", "custom", "quiet"))
+            self.assertFalse(path.endswith("/acpi/platform_profile"), path)
+
+
+class PerfTest(Base):
+    def setUp(self):
+        super().setUp()
+        pf.cpu(self.ctx, policies=12)
+        pf.types(self.ctx)
+        pf.perf(self.ctx)
+
+    def test_raising_writes_the_cap_first_lowering_the_floor_first(self):
+        pf.perf(self.ctx, max=60, min=9)
+        res = self.apply({"perf": {"max": 100, "min": 40}})
+        self.assertEqual(res["written"], ["cpu/max_pct", "cpu/min_pct"])
+        self.w.calls.clear()
+        res = self.apply({"perf": {"max": 50, "min": 9}})
+        self.assertEqual(res["written"], ["cpu/min_pct", "cpu/max_pct"])
+        self.assertTrue(res["ok"], res)
+        self.assertEqual((pf.get(pf.perf_path(self.ctx, "max")), pf.get(pf.perf_path(self.ctx, "min"))),
+                         ("50", "9"))
+
+    def test_floor_above_cap_is_lowered_and_equal_not_written(self):
+        res = self.apply({"perf": {"max": 70, "min": 90}})
+        self.assertEqual(pf.get(pf.perf_path(self.ctx, "min")), "70")
+        self.w.calls.clear()
+        res = self.apply({"perf": {"max": 70, "min": 70}})
+        self.assertEqual((self.w.calls, res["ok"]), ([], True))
+
+    def test_floor_reread_after_turbo_off(self):
+        """7.2 store_no_turbo lowers min_perf_pct to max_pstate/turbo_pstate (about 40 %): the floor that matched
+        before the turbo write is written again, not reported as "did not take"."""
+        pf.perf(self.ctx, max=100, min=50)
+        real = self.w.__call__
+
+        def writer(path, text):
+            real(path, text)
+            if path.endswith("/no_turbo") and text == "1":
+                pf.put(pf.perf_path(self.ctx, "min"), 40)
+
+        with mock.patch.object(powerhw, "_write", writer):
+            res = self.apply({"turbo": False, "perf": {"max": 100, "min": 50}})
+        self.assertTrue(res["ok"], res)
+        self.assertIn("cpu/min_pct", res["written"])
+        self.assertEqual(pf.get(pf.perf_path(self.ctx, "min")), "50")
+
+    def test_never_zero(self):
+        res = self.apply({"perf": {"max": 0}})
+        self.assertEqual([f["id"] for f in res["failed"]], ["cpu/max_pct"])
+        self.assertNotIn("0", [t for _, t in self.w.calls])
+
+    def test_caps_clamped_and_read_back_within_tolerance(self):
+        pf.put(self.ctx.sys_path("/sys/devices/system/cpu/cpufreq/policy0/scaling_min_freq"), 800000)
+        res = self.apply({"caps": {"policy0": 300000, "policy4": 9000000, "policy8": 2000000}})
+        self.assertTrue(res["ok"], res)
+        self.assertEqual(pf.get(pf.cap_path(self.ctx, "policy0")), "800000")      # its scaling_min_freq
+        self.assertEqual(self.w.paths(), [pf.cap_path(self.ctx, "policy0"), pf.cap_path(self.ctx, "policy8")])
+        self.w.calls.clear()
+        pf.put(pf.cap_path(self.ctx, "policy8"), 2050000)                 # HWP rounding: within 100 MHz
+        res = self.apply({"caps": {"policy8": 2000000}})
+        self.assertEqual((self.w.calls, res["ok"]), ([], True))
+
+    def test_cap_einval_on_one_policy(self):
+        self.w.fail["policy4/scaling_max_freq"] = errno.EINVAL
+        res = self.apply({"caps": {"policy4": 2000000, "policy5": 2000000}})
+        self.assertEqual([f["id"] for f in res["failed"]], ["cpu/cap/policy4"])
+        self.assertEqual(res["written"], ["cpu/cap/policy5"])
+
+    def test_scaling_min_freq_is_never_written(self):
+        pf.oxp3(self.ctx)
+        self.apply({"perf": {"max": 40, "min": 20}, "caps": {f"policy{i}": 1500000 for i in range(12)},
+                    "epp": {"policy0": "power", "policy4": "performance"}})
+        self.assertFalse([p for p in self.w.paths() if p.endswith("scaling_min_freq")])
+
+
+class GpuProfileTest(Base):
+    def setUp(self):
+        super().setUp()
+        pf.xe(self.ctx)
+        self.f = pf.gpu_profile(self.ctx)
+
+    def test_parsing(self):
+        hw = self.hw()
+        self.assertTrue(hw["gpu"]["power_profile"])
+        for text, want in (("[base]    power_saving", "base"), ("base    [power_saving]", "power_saving"),
+                           ("invalid", None)):
+            pf.put(self.f, text)
+            self.assertEqual(powerhw.read(self.ctx, hw, gpu=False)["gpu"]["profile"], want)
+
+    def test_written_and_read_back(self):
+        self.w.ignore.add("power_profile")
+        pf.put(self.f, "base    [power_saving]")     # what the driver shows after the write
+        res = self.apply({"gpu_profile": "power_saving"})
+        self.assertEqual((res["written"], res["ok"]), ([], True))
+        pf.put(self.f, "[base]    power_saving")
+        res = self.apply({"gpu_profile": "power_saving"})
+        self.assertEqual(self.w.calls[-1], (self.f, "power_saving"))
+        self.assertEqual([(f["id"], f["transient"]) for f in res["failed"]], [("gpu/profile", True)])  # reads base
+
+    def test_eio_is_transient(self):
+        self.w.fail["power_profile"] = errno.EIO
+        res = self.apply({"gpu_profile": "power_saving"})
+        self.assertEqual([(f["id"], f["transient"]) for f in res["failed"]], [("gpu/profile", True)])
+        self.w.fail["power_profile"] = [errno.EAGAIN, errno.EAGAIN, errno.EAGAIN]
+        res = self.apply({"gpu_profile": "power_saving"})
+        self.assertEqual(len([c for c in self.w.calls if c[0] == self.f]), 4)    # 1 + 3 tries
+        self.assertTrue(res["failed"][0]["transient"])
+
+    def test_the_media_gt_and_clock_files_are_untouched(self):
+        pf.gpu_profile(self.ctx, gt="gt1")
+        seen = []
+        real = powerhw._read
+        hw = self.hw()
+        with mock.patch.object(powerhw, "_read", lambda p: seen.append(p) or real(p)):
+            powerhw.read(self.ctx, hw, gpu=False)
+        self.assertFalse([p for p in seen if p.endswith(("min_freq", "max_freq", "act_freq", "cur_freq"))
+                          and "/drm/" in p])
+        self.apply({"gpu_profile": "power_saving"})
+        self.assertFalse([p for p in self.w.paths() if "/gt1/" in p])

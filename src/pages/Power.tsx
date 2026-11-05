@@ -1,20 +1,23 @@
 // The full page's Power tab (DESIGN.md "Power (TDP, GPU, CPU)", Frontend): the live state per RAPL zone, the options,
 // the profile editor for every profile, the other power managers found, the firmware values and the import from
 // SimpleDeckyTDP.
-import { ButtonItem, DropdownItem, PanelSection, PanelSectionRow, ToggleField } from "@decky/ui";
-import { FC, useEffect, useState } from "react";
+import { ButtonItem, DropdownItem, PanelSection, PanelSectionRow, SliderField, ToggleField } from "@decky/ui";
+import { FC, useEffect, useRef, useState } from "react";
 
 import { useAction } from "../actions";
 import { power_import_sdtdp, power_info, power_options, power_profile } from "../backend";
 import { ConflictRow, ConflictRows, FixedRows } from "../components/ConflictRow";
 import { confirm, DetailsSpec, paragraphs } from "../components/confirm";
-import { explain, label, Note, Problem, Status, WithDetails } from "../components/Hint";
-import { cpuBlockers, EnableToggle, PowerStatusRows, settle, usePower, ValuesEditor } from "../components/PowerControls";
+import { BatteryNote, ChargeRows, LpmdToggle, useExtrasState } from "../components/ExtrasControls";
+import { explain, explainWhen, label, Note, Problem, Status, WithDetails } from "../components/Hint";
+import { LiveSection } from "../components/LiveRows";
+import { cpuBlockers, EnableToggle, ExtrasRows, PowerStatusRows, settle, usePower, ValuesEditor } from "../components/PowerControls";
 import { friendlyName } from "../conflicts";
-import { eppText, limitsLine, profileOrder, reasonText, Slot, watts } from "../power";
+import { EFFECTS } from "../effects";
+import { eppText, limitsLine, pollIndex, pollText, pollValue, POLL_DEFAULT, POLL_STEPS, profileOrder, reasonText, Slot, watts } from "../power";
 import { useRunningApp } from "../steam";
 import { flushPower, powerWriter, put } from "../store";
-import type { PowerInfo, PowerOptions, PowerState, PowerZone } from "../types";
+import type { ExtrasState, PowerInfo, PowerOptions, PowerState, PowerZone } from "../types";
 import { listText, when } from "../util";
 
 const det = (title: string, body: (string | null | undefined | false)[], lines?: string[], linesTitle?: string): DetailsSpec =>
@@ -87,27 +90,28 @@ const OptionsSection: FC<{ info: PowerInfo; state: PowerState }> = ({ info, stat
         <WithDetails details={perGameD}>
           <ToggleField label={label("Per-game profiles", perGameD)} checked={info.options.per_game} disabled={!!act.busy}
             onChange={(c) => set("per_game", { per_game: c })}
-            description={explain("Games with their own profile use it.")} />
+            description={explainWhen("Games with their own profile use it.", EFFECTS["power.per_game"])} />
         </WithDetails>
         <WithDetails details={splitD}>
           <ToggleField label={label("Different settings when plugged in", splitD)} checked={info.options.split_ac} disabled={!!act.busy}
             onChange={(c) => set("split_ac", { split_ac: c })}
-            description={explain("Each profile gets a second set for charging.")} />
+            description={explainWhen("Each profile gets a second set for charging.", EFFECTS["power.split_ac"])} />
         </WithDetails>
         {r.extended_max != null && (
           <WithDetails details={extD}>
             <ToggleField label={label(`Allow up to ${r.extended_max} W when plugged in`, extD)} checked={info.options.extended} disabled={!!act.busy}
               onChange={(c) => set("extended", { extended: c })}
-              description={explain("Needs a 65 W or stronger charger.")} />
+              description={explainWhen("Needs a 65 W or stronger charger.", EFFECTS["power.extended"])} />
           </WithDetails>
         )}
+        <PollSlider info={info} />
         <Problem what="Option" error={act.error} />
       </PanelSectionRow>
     </PanelSection>
   );
 };
 
-const EditorSection: FC<{ info: PowerInfo; state: PowerState }> = ({ info, state }) => {
+const EditorSection: FC<{ info: PowerInfo; state: PowerState; x: ExtrasState | null }> = ({ info, state, x }) => {
   const app = useRunningApp();
   const act = useAction();
   const [key, setKey] = useState<string>(state.active.key);
@@ -144,25 +148,26 @@ const EditorSection: FC<{ info: PowerInfo; state: PowerState }> = ({ info, state
       </PanelSectionRow>
       <ValuesEditor key={`${k}/${slot}`} state={state} info={info} profileKey={k} slot={slot} stored={stored} active={active && state.enabled}
         label={`${name}${info.options.split_ac ? (slot === "ac" ? " (plugged-in values)" : " (battery values)") : ""}`} />
+      <ExtrasRows key={`x-${k}/${slot}`} profileKey={k} slot={slot} stored={stored} x={x} battery={false} />
       <PanelSectionRow>
         {canAdd && (
           <ButtonItem layout="below" disabled={!!act.busy}
             onClick={() => act.run("add", async () => { await powerWriter.drain(); const e = settle(await power_profile(app.appid, app.name, true)); if (!e) setKey(app.appid); return e; })}
-            description={explain("Starts as a copy of the default.")}>
+            description={explainWhen("Starts as a copy of the default.", EFFECTS["power.new_profile"])}>
             New profile for {app.name}
           </ButtonItem>
         )}
         {k !== "default" && (
           <ButtonItem layout="below" disabled={!!act.busy}
             onClick={() => act.run("delete", async () => {
-              if (!(await confirm({ title: "Delete profile?", ok: "Delete", destructive: true,
+              if (!(await confirm({ title: "Delete profile?", ok: "Delete", destructive: true, effect: EFFECTS["power.delete_profile"],
                 text: `${prof.name || `App ${k}`} then uses the default profile.` }))) return null;
               await powerWriter.drain();
               const e = settle(await power_profile(k, null, false));
               if (!e) setKey("default");
               return e;
             })}
-            description={explain("The game uses the default profile again.")}>
+            description={explainWhen("The game uses the default profile again.", EFFECTS["power.delete_profile"])}>
             Delete profile
           </ButtonItem>
         )}
@@ -172,7 +177,7 @@ const EditorSection: FC<{ info: PowerInfo; state: PowerState }> = ({ info, state
   );
 };
 
-const ConflictsSection: FC<{ info: PowerInfo }> = ({ info }) => {
+const ConflictsSection: FC<{ info: PowerInfo; x: ExtrasState | null }> = ({ info, x }) => {
   const act = useAction();
   const active = new Set(info.conflicts.map((c) => c.id));
   const gone = (info.fixed ?? []).filter((f) => !active.has(f.id));
@@ -183,6 +188,7 @@ const ConflictsSection: FC<{ info: PowerInfo }> = ({ info }) => {
       <PanelSectionRow>
         {!info.conflicts.length && <Status ok label="No conflicts" detail="Nothing else changes these settings." />}
         {info.conflicts.map((c) => <ConflictRow key={c.id} c={c} info={info} />)}
+        <LpmdToggle x={x} />
       </PanelSectionRow>
       {gone.length > 0 && (
         <PanelSectionRow>
@@ -245,7 +251,7 @@ const ImportSection: FC = () => {
         <WithDetails details={impD}>
           <ButtonItem layout="below" disabled={!!act.busy}
             onClick={() => act.run("import", async () => {
-              if (!(await confirm({ title: "Import from SimpleDeckyTDP?", ok: "Import",
+              if (!(await confirm({ title: "Import from SimpleDeckyTDP?", ok: "Import", effect: EFFECTS["power.import"],
                 text: "Copies your SimpleDeckyTDP profiles into OXP3 Deck. A profile of the same game here is replaced. SimpleDeckyTDP's own files stay as they are.",
                 linesTitle: "Technical:",
                 lines: ["Its single TDP value becomes the sustained limit (PL1); boost stays at the device default.", "TDP, GPU clock range and CPU boost are copied."] }))) return null;
@@ -254,7 +260,7 @@ const ImportSection: FC = () => {
               if (r.ok) setLines({ imported: r.imported, skipped: r.skipped });
               return settle({ ...r, applied: null });
             })}
-            description={explain("Copies your SimpleDeckyTDP profiles.")}>
+            description={explainWhen("Copies your SimpleDeckyTDP profiles.", EFFECTS["power.import"])}>
             {act.busy ? "Importing…" : label("Import from SimpleDeckyTDP", impD)}
           </ButtonItem>
         </WithDetails>
@@ -269,8 +275,53 @@ const ImportSection: FC = () => {
   );
 };
 
+/** "How often to check": poll_s over POLL_STEPS (index slider), sent 400 ms after the last move. */
+const PollSlider: FC<{ info: PowerInfo }> = ({ info }) => {
+  const act = useAction();
+  const [draft, setDraft] = useState<number | null>(null);
+  const t = useRef<ReturnType<typeof setTimeout> | null>(null);
+  useEffect(() => () => { if (t.current) clearTimeout(t.current); }, []);
+  const saved = typeof info.options.poll_s === "number" ? info.options.poll_s : POLL_DEFAULT;
+  const value = draft ?? saved;
+  const d = det("How often to check", [
+    "How often OXP3 Deck checks that your power settings are still in place, and tries again what the device did not take (the GPU busy resetting or waking).",
+    "Off: only after a game change, the charger or sleep. It never fights another program: when something else changes a setting, OXP3 Deck stops and says so.",
+    `Default: every ${POLL_DEFAULT} s. Takes effect: Now.`,
+  ]);
+  const send = (v: number) => {
+    if (t.current) clearTimeout(t.current);
+    t.current = setTimeout(() => { t.current = null; act.run("poll", async () => {
+      await powerWriter.drain(); const e = settle(await power_options({ poll_s: v })); setDraft(null); return e; }); }, 400);
+  };
+  return (
+    <>
+      <WithDetails details={d}>
+        <SliderField label={label(`How often to check: ${pollText(value)}`, d)} value={pollIndex(value)} min={0} max={POLL_STEPS.length - 1} step={1}
+          notchCount={POLL_STEPS.length} notchTicksVisible
+          notchLabels={[{ notchIndex: 0, label: "Off", value: 0 }, { notchIndex: POLL_STEPS.length - 1, label: "60 s", value: POLL_STEPS.length - 1 }]}
+          onChange={(i) => { const v = pollValue(i); setDraft(v); send(v); }}
+          description={explainWhen("How often OXP3 Deck checks your settings are still in place.", EFFECTS["power.poll_s"])} />
+      </WithDetails>
+      <Problem what="How often to check" error={act.error} />
+    </>
+  );
+};
+
+const BatterySection: FC<{ x: ExtrasState | null }> = ({ x }) => {
+  if (!x || (!x.charge.available && !(x.board_ok && !x.fan.available))) return null;
+  return (
+    <PanelSection title="Battery">
+      <PanelSectionRow>
+        <ChargeRows x={x} />
+        <BatteryNote x={x} />
+      </PanelSectionRow>
+    </PanelSection>
+  );
+};
+
 export const PowerTab: FC = () => {
   const p = usePower(true);
+  const ex = useExtrasState();
   const s = p.state;
   if (!s || !p.info) {
     return (
@@ -285,9 +336,11 @@ export const PowerTab: FC = () => {
   return (
     <>
       <NowSection info={p.info} state={s} />
+      <LiveSection active />
       <OptionsSection info={p.info} state={s} />
-      <EditorSection info={p.info} state={s} />
-      <ConflictsSection info={p.info} />
+      <EditorSection info={p.info} state={s} x={ex.x} />
+      <BatterySection x={ex.x} />
+      <ConflictsSection info={p.info} x={ex.x} />
       <FirmwareSection info={p.info} state={s} />
       {p.info.sdtdp_found && <ImportSection />}
     </>

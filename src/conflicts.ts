@@ -1,6 +1,7 @@
 // The texts of the other power programs OXP3 Deck finds (DESIGN.md "Conflict rows", "Fix for me, Undo"): a friendly
 // name, the one line a row shows up front, its Details, and the Fix for me / Undo dialogs. Framework-free so node can
 // test it (tests/js/conflicts.test.mjs); ConflictRow.tsx turns these into rows.
+import type { EffectSpec } from "./effects";
 import type { PowerConflict, PowerFixed } from "./types";
 
 /** The systemd units Fix for me may stop and disable, per conflict id: power.py's FIXABLE, the same whitelist. */
@@ -172,7 +173,7 @@ const manualCommand = (fix: string | null | undefined): string[] => {
  * running: the row's fix_plan says which, when it could tell). */
 const cmd = (action: string, units: string[]) => `systemctl --no-ask-password ${action} -- ${units.join(" ")}`;
 
-export type DialogText = { title: string; text: string; lines: string[]; linesTitle: string; ok: string };
+export type DialogText = { title: string; text: string; lines: string[]; linesTitle: string; ok: string; effect: EffectSpec };
 
 /** Per id: the dialog title, who is turned off, and what it costs (after the generated "OXP3 Deck will …" lead). */
 type FixText = { title: string; who: string; them?: boolean; rest: string };
@@ -225,6 +226,7 @@ export const fixConfirm = (row: Pick<PowerConflict, "id" | "name"> & Partial<Pic
     lines: [...(disable.length ? [cmd("disable", disable)] : []), ...(stop.length ? [cmd("stop", stop)] : [])],
     linesTitle: "Commands (run as root):",
     ok: "Turn it off",
+    effect: "now",
   };
 };
 
@@ -240,6 +242,7 @@ export const undoConfirm = (rec: Pick<PowerFixed, "id" | "name" | "units">, date
     lines,
     linesTitle: "Commands (run as root):",
     ok: "Turn it back on",
+    effect: "now",
   };
 };
 

@@ -8,21 +8,25 @@ import { FC, useEffect, useMemo, useRef, useState } from "react";
 import { useAction } from "../actions";
 import { power_enable, power_info, power_profile, power_take_control } from "../backend";
 import { friendlyName, lockedLine } from "../conflicts";
+import { EFFECTS } from "../effects";
 import {
-  blockers, capRows, clampW, editSlot, EMPTY, eppOptions, fwValues, gpuNotches, limitsLine, pl1Change, pl2Floor,
+  blockers, capRows, clampW, editSlot, EMPTY, eppOptions, RESET, fwValues, gpuNotches, limitsLine, pl1Change, pl2Floor,
   profileLine, reasonText, shown, Slot, suspects, watts,
 } from "../power";
 import { RunningApp } from "../steam";
 import { invalidate, notePower, powerWriter, usePowerErrors, usePowerState, useResource } from "../store";
 import { firstSentence } from "../text";
 import type {
-  Epp, PowerChangeRes, PowerConflict, PowerInfo, PowerInfoRes, PowerState, PowerValues,
+  Epp, ExtrasState, PowerChangeRes, PowerConflict, PowerInfo, PowerInfoRes, PowerState, PowerValues,
 } from "../types";
 import { listText, remember } from "../util";
 import { clearRecentFixes, ConflictRows, FixedRows } from "./ConflictRow";
 import { confirm, DetailsSpec, paragraphs } from "./confirm";
-import { explain, label, Problem, Status, WithDetails } from "./Hint";
+import { CpuControls } from "./CpuControls";
+import { ChargeRows, ProfileExtras, useExtrasState } from "./ExtrasControls";
+import { explainWhen, label, Problem, Status, WithDetails } from "./Hint";
 import { useQuickAccessVisible } from "./JobView";
+import { LiveRow } from "./LiveRows";
 
 /** The cached power info and the live state (polled only while `active`): the state of power_state, else info's. */
 export const usePower = (active: boolean) => {
@@ -84,7 +88,7 @@ export const PowerStatusRows: FC<{ info: PowerInfo | null; state: PowerState; qu
   const blocking = blockers(info?.conflicts);
   const gpuHeld = state.enabled && (state.now.gpu?.reasons ?? []).some((r) => /^(pl\d|power|vr_tdc)$/.test(r));
   const sus = o ? suspects(o, info?.conflicts) : [];
-  const susNames = (o?.suspects ?? []).map((id) => (id === "steam" ? "Steam's own sliders"
+  const susNames = (o?.suspects ?? []).map((id) => (id === "steam" ? "Steam's own sliders" : id === "other" ? "another program"
     : friendlyName(id, info?.conflicts.find((c) => c.id === id)?.name)));
   return (
     <>
@@ -113,7 +117,7 @@ export const PowerStatusRows: FC<{ info: PowerInfo | null; state: PowerState; qu
           <WithDetails details={TAKE_D}>
             <ButtonItem layout="below" disabled={!!act.busy}
               onClick={() => act.run("take", async () => { await powerWriter.drain(); return settle(await power_take_control()); })}
-              description={explain("Re-applies your settings.")}>
+              description={explainWhen("Re-applies your settings.", EFFECTS["power.take_control"])}>
               {act.busy ? "Working…" : label("Take control again", TAKE_D)}
             </ButtonItem>
           </WithDetails>
@@ -159,7 +163,7 @@ export const EnableToggle: FC<{ state: PowerState; info: PowerInfo | null; quick
     setRefused([]);
     if (on && remember.get(ENABLE_SEEN) !== "1") {
       const ok = await confirm({
-        title: "Turn on power control?", ok: "Turn on",
+        title: "Turn on power control?", ok: "Turn on", effect: EFFECTS["power.enable"],
         text: (
           <>
             <div>OXP3 Deck will set power limits, GPU speed and CPU boost from your profile. Nothing changes until you move a
@@ -181,6 +185,7 @@ export const EnableToggle: FC<{ state: PowerState; info: PowerInfo | null; quick
     return settle(res);
   });
   const problems = info?.hw.problems ?? [];
+  const noRapl = !state.enabled && info !== null && !info.hw.rapl && !info.hw.mmio;
   // a refused enable: the rows from the fresh power-info once it has them (a fix there updates them), else the answer's
   const live = refused.map((c) => info?.conflicts.find((x) => x.id === c.id) ?? c)
     .filter((c) => info?.conflicts.some((x) => x.id === c.id) || !(info?.fixed ?? []).some((f) => f.id === c.id));
@@ -188,9 +193,10 @@ export const EnableToggle: FC<{ state: PowerState; info: PowerInfo | null; quick
     <PanelSectionRow>
       <WithDetails details={ENABLE_DETAILS}>
         <ToggleField label={label("Power control (TDP)", ENABLE_DETAILS)} checked={state.enabled}
-          disabled={!!act.busy || (!state.enabled && info !== null && !info.hw.rapl && !info.hw.mmio)}
+          disabled={!!act.busy || noRapl}
           onChange={toggle}
-          description={explain(state.enabled ? "Uses your profile below." : "Device defaults. Turn on to set power here.")} />
+          description={explainWhen(state.enabled ? "Uses your profile below." : "Device defaults. Turn on to set power here.",
+            EFFECTS["power.enable"], noRapl ? "This system doesn't expose power limits." : null)} />
       </WithDetails>
       {problems.length > 0 && (
         <Status ok={false} label="Power control unavailable" detail={firstSentence(problems[0])}
@@ -204,7 +210,7 @@ export const EnableToggle: FC<{ state: PowerState; info: PowerInfo | null; quick
 };
 
 /** Values typed by the user that the stored profile does not show yet (an answer still on its way). */
-const useDraft = (key: string, slot: Slot, stored: PowerValues) => {
+export const useDraft = (key: string, slot: Slot, stored: PowerValues) => {
   const [draft, setDraft] = useState<Partial<PowerValues>>({});
   const [error, setError] = useState<string | null>(null);
   useEffect(() => { setDraft({}); setError(null); }, [key, slot]);
@@ -286,7 +292,7 @@ export const ValuesEditor: FC<{
           <SliderField label={label("Sustained power", pl1D)} value={pl1} min={r.pl1_min} max={Math.max(r.pl1_min, r.pl1_max)} step={1}
             showValue valueSuffix=" W" editableValue={!quick}
             onChange={(x) => d.write(pl1Change(clampW(x, r), pl2))}
-            description={explain(`Steady power for CPU and GPU. Higher is faster, battery shorter.${dflt(v.pl1_w === null)}`)} />
+            description={explainWhen(`Steady power for CPU and GPU. Higher is faster, battery shorter.${dflt(v.pl1_w === null)}`, EFFECTS["power.pl1"])} />
         </WithDetails>
       </PanelSectionRow>
       <PanelSectionRow>
@@ -294,7 +300,8 @@ export const ValuesEditor: FC<{
           <SliderField label={label("Boost power", pl2D)} value={pl2} min={pl2Min} max={pl2Max} step={1} disabled={pl2Max <= pl2Min}
             showValue valueSuffix=" W" editableValue={!quick}
             onChange={(x) => d.write({ pl2_w: Math.min(pl2Max, Math.max(pl2Min, Math.round(x))) })}
-            description={explain(`Short bursts above sustained power.${dflt(v.pl2_w === null)}`)} />
+            description={explainWhen(`Short bursts above sustained power.${dflt(v.pl2_w === null)}`, EFFECTS["power.pl2"],
+              pl2Max <= pl2Min ? "Sustained power is at the maximum." : null)} />
         </WithDetails>
       </PanelSectionRow>
       {gpu && !quick && (
@@ -303,7 +310,7 @@ export const ValuesEditor: FC<{
             <SliderField label={label("GPU minimum speed", gminD)} value={gmin} min={gpu.lo} max={gpu.hi} step={50} showValue valueSuffix=" MHz"
               {...notches} notchTicksVisible={false}
               onChange={(x) => d.write(x > gmax ? { gpu_min_mhz: x, gpu_max_mhz: x } : { gpu_min_mhz: x })}
-              description={explain(`Raise only if one game stutters from GPU dips.${dflt(v.gpu_min_mhz === null)}`)} />
+              description={explainWhen(`Raise only if one game stutters from GPU dips.${dflt(v.gpu_min_mhz === null)}`, EFFECTS["power.gpu_min"])} />
           </WithDetails>
         </PanelSectionRow>
       )}
@@ -313,17 +320,18 @@ export const ValuesEditor: FC<{
             <SliderField label={label("GPU maximum speed", gmaxD)} value={gmax} min={gpu.lo} max={gpu.hi} step={50} showValue valueSuffix=" MHz"
               {...notches} notchTicksVisible={false}
               onChange={(x) => d.write(x < gmin ? { gpu_max_mhz: x, gpu_min_mhz: x } : { gpu_max_mhz: x })}
-              description={explain(`Lower saves battery and leaves more power for the CPU.${dflt(v.gpu_max_mhz === null)}`)} />
+              description={explainWhen(`Lower saves battery and leaves more power for the CPU.${dflt(v.gpu_max_mhz === null)}`, EFFECTS["power.gpu_max"])} />
           </WithDetails>
         </PanelSectionRow>
       )}
+      <CpuControls state={state} info={info} v={v} write={d.write} active={active} quick={quick} />
       {!quick && cpu && cpu.epp_choices.length > 0 && (
         <PanelSectionRow>
           <WithDetails details={eppD}>
             <DropdownItem label={label("Energy preference", eppD)} disabled={!!cpuOff}
               rgOptions={eppOptions(cpu.epp_choices)} selectedOption={v.epp}
               onChange={(o) => d.write({ epp: o.data as Epp | null })}
-              description={explain(cpuOff ? lockText : "How eagerly the CPU speeds up.")} />
+              description={explainWhen("How eagerly the CPU speeds up.", EFFECTS["power.epp"], cpuOff ? lockText : null)} />
           </WithDetails>
           {cpuRows}
         </PanelSectionRow>
@@ -334,12 +342,12 @@ export const ValuesEditor: FC<{
             {quick ? (
               <ToggleField label={label("CPU boost", turboD)} disabled={!!cpuOff} checked={sh.turbo ?? state.now.turbo ?? true}
                 onChange={(c) => d.write({ turbo: c })}
-                description={explain(cpuOff ? lockText : `Off saves battery in light games.${dflt(v.turbo === null)}`)} />
+                description={explainWhen(`Off saves battery in light games.${dflt(v.turbo === null)}`, EFFECTS["power.turbo"], cpuOff ? lockText : null)} />
             ) : (
               <DropdownItem label={label("CPU boost", turboD)} disabled={!!cpuOff} rgOptions={TURBO_OPTIONS}
                 selectedOption={v.turbo === null ? "fw" : v.turbo ? "on" : "off"}
                 onChange={(o) => d.write({ turbo: o.data === "fw" ? null : o.data === "on" })}
-                description={explain(cpuOff ? lockText : "Off saves battery in light games.")} />
+                description={explainWhen("Off saves battery in light games.", EFFECTS["power.turbo"], cpuOff ? lockText : null)} />
             )}
           </WithDetails>
           {(quick || !(cpu && cpu.epp_choices.length > 0)) && cpuRows}
@@ -349,10 +357,10 @@ export const ValuesEditor: FC<{
         <PanelSectionRow>
           <WithDetails details={resetD}>
             <ButtonItem layout="below" onClick={async () => {
-              const ok = await confirm({ title: "Reset to device defaults?", ok: "Reset",
-                text: `Every value of ${what} goes back to the device's own.` });
-              if (ok) { d.write({ ...EMPTY }); powerWriter.flush(); }
-            }} description={explain("Undoes every change in this profile.")}>
+              const ok = await confirm({ title: "Reset to device defaults?", ok: "Reset", effect: EFFECTS["power.reset"],
+                text: `Every value of ${what} goes back to the device's own. The fan and scheduler modes stay.` });
+              if (ok) { d.write({ ...RESET }); powerWriter.flush(); }
+            }} description={explainWhen("Undoes every change in this profile.", EFFECTS["power.reset"])}>
               {label("Reset to device defaults", resetD)}
             </ButtonItem>
           </WithDetails>
@@ -383,11 +391,11 @@ export const GameProfileToggle: FC<{ app: RunningApp; info: PowerInfo }> = ({ ap
         <ToggleField label={label(`Separate profile for ${app.name}`, details)} checked={has} disabled={!!act.busy}
           onChange={(on) => act.run("profile", async () => {
             if (!on && !(await confirm({ title: `Delete the profile of ${app.name}?`, ok: "Delete", destructive: true,
-              text: `${app.name} then uses the default profile.` }))) return null;
+              effect: EFFECTS["power.game_profile"], text: `${app.name} then uses the default profile.` }))) return null;
             await powerWriter.drain();     // a slider change just made lands on the profile it was made on
             return settle(await power_profile(app.appid, on ? app.name : null, on));
           })}
-          description={explain(has ? "Sliders edit this game's profile." : "Uses the default profile.")} />
+          description={explainWhen(has ? "Sliders edit this game's profile." : "Uses the default profile.", EFFECTS["power.game_profile"])} />
       </WithDetails>
       <Problem what="Game profile" error={act.error} />
     </PanelSectionRow>
@@ -397,7 +405,9 @@ export const GameProfileToggle: FC<{ app: RunningApp; info: PowerInfo }> = ({ ap
 /** The quick panel's Power section. */
 export const PowerSection: FC<{ quick?: boolean; app?: RunningApp | null }> = ({ quick, app }) => {
   const visible = useQuickAccessVisible();
-  const p = usePower(!quick || visible);
+  const shows = !quick || visible;
+  const p = usePower(shows);
+  const ex = useExtrasState();
   useEffect(() => { if (quick && !visible) clearRecentFixes(); }, [quick, visible]);
   const s = p.state;
   const profiles = p.info?.profiles;
@@ -406,6 +416,7 @@ export const PowerSection: FC<{ quick?: boolean; app?: RunningApp | null }> = ({
   const stored = s ? (s.active.slot === slot ? s.values : (slot === "ac" ? prof?.ac ?? prof?.main : prof?.main) ?? s.values) : EMPTY;
   return (
     <PanelSection title="Power">
+      {quick && <LiveRow active={shows} />}
       {!s && (
         <PanelSectionRow>
           {!p.error && <Status ok={null} label="Reading the power limits…" />}
@@ -419,6 +430,21 @@ export const PowerSection: FC<{ quick?: boolean; app?: RunningApp | null }> = ({
         <ValuesEditor state={s} info={p.info} profileKey={s.active.key} slot={slot} stored={stored} active quick={quick}
           label={`${s.active.key === "default" ? "the default profile" : `the profile of ${s.active.name || `app ${s.active.key}`}`}${p.info?.options.split_ac ? (slot === "ac" ? " (plugged-in values)" : " (battery values)") : ""}`} />
       )}
+      {s && <ExtrasRows profileKey={s.active.key} slot={slot} stored={stored} x={ex.x} />}
     </PanelSection>
   );
 };
+
+/** Fan mode and scheduler mode of a profile slot (also while power control is off), then the battery's own rows. */
+export const ExtrasRows: FC<{ profileKey: string; slot: Slot; stored: PowerValues; x: ExtrasState | null; battery?: boolean }> =
+  ({ profileKey, slot, stored, x, battery = true }) => {
+    const d = useDraft(profileKey, slot, stored);
+    if (!x) return null;
+    return (
+      <PanelSectionRow>
+        <ProfileExtras v={d.values} write={d.write} x={x} />
+        {battery && <ChargeRows x={x} />}
+        <Problem what="Power" error={d.error} />
+      </PanelSectionRow>
+    );
+  };

@@ -143,9 +143,10 @@ def _version_of(dlls: list[dict], name: str) -> tuple[str | None, tuple | None]:
     return s, t
 
 
-def _advice(ctx, settings, game: dict, tool: dict, leftovers: list[str], truncated: bool) -> list[str]:
+def _advice(ctx, settings, game: dict, tool: dict, leftovers: list[str], truncated: bool,
+            det: dict | None = None) -> list[str]:
     out = []
-    det = xess.detect(ctx, settings)
+    det = xess.detect(ctx, settings) if det is None else det
     if not det["installed"]:
         out.append("xess-xmx-linux is not installed: XeSS runs on DP4a (install it from the XeSS page).")
     dlls = game["dlls"]
@@ -232,6 +233,32 @@ def _advice(ctx, settings, game: dict, tool: dict, leftovers: list[str], truncat
     return out
 
 
+def _suggest(det: dict, game: dict) -> list[dict]:
+    """The launch options the automatic launch options may add (DESIGN.md "Automatic launch options"): from the
+    conditions of _advice, only with xess-xmx-linux installed and a Proton that has the hook (the shorthands need
+    it, launch-options.md:12-17). [{key, value, why}]."""
+    if not det["installed"] or game["compat_tool_hook"] is False:
+        return []
+    out = []
+    dlls = game["dlls"]
+    why = None
+    xv, xt = _version_of(dlls, "libxess.dll")
+    fv, ft = _version_of(dlls, "libxess_fg.dll")
+    lv, lt = _version_of(dlls, "libxell.dll")
+    if xt is not None and xt < (2, 0, 2, 68):
+        why = f"XeSS {xv} is older than 2.0.2.68, so it would run in the slower mode."
+    elif ft is not None and ft < (1, 2):
+        why = f"XeSS frame generation {fv} is older than 1.2, so the game would not offer it."
+    elif lt is not None and lt[:2] == (1, 2):
+        why = f"XeLL {lv} may refuse this GPU, so frame generation could stay off."
+    if why:
+        out.append({"key": "XESS", "value": "latest", "why": why})
+    names = {d["name"].lower() for d in dlls}
+    if names & set(FFX_DLLS) and not names & set(XESS_DLLS) and xess.features(det["path"])["fsr"]:
+        out.append({"key": "FSR", "value": "xess", "why": "The game has FSR 3.1+ and no XeSS: its FSR runs on XeSS."})
+    return out
+
+
 def game_info(ctx, settings, appid: str) -> dict:
     """{ok, error, game: GameInfo}."""
     appid = str(appid or "")
@@ -263,7 +290,9 @@ def game_info(ctx, settings, appid: str) -> dict:
             "dlls": _dll_list(ctx, paths),
             "last_run": last_run(prefix),
         }
-        game["advice"] = _advice(ctx, settings, game, tool, leftovers, truncated)
+        det = xess.detect(ctx, settings)
+        game["advice"] = _advice(ctx, settings, game, tool, leftovers, truncated, det)
+        game["suggest"] = _suggest(det, game)
         return {"ok": True, "error": None, "game": game}
     except Exception as e:      # a Plugin method never raises
         log.exception("game info %s", appid)
