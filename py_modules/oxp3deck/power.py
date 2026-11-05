@@ -103,7 +103,7 @@ CONFLICTS = {
                    "EPP and parks cores, not the power limits)"),
 }
 # What "Fix for me" may stop and disable, per conflict id: the whole whitelist. No unit name ever comes from the
-# frontend or from a file (a record's units are checked against this when read). Never mask, never uninstall.
+# frontend or from a file (a record's units are checked against this when read). Never uninstall.
 FIXABLE = {
     "powerstation": ("powerstation.service",),
     "thermald": ("thermald.service",),
@@ -113,8 +113,16 @@ FIXABLE = {
     "tuned": ("tuned-ppd.service", "tuned.service"),
     "intel_lpmd": ("intel_lpmd.service",),
 }
+# The FIXABLE units that something else can start again after a stop and disable, so Fix for me also masks them
+# (persistently, after the stop; Undo unmasks first): power-profiles-daemon and tuned-ppd are D-Bus activated
+# (net.hadess.PowerProfiles / org.freedesktop.UPower.PowerProfiles, SystemdService=<unit>), tuned.service is pulled
+# in by tuned-ppd.service (Requires=tuned.service), thermald and intel_lpmd are D-Bus activated through their alias
+# (SystemdService=dbus-org.freedesktop.thermald.service / org.freedesktop.intel_lpmd.service). Nothing outside
+# FIXABLE is ever masked.
+MASKABLE = frozenset({"power-profiles-daemon.service", "tuned-ppd.service", "tuned.service", "thermald.service",
+                      "intel_lpmd.service"})
 FIX_RECHECK_S = 10               # tick checks the conflicts again this long after a fix (a D-Bus restart)
-FIX_TIMEOUT_S = 30               # one systemctl disable / stop / enable / start
+FIX_TIMEOUT_S = 30               # one systemctl stop / disable / mask / unmask / enable / start
 _ACTIVE = ("active", "activating", "reloading")
 IGNORABLE = frozenset(k for k, v in CONFLICTS.items() if v[2])
 _UNITS = {
@@ -285,7 +293,12 @@ def _norm_fixed(raw) -> dict:
                 log.warning("power.json: fixed record %s: unit entry %r dropped", cid, u)
                 continue
             seen.add(u["unit"])
-            units.append({"unit": u["unit"], "was_enabled": u["was_enabled"], "was_active": u["was_active"]})
+            entry = {"unit": u["unit"], "was_enabled": u["was_enabled"], "was_active": u["was_active"]}
+            # was_masked: only on a unit OXP3 Deck masked (always false: it never masks a masked unit), so Undo
+            # unmasks it; an older record without it is undone as before (no unmask)
+            if u.get("was_masked") is False and u["unit"] in MASKABLE:
+                entry["was_masked"] = False
+            units.append(entry)
         at = rec.get("at")
         boot = rec.get("boot_id")
         if not units or isinstance(at, bool) or not isinstance(at, (int, float)):
@@ -1008,8 +1021,8 @@ def _row(cid: str, name: str | None = None, why: str | None = None, fix: str | N
 
 
 def _fix_plan(units: list[str], active: set) -> dict | None:
-    """{disable, stop}: what fix() would run now (it disables only enabled units, stops only running ones), for the
-    confirm dialog; None when systemctl show cannot tell."""
+    """{disable, stop, mask}: what fix() would run now (it disables only enabled units, stops only running ones,
+    masks the MASKABLE ones), for the confirm dialog; None when systemctl show cannot tell."""
     disable = []
     for u in units:
         got, _err = _show(u)
@@ -1017,7 +1030,7 @@ def _fix_plan(units: list[str], active: set) -> dict | None:
             return None
         if got["UnitFileState"] == "enabled":
             disable.append(u)
-    return {"disable": disable, "stop": [u for u in units if u in active]}
+    return {"disable": disable, "stop": [u for u in units if u in active], "mask": [u for u in units if u in MASKABLE]}
 
 
 def _scan(ctx, p: _Power) -> list[dict]:
@@ -1649,9 +1662,30 @@ def _lpmd_note(ctx, p: _Power) -> str | None:
     return None
 
 
+def _admin_override(ctx, unit: str) -> str | None:
+    """Why `unit` must not be masked: /etc/systemd/system/<unit> already exists (an admin's own copy or link of the
+    unit; `mask` would have to replace it), else None. A link to /dev/null is a mask already (then it is not loaded
+    and never reaches here)."""
+    path = ctx.sys_path(f"/etc/systemd/system/{unit}")
+    try:
+        if os.path.islink(path) and os.readlink(path) == "/dev/null":
+            return None
+    except OSError:
+        pass
+    if os.path.lexists(path):
+        return (f"{unit} has its own unit file in /etc/systemd/system (an admin override), so OXP3 Deck will not "
+                "mask it; nothing was changed. Turn it off yourself (Details: Do it yourself)")
+    return None
+
+
+def _ours_masked(u: dict) -> bool:
+    """A record entry of a unit OXP3 Deck masked (older records have no was_masked: never unmasked)."""
+    return u.get("was_masked") is False and u.get("unit") in MASKABLE
+
+
 def fix(ctx, cid) -> dict:
-    """PowerFixRes: stop and disable the FIXABLE units of conflict `cid` (after the user confirmed it), recorded in
-    power.json first so Undo works even after a crash half-way. Never masks, never uninstalls."""
+    """PowerFixRes: stop, disable and (MASKABLE units only) mask the FIXABLE units of conflict `cid` (after the user
+    confirmed it), recorded in power.json first so Undo works even after a crash half-way. Never uninstalls."""
     with _LOCK:
         p = _get(ctx)
         if not (isinstance(cid, str) and cid in FIXABLE):
@@ -1664,8 +1698,13 @@ def fix(ctx, cid) -> dict:
         row = next((r for r in p.rows or [] if r["id"] == cid), None)
         if row is None:
             return _fix_answer(ctx, p, False, f"{name} is not running")
+        old = {u["unit"]: u for u in (p.data["fixed"].get(cid) or {}).get("units", [])}
         if not row["fix_units"]:
-            if any((p.loaded or {}).get(u) == "masked" for u in FIXABLE[cid]):
+            masked = [u for u in FIXABLE[cid] if (p.loaded or {}).get(u) == "masked"]
+            if any(u in old and _ours_masked(old[u]) for u in masked):
+                return _fix_answer(ctx, p, False, f"{name} is running although OXP3 Deck masked it (it was not "
+                                   "stopped, or was started outside systemd); a restart stops it, Undo unmasks it")
+            if masked:
                 return _fix_answer(ctx, p, False, f"{name} is masked; OXP3 Deck does not unmask services")
             return _fix_answer(ctx, p, False, f"{name} was not started by systemd: OXP3 Deck cannot turn it off")
         seen: dict = {}
@@ -1678,7 +1717,10 @@ def fix(ctx, cid) -> dict:
             seen[unit] = got
         if not seen:
             return _fix_answer(ctx, p, False, f"{name}: no service of it is loaded")
-        old = {u["unit"]: u for u in (p.data["fixed"].get(cid) or {}).get("units", [])}
+        for unit in seen:
+            override = _admin_override(ctx, unit) if unit in MASKABLE else None
+            if override:
+                return _fix_answer(ctx, p, False, override)
         units = []
         for unit, got in seen.items():
             was_enabled = got.get("UnitFileState", "")[:32]
@@ -1688,11 +1730,15 @@ def fix(ctx, cid) -> dict:
                 if was_enabled != "enabled":
                     was_enabled = old[unit]["was_enabled"]
                 was_active = was_active or old[unit]["was_active"]
-            units.append({"unit": unit, "was_enabled": was_enabled, "was_active": was_active})
+            entry = {"unit": unit, "was_enabled": was_enabled, "was_active": was_active}
+            if unit in MASKABLE:
+                entry["was_masked"] = False
+            units.append(entry)
         for k, u in old.items():  # the record's other units: kept while they still exist (Undo has work there)
             if k not in seen:
                 got, _err = _show(k)
-                if got is None or got.get("LoadState") == "loaded":
+                if got is None or got.get("LoadState") == "loaded" or \
+                        (got.get("LoadState") == "masked" and _ours_masked(u)):
                     units.append(u)
         before = copy.deepcopy(p.data["fixed"])
         p.data["fixed"][cid] = {"at": time.time(), "boot_id": _boot_id(ctx)[:64], "units": units}
@@ -1700,18 +1746,26 @@ def fix(ctx, cid) -> dict:
         if err:
             p.data["fixed"] = before
             return _fix_answer(ctx, p, False, f"nothing was changed: cannot save the record for Undo: {err}")
-        disable = [u for u, g in seen.items() if g.get("UnitFileState") == "enabled"]
-        stop = [u for u, g in seen.items() if g.get("ActiveState") in _ACTIVE]
-        log.info("power: Fix for me %s: disable %s, stop %s", cid, disable or "-", stop or "-")
+        plan = (("stop", [u for u, g in seen.items() if g.get("ActiveState") in _ACTIVE]),
+                ("disable", [u for u, g in seen.items() if g.get("UnitFileState") == "enabled"]),
+                ("mask", [u for u in seen if u in MASKABLE]))
+        log.info("power: Fix for me %s: %s", cid, ", ".join(f"{a} {' '.join(t) or '-'}" for a, t in plan))
         errors = []
         results = {}
-        for action, todo in (("disable", disable), ("stop", stop)):
+        for action, todo in plan:
             ok, e = _systemctl_do(action, todo)
             results[action] = (ok, e)
             if e:
                 errors.append(e)
+        if plan[2][1] and results["mask"][0]:      # started again between the stop and the mask: stop it once more
+            again = [u for u in plan[2][1] if ((_show(u)[0] or {}).get("ActiveState") in _ACTIVE)]
+            if again:
+                log.info("power: Fix for me %s: %s started again before the mask, stopping it again", cid, again)
+                ok, e = _systemctl_do("stop", again)
+                if e:
+                    errors.append(e)
         steps = []
-        for action, todo in (("disable", disable), ("stop", stop)):
+        for action, todo in plan:
             ran_ok, ran_err = results[action]
             for unit in todo:
                 after, show_err = _show(unit)
@@ -1723,6 +1777,8 @@ def fix(ctx, cid) -> dict:
                     error = f"{unit}: still enabled"
                 elif action == "stop" and after.get("ActiveState") in _ACTIVE:
                     error = f"{unit}: running again"
+                elif action == "mask" and after.get("LoadState") != "masked":
+                    error = f"{unit}: not masked"
                 else:
                     error = None
                 steps.append({"unit": unit, "action": action, "ok": error is None, "error": error})
@@ -1741,7 +1797,8 @@ def fix(ctx, cid) -> dict:
 
 
 def unfix(ctx, cid) -> dict:
-    """PowerFixRes: Undo of fix(): enable what was enabled, start what was running, nothing else."""
+    """PowerFixRes: Undo of fix(): unmask what it masked, then enable what was enabled, start what was running,
+    nothing else."""
     with _LOCK:
         p = _get(ctx)
         if not (isinstance(cid, str) and cid in FIXABLE and cid in p.data["fixed"]):
@@ -1752,21 +1809,39 @@ def unfix(ctx, cid) -> dict:
             return _fix_answer(ctx, p, False, why)
         rec = p.data["fixed"][cid]
         units = []
+        unmask = []
         notes = []
+        gone_note = "{} is no longer installed (or is masked); nothing to turn back on"
         for u in rec["units"]:
             if u["unit"] not in FIXABLE[cid]:
                 continue
             got, _err = _show(u["unit"])
-            if got is not None and got.get("LoadState") != "loaded":      # not-found (uninstalled) or masked
-                notes.append(f"{u['unit']} is no longer installed (or is masked); nothing to turn back on")
+            if got is not None and got.get("LoadState") == "masked" and _ours_masked(u):
+                unmask.append(u["unit"])                                  # OXP3 Deck's own mask: undone first
+            elif got is not None and got.get("LoadState") != "loaded":    # not-found (uninstalled) or masked
+                notes.append(gone_note.format(u["unit"]))
                 continue
             units.append(u)
-        enable = [u["unit"] for u in units if u["was_enabled"] == "enabled"]
-        start = [u["unit"] for u in units if u["was_active"]]
-        log.info("power: Undo %s: enable %s, start %s", cid, enable or "-", start or "-")
+        log.info("power: Undo %s: unmask %s", cid, unmask or "-")
         failed: set = set()
         errors = []
         steps = []
+        if unmask:
+            ok, e = _systemctl_do("unmask", unmask)
+            if not ok:
+                failed |= set(unmask)
+                errors.append(e)
+            steps += [{"unit": u, "action": "unmask", "ok": ok, "error": e} for u in unmask]
+            if ok:          # masked and then uninstalled: unmasked, but there is nothing to turn back on
+                for unit in unmask:
+                    got, _err = _show(unit)
+                    if got is not None and got.get("LoadState") != "loaded":
+                        notes.append(gone_note.format(unit))
+                        units = [u for u in units if u["unit"] != unit]
+        todo_units = [u for u in units if u["unit"] not in failed]
+        enable = [u["unit"] for u in todo_units if u["was_enabled"] == "enabled"]
+        start = [u["unit"] for u in todo_units if u["was_active"]]
+        log.info("power: Undo %s: enable %s, start %s", cid, enable or "-", start or "-")
         for action, todo in (("enable", enable), ("start", start)):
             ok, e = _systemctl_do(action, todo)
             if not ok:

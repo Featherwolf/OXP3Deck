@@ -213,13 +213,14 @@ export type PowerZone = {
 export type PowerConflict = {
   id: string; name: string; kind: "blocks" | "cpu" | "suspect";
   ignorable: boolean; ignored: boolean; why: string; fix: string;
-  fix_units: string[];                     // what Fix for me would stop and disable; [] = not offered
-  fix_plan?: { disable: string[]; stop: string[] } | null;   // what it would run now; null = cannot tell
+  fix_units: string[];                     // what Fix for me would stop and disable (and mask); [] = not offered
+  fix_plan?: { disable: string[]; stop: string[]; mask?: string[] } | null;   // what it would run now; null = cannot tell
   fixed: PowerFixed | null;                // OXP3 Deck turned it off earlier (came_back: it runs again)
 };
-export type PowerFixedUnit = { unit: string; was_enabled: string; was_active: boolean };
+// was_masked: only on a unit Fix for me masked (always false: it was not masked before), so Undo unmasks it first
+export type PowerFixedUnit = { unit: string; was_enabled: string; was_active: boolean; was_masked?: boolean };
 export type PowerFixed = { id: string; name: string; at: number; units: PowerFixedUnit[]; came_back: boolean };
-export type PowerFixStep = { unit: string; action: "disable" | "stop" | "enable" | "start"; ok: boolean;
+export type PowerFixStep = { unit: string; action: "stop" | "disable" | "mask" | "unmask" | "enable" | "start"; ok: boolean;
                              error: string | null };
 export type PowerOverridden = { what: string; ours: string; now: string; since: number; suspects: string[] };
 export type PowerApply = {

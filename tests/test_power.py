@@ -741,7 +741,12 @@ OWNER = {   # the owner's CachyOS units (tests/fixtures/power/units-cachyos-owne
     "tuned-ppd.service": ["loaded", "disabled", False],
 }
 PPD = "power-profiles-daemon.service"
-FORBIDDEN = ("mask", "--now", "--runtime", "kill", "unmask", "--force")
+PS = "powerstation.service"
+FORBIDDEN = ("--now", "--runtime", "kill", "--force", "--global", "--user")
+
+
+def argv(action, *units):
+    return ["/usr/bin/systemctl", "--no-ask-password", action, "--", *units]
 
 
 class FixTest(Base):
@@ -773,6 +778,8 @@ class FixTest(Base):
                 units = argv[argv.index("--") + 1:]
                 allowed = {u for us in power.FIXABLE.values() for u in us} if "show" in argv else power.FIXABLE[cid]
                 self.assertTrue(set(units) <= set(allowed), argv)     # show only reads (the dialog's fix_plan)
+                if "mask" in argv or "unmask" in argv:             # only the whitelisted units D-Bus can restart
+                    self.assertTrue(set(units) <= power.MASKABLE, argv)
         self.assertNotIn("env_extra", self.sc.kw)
 
     def test_fix_ppd_on_the_owners_device(self):
@@ -787,12 +794,13 @@ class FixTest(Base):
         with mock.patch.object(sysexec, "run", spy):
             res = power.fix(self.ctx, "ppd")
         self.assertTrue(res["ok"], res)
-        self.assertEqual(seen[0]["ppd"]["units"], [{"unit": PPD, "was_enabled": "enabled", "was_active": True}])
-        self.assertEqual(self.sc.actions(), [["/usr/bin/systemctl", "--no-ask-password", "disable", "--", PPD],
-                                             ["/usr/bin/systemctl", "--no-ask-password", "stop", "--", PPD]])
+        self.assertEqual(seen[0]["ppd"]["units"], [{"unit": PPD, "was_enabled": "enabled", "was_active": True,
+                                                    "was_masked": False}])
+        self.assertEqual(self.sc.actions(), [argv("stop", PPD), argv("disable", PPD), argv("mask", PPD)])
         self.check_safe("ppd")
-        self.assertEqual([(s["action"], s["ok"]) for s in res["steps"]], [("disable", True), ("stop", True)])
-        self.assertEqual(self.sc.units[PPD], ["loaded", "disabled", False])      # disabled, not masked
+        self.assertEqual([(s["action"], s["ok"]) for s in res["steps"]],
+                         [("stop", True), ("disable", True), ("mask", True)])
+        self.assertEqual(self.sc.units[PPD], ["masked", "masked", False])        # stopped, disabled, masked
         self.assertEqual(self.sc.units["thermald.service"], ["loaded", "enabled", True])   # untouched
         self.assertIsNone(res["state"]["cpu_blocked"])
         self.assertEqual(res["state"]["cpu_blocked_by"], [])
@@ -823,60 +831,169 @@ class FixTest(Base):
         self.tick(power.FIX_RECHECK_S - 4)                                      # 10 s after: looks again
         self.assertEqual(sum("list-units" in c for c in self.sc.calls), n + 1)
         self.assertIsNone(p.recheck_at)
-        self.assertEqual(self.sc.actions()[2:], [])
+        self.assertEqual(self.sc.actions()[3:], [])
 
     def test_came_back_and_fix_again_keeps_the_first_state(self):
-        self.only(PPD)
-        self.assertTrue(power.fix(self.ctx, "ppd")["ok"])
-        self.sc.units[PPD][2] = True                         # D-Bus activation: running again, still disabled
+        self.only(PS)
+        self.sc.units[PS] = ["loaded", "enabled", True]
+        self.assertTrue(power.fix(self.ctx, "powerstation")["ok"])
+        self.assertEqual(self.sc.actions(), [argv("stop", PS), argv("disable", PS)])     # not maskable: no mask
+        self.assertEqual(self.record()["powerstation"]["units"],
+                         [{"unit": PS, "was_enabled": "enabled", "was_active": True}])
+        self.sc.units[PS][2] = True                          # something started it again, still disabled
         rows = power.info(self.ctx, True)["info"]
-        row = {r["id"]: r for r in rows["conflicts"]}["ppd"]
+        row = {r["id"]: r for r in rows["conflicts"]}["powerstation"]
         self.assertTrue(row["fixed"]["came_back"])
-        self.assertEqual(row["fix_units"], [PPD])
-        self.assertEqual([(f["id"], f["came_back"]) for f in rows["fixed"]], [("ppd", True)])
+        self.assertEqual(row["fix_units"], [PS])
+        self.assertEqual([(f["id"], f["came_back"]) for f in rows["fixed"]], [("powerstation", True)])
         self.sc.calls.clear()
+        res = power.fix(self.ctx, "powerstation")
+        self.assertTrue(res["ok"], res)
+        self.assertEqual(self.sc.actions(), [argv("stop", PS)])
+        self.assertEqual(self.record()["powerstation"]["units"],
+                         [{"unit": PS, "was_enabled": "enabled", "was_active": True}])   # not "disabled"
+        self.assertTrue(power.unfix(self.ctx, "powerstation")["ok"])
+        self.assertEqual(self.sc.units[PS], ["loaded", "enabled", True])
+
+    def test_a_masked_ppd_does_not_come_back(self):
+        self.only(PPD)
+        self.sc.units[PPD] = ["loaded", "disabled", True]    # the field case: D-Bus activated, not enabled
+        self.sc.restart = {PPD}                              # every stop is followed by a D-Bus start
         res = power.fix(self.ctx, "ppd")
         self.assertTrue(res["ok"], res)
-        self.assertEqual(self.sc.actions(), [["/usr/bin/systemctl", "--no-ask-password", "stop", "--", PPD]])
         self.assertEqual(self.record()["ppd"]["units"],
-                         [{"unit": PPD, "was_enabled": "enabled", "was_active": True}])   # not "disabled"
+                         [{"unit": PPD, "was_enabled": "disabled", "was_active": True, "was_masked": False}])
+        # back right after the first stop, so stopped once more after the mask; nothing to disable
+        self.assertEqual(self.sc.actions(), [argv("stop", PPD), argv("mask", PPD), argv("stop", PPD)])
+        self.assertEqual(self.sc.units[PPD], ["masked", "masked", False])
+        for _ in range(3):
+            self.tick(power.CONFLICT_RECHECK_S)
+        self.assertEqual(power.conflicts(self.ctx), [])
+        self.assertEqual([(f["id"], f["came_back"]) for f in power.info(self.ctx, True)["info"]["fixed"]],
+                         [("ppd", False)])
+        self.sc.calls.clear()
+        res = power.unfix(self.ctx, "ppd")
+        self.assertTrue(res["ok"], res)
+        self.assertEqual(self.sc.actions(), [argv("unmask", PPD), argv("start", PPD)])   # never enabled: was not
+        self.assertEqual(self.sc.units[PPD], ["loaded", "disabled", True])
+        self.check_safe("ppd")
+
+    def test_a_masked_unit_running_again_says_so(self):
+        self.only(PPD)
+        self.assertTrue(power.fix(self.ctx, "ppd")["ok"])
+        self.sc.units[PPD][2] = True                         # running although masked (started outside systemd)
+        power._get(self.ctx).rows = None
+        row = {r["id"]: r for r in power.conflicts(self.ctx)}["ppd"]
+        self.assertTrue(row["fixed"]["came_back"])
+        self.assertEqual(row["fix_units"], [])
+        self.sc.calls.clear()
+        res = power.fix(self.ctx, "ppd")
+        self.assertFalse(res["ok"])
+        self.assertIn("running although OXP3 Deck masked it", res["error"])
+        self.assertEqual(self.sc.actions(), [])
         self.assertTrue(power.unfix(self.ctx, "ppd")["ok"])
-        self.assertEqual(self.sc.units[PPD], ["loaded", "enabled", True])
+        self.assertEqual(self.sc.actions(), [argv("unmask", PPD), argv("enable", PPD), argv("start", PPD)])
 
     def test_fix_again_after_something_enabled_it_records_enabled(self):
         self.only(PPD)
         self.sc.units[PPD] = ["loaded", "disabled", True]    # running only because something asked over D-Bus
         self.assertTrue(power.fix(self.ctx, "ppd")["ok"])
         self.assertEqual(self.record()["ppd"]["units"][0]["was_enabled"], "disabled")
-        self.sc.units[PPD] = ["loaded", "enabled", True]     # e.g. an update enabled it again
+        self.sc.units[PPD] = ["loaded", "enabled", True]     # e.g. the user unmasked and enabled it again
         power._get(self.ctx).rows = None
         self.sc.calls.clear()
         self.assertTrue(power.fix(self.ctx, "ppd")["ok"])
-        self.assertEqual(self.sc.actions(), [["/usr/bin/systemctl", "--no-ask-password", "disable", "--", PPD],
-                                             ["/usr/bin/systemctl", "--no-ask-password", "stop", "--", PPD]])
-        self.assertEqual(self.record()["ppd"]["units"], [{"unit": PPD, "was_enabled": "enabled", "was_active": True}])
+        self.assertEqual(self.sc.actions(), [argv("stop", PPD), argv("disable", PPD), argv("mask", PPD)])
+        self.assertEqual(self.record()["ppd"]["units"], [{"unit": PPD, "was_enabled": "enabled", "was_active": True,
+                                                          "was_masked": False}])
         self.assertTrue(power.unfix(self.ctx, "ppd")["ok"])
         self.assertEqual(self.sc.units[PPD], ["loaded", "enabled", True])   # the enable it removed is back
+
+    def test_admin_override_file_is_not_masked(self):
+        self.only(PPD)
+        path = self.ctx.sys_path(f"/etc/systemd/system/{PPD}")
+        pf.put(path, "[Service]\nExecStart=/usr/bin/power-profiles-daemon\n")
+        res = power.fix(self.ctx, "ppd")
+        self.assertFalse(res["ok"])
+        self.assertIn("admin override", res["error"])
+        self.assertIn("will not mask it; nothing was changed", res["error"])
+        self.assertEqual(self.sc.actions(), [])
+        self.assertNotIn("ppd", self.record() if os.path.exists(os.path.join(self.ctx.settings_dir, "power.json"))
+                         else {})
+        self.assertEqual(self.sc.units[PPD], ["loaded", "enabled", True])
+        os.remove(path)
+        os.symlink("/dev/null", path)                        # a mask link is not an override (and not loaded)
+        self.assertIsNone(power._admin_override(self.ctx, PPD))
+        os.remove(path)
+        os.symlink("/opt/x/power-profiles-daemon.service", path)    # a linked unit file is one
+        self.assertIsNotNone(power._admin_override(self.ctx, PPD))
+
+    def test_an_old_record_without_was_masked_undoes_as_before(self):
+        path = os.path.join(self.ctx.settings_dir, "power.json")
+        old = {"unit": PPD, "was_enabled": "enabled", "was_active": True}
+        self.only(PPD)
+        self.sc.units[PPD] = ["loaded", "disabled", False]   # what an older Fix for me left: disabled, stopped
+        pf.put(path, json.dumps({"fixed": {"ppd": {"at": 1.0, "boot_id": "b", "units": [old]}}}))
+        self.restart()
+        self.assertEqual(power._get(self.ctx).data["fixed"]["ppd"]["units"], [old])
+        res = power.unfix(self.ctx, "ppd")
+        self.assertTrue(res["ok"], res)
+        self.assertEqual(self.sc.actions(), [argv("enable", PPD), argv("start", PPD)])    # no unmask
+        self.assertNotIn("ppd", self.record())
+        # an old record and a unit the user masked since: left alone, as before
+        self.sc.units[PPD] = ["masked", "masked", False]
+        pf.put(path, json.dumps({"fixed": {"ppd": {"at": 1.0, "boot_id": "b", "units": [old]}}}))
+        self.restart()
+        self.sc.calls.clear()
+        res = power.unfix(self.ctx, "ppd")
+        self.assertTrue(res["ok"], res)
+        self.assertEqual(self.sc.actions(), [])
+        self.assertEqual(res["notes"], [f"{PPD} is no longer installed (or is masked); nothing to turn back on"])
+
+    def test_a_failing_unmask_keeps_the_record_and_runs_nothing_else(self):
+        self.only(PPD)
+        self.assertTrue(power.fix(self.ctx, "ppd")["ok"])
+        self.sc.rc["unmask"] = (1, "Failed to unmask unit: Access denied")
+        self.sc.calls.clear()
+        res = power.unfix(self.ctx, "ppd")
+        self.assertFalse(res["ok"])
+        self.assertEqual(res["error"], f"{PPD}: Failed to unmask unit: Access denied")
+        self.assertEqual(self.sc.actions(), [argv("unmask", PPD)])
+        self.assertEqual(self.record()["ppd"]["units"][0]["was_masked"], False)
+        del self.sc.rc["unmask"]
+        self.assertTrue(power.unfix(self.ctx, "ppd")["ok"])
+        self.assertEqual(self.sc.units[PPD], ["loaded", "enabled", True])
 
     def test_undo_of_a_unit_uninstalled_or_masked_since_clears_the_record(self):
         for state in (None, ["masked", "masked", False]):
             with self.subTest(state=state):
-                self.only(PPD)
-                self.sc.units[PPD] = ["loaded", "enabled", True]
-                self.assertTrue(power.fix(self.ctx, "ppd")["ok"])
+                self.only(PS)
+                self.sc.units[PS] = ["loaded", "enabled", True]
+                self.assertTrue(power.fix(self.ctx, "powerstation")["ok"])
                 if state is None:
-                    del self.sc.units[PPD]                   # package removed
+                    del self.sc.units[PS]                    # package removed
                 else:
-                    self.sc.units[PPD] = state               # the user masked it
+                    self.sc.units[PS] = state                # the user masked it
                 self.sc.calls.clear()
-                res = power.unfix(self.ctx, "ppd")
+                res = power.unfix(self.ctx, "powerstation")
                 self.assertTrue(res["ok"], res)
                 self.assertEqual(self.sc.actions(), [])          # no enable / start of a missing or masked unit
-                self.assertEqual(res["notes"], [f"{PPD} is no longer installed (or is masked); nothing to turn "
+                self.assertEqual(res["notes"], [f"{PS} is no longer installed (or is masked); nothing to turn "
                                                 "back on"])
-                self.assertNotIn("ppd", self.record())
+                self.assertNotIn("powerstation", self.record())
                 self.assertEqual(res["fixed"], [])
-                self.assertFalse(power.unfix(self.ctx, "ppd")["ok"])     # nothing left to undo
+                self.assertFalse(power.unfix(self.ctx, "powerstation")["ok"])     # nothing left to undo
+        # OXP3 Deck masked it and the package went away since: unmasked (its link removed), nothing turned on
+        self.only(PPD)
+        self.sc.units[PPD] = ["loaded", "enabled", True]
+        self.assertTrue(power.fix(self.ctx, "ppd")["ok"])
+        self.sc.masked[PPD] = ("not-found", "")
+        self.sc.calls.clear()
+        res = power.unfix(self.ctx, "ppd")
+        self.assertTrue(res["ok"], res)
+        self.assertEqual(self.sc.actions(), [argv("unmask", PPD)])
+        self.assertEqual(res["notes"], [f"{PPD} is no longer installed (or is masked); nothing to turn back on"])
+        self.assertNotIn("ppd", self.record())
 
     def test_fix_again_drops_a_recorded_unit_that_is_gone(self):
         self.only("tuned-ppd.service", "tuned.service")
@@ -884,7 +1001,7 @@ class FixTest(Base):
         self.sc.units["tuned.service"] = ["loaded", "enabled", True]
         self.assertTrue(power.fix(self.ctx, "tuned")["ok"])
         del self.sc.units["tuned.service"]                     # uninstalled
-        self.sc.units["tuned-ppd.service"][2] = True           # came back
+        self.sc.units["tuned-ppd.service"] = ["loaded", "disabled", True]    # unmasked by the user, came back
         power._get(self.ctx).rows = None
         self.assertTrue(power.fix(self.ctx, "tuned")["ok"])
         self.assertEqual([u["unit"] for u in self.record()["tuned"]["units"]], ["tuned-ppd.service"])
@@ -904,23 +1021,24 @@ class FixTest(Base):
         self.sc.units["tuned-ppd.service"] = ["loaded", "static", True]
         self.sc.units["tuned.service"] = ["loaded", "enabled", False]
         row = {r["id"]: r for r in power.conflicts(self.ctx)}["tuned"]
-        self.assertEqual(row["fix_plan"], {"disable": ["tuned.service"], "stop": ["tuned-ppd.service"]})
+        self.assertEqual(row["fix_plan"], {"disable": ["tuned.service"], "stop": ["tuned-ppd.service"],
+                                           "mask": ["tuned-ppd.service", "tuned.service"]})
         self.assertTrue(power.fix(self.ctx, "tuned")["ok"])
-        self.assertEqual(self.sc.actions(), [["/usr/bin/systemctl", "--no-ask-password", "disable", "--",
-                                              "tuned.service"],
-                                             ["/usr/bin/systemctl", "--no-ask-password", "stop", "--",
-                                              "tuned-ppd.service"]])
+        self.assertEqual(self.sc.actions(), [argv("stop", "tuned-ppd.service"), argv("disable", "tuned.service"),
+                                             argv("mask", "tuned-ppd.service", "tuned.service")])
         self.assertEqual({r["id"]: r for r in power.conflicts(self.ctx)}.get("ppd", {}).get("fix_plan"), None)
 
     def test_a_restart_right_away_is_not_ok(self):
-        self.only(PPD)
-        self.sc.restart = {PPD}
-        res = power.fix(self.ctx, "ppd")
+        self.only(PS)                                        # not maskable: a restart right away stays
+        self.sc.units[PS] = ["loaded", "enabled", True]
+        self.sc.restart = {PS}
+        res = power.fix(self.ctx, "powerstation")
         self.assertFalse(res["ok"])
-        self.assertEqual(res["error"], "power-profiles-daemon is still running")
-        self.assertEqual([s["ok"] for s in res["steps"]], [True, False])
+        self.assertEqual(res["error"], "PowerStation is still running")
+        self.assertEqual([(s["action"], s["ok"]) for s in res["steps"]], [("stop", False), ("disable", True)])
         self.assertTrue(res["conflicts"][0]["fixed"]["came_back"])
-        self.assertIn("ppd", self.record())                  # Undo still offered
+        self.assertIn("powerstation", self.record())         # Undo still offered
+        self.check_safe("powerstation")
 
     def test_tuned_static_masked_and_not_found(self):
         self.only("tuned-ppd.service")
@@ -928,7 +1046,8 @@ class FixTest(Base):
         res = power.fix(self.ctx, "tuned")
         self.assertTrue(res["ok"], res)
         self.assertEqual([u["unit"] for u in self.record()["tuned"]["units"]], ["tuned-ppd.service"])
-        self.assertEqual(len(self.sc.actions()), 2)
+        self.assertEqual(self.sc.actions(), [argv("stop", "tuned-ppd.service"), argv("disable", "tuned-ppd.service"),
+                                             argv("mask", "tuned-ppd.service")])
         power.unfix(self.ctx, "tuned")
         self.sc.calls.clear()
         self.sc.units["tuned-ppd.service"] = ["loaded", "static", True]
@@ -937,13 +1056,14 @@ class FixTest(Base):
         power._get(self.ctx).rows = None
         res = power.fix(self.ctx, "tuned")
         self.assertTrue(res["ok"], res)
-        self.assertEqual(self.sc.actions(), [["/usr/bin/systemctl", "--no-ask-password", "stop", "--",
-                                              "tuned-ppd.service"]])          # static: nothing to disable
-        self.assertFalse(any("tuned.service" in c for c in self.sc.calls))    # masked: not touched
+        self.assertEqual(self.sc.actions(), [argv("stop", "tuned-ppd.service"),
+                                             argv("mask", "tuned-ppd.service")])     # static: nothing to disable
+        self.assertFalse(any("tuned.service" in c for c in self.sc.calls))    # masked by the user: not touched
         self.sc.calls.clear()
         res = power.unfix(self.ctx, "tuned")
-        self.assertEqual(self.sc.actions(), [["/usr/bin/systemctl", "--no-ask-password", "start", "--",
-                                              "tuned-ppd.service"]])          # a static unit is never enabled
+        self.assertEqual(self.sc.actions(), [argv("unmask", "tuned-ppd.service"),
+                                             argv("start", "tuned-ppd.service")])    # a static unit is never enabled
+        self.assertEqual(self.sc.units["tuned.service"], ["masked", "masked", False])   # the user's mask stays
         self.check_safe("tuned")
 
     def test_fix_thermald_while_blocked(self):
@@ -1003,14 +1123,14 @@ class FixTest(Base):
         res = power.fix(self.ctx, "ppd")
         self.assertFalse(res["ok"])
         self.assertEqual(res["error"], f"{PPD}: Failed to disable unit: Access denied")
-        self.assertEqual([(s["action"], s["ok"]) for s in res["steps"]], [("disable", False), ("stop", True)])
+        self.assertEqual([(s["action"], s["ok"]) for s in res["steps"]],
+                         [("stop", True), ("disable", False), ("mask", True)])     # the mask still holds it
         self.assertIn("ppd", self.record())
         del self.sc.rc["disable"]
         self.sc.calls.clear()
         res = power.unfix(self.ctx, "ppd")
         self.assertTrue(res["ok"], res)
-        self.assertEqual(self.sc.actions(), [["/usr/bin/systemctl", "--no-ask-password", "enable", "--", PPD],
-                                             ["/usr/bin/systemctl", "--no-ask-password", "start", "--", PPD]])
+        self.assertEqual(self.sc.actions(), [argv("unmask", PPD), argv("enable", PPD), argv("start", PPD)])
 
     def test_unfix(self):
         self.only(PPD)
@@ -1020,7 +1140,7 @@ class FixTest(Base):
         res = power.unfix(self.ctx, "ppd")
         self.assertTrue(res["ok"], res)
         self.assertEqual([(s["action"], s["unit"], s["ok"]) for s in res["steps"]],
-                         [("enable", PPD, True), ("start", PPD, True)])
+                         [("unmask", PPD, True), ("enable", PPD, True), ("start", PPD, True)])
         self.assertNotIn("ppd", self.record())
         self.assertEqual(res["fixed"], [])
         self.assertEqual(res["state"]["cpu_blocked_by"], ["ppd"])
@@ -1029,7 +1149,7 @@ class FixTest(Base):
         self.assertFalse(power.unfix(self.ctx, "ppd")["ok"])          # no record
         for cid in (None, "../x", ["ppd"], "hhd"):
             self.assertFalse(power.unfix(self.ctx, cid)["ok"], cid)
-        self.assertEqual(len(self.sc.actions()), 2)
+        self.assertEqual(len(self.sc.actions()), 3)
 
     def test_unfix_does_only_what_the_record_says(self):
         path = os.path.join(self.ctx.settings_dir, "power.json")
@@ -1065,6 +1185,21 @@ class FixTest(Base):
         pf.put(path, json.dumps({"fixed": ["ppd"]}))
         self.restart()
         self.assertEqual(power._get(self.ctx).data["fixed"], {})
+        # was_masked: kept only as false and only on a MASKABLE unit (a planted record can at most unmask one)
+        pf.put(path, json.dumps({"fixed": {
+            "ppd": {"at": 5, "units": [dict(good, was_masked=False)]},
+            "tuned": {"at": 5, "units": [{"unit": "tuned.service", "was_enabled": "enabled", "was_active": True,
+                                          "was_masked": "no"}]},
+            "powerstation": {"at": 5, "units": [{"unit": PS, "was_enabled": "enabled", "was_active": True,
+                                                 "was_masked": False}]},
+            "thermald": {"at": 5, "units": [{"unit": "thermald.service", "was_enabled": "enabled",
+                                             "was_active": True, "was_masked": True}]}}}))
+        self.restart()
+        fixed = power._get(self.ctx).data["fixed"]
+        self.assertEqual(fixed["ppd"]["units"], [dict(good, was_masked=False)])
+        self.assertNotIn("was_masked", fixed["tuned"]["units"][0])
+        self.assertNotIn("was_masked", fixed["powerstation"]["units"][0])
+        self.assertNotIn("was_masked", fixed["thermald"]["units"][0])
 
     def test_nothing_fixes_or_undoes_without_a_call(self):
         self.only(PPD, "thermald.service")
@@ -1100,6 +1235,9 @@ class FixTest(Base):
             self.assertNotIn("mask", why, cid)
         self.assertNotIn("turbo", power.CONFLICTS["ppd"][3])
         self.assertTrue(set(power.FIXABLE) <= set(power.CONFLICTS))
+        self.assertEqual(power.MASKABLE, {"power-profiles-daemon.service", "tuned-ppd.service", "tuned.service",
+                                          "thermald.service", "intel_lpmd.service"})
+        self.assertTrue(power.MASKABLE <= {u for us in power.FIXABLE.values() for u in us})
         self.assertFalse({"hhd", "simpledeckytdp", "powercontrol", "steamos-remote"} & set(power.FIXABLE))
         self.assertTrue(power._UNITS["hhd"].match("hhd_local@jordan.service"))
         self.assertTrue(power._UNITS["hhd"].match("hhd@jordan.service"))

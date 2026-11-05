@@ -726,11 +726,14 @@ The facts this section rests on (kernel 7.2 source and measurements on the owner
 - **Another service is changed only on "Fix for me", and can be undone.** Only after the user taps "Fix for me" on a
   conflict and confirms a dialog that says exactly what will change (the unit names and the commands) may OXP3 Deck
   **stop and disable** that conflict's systemd units, and only the units on the `FIXABLE` whitelist (Conflicts →
-  Fix for me). It never masks a unit, never uninstalls a package, never edits another plugin's settings or files,
-  and never acts on its own: no tick, event, enable or start-up ever runs a fix or an undo. It records what it
-  changed (power.json `fixed`) and offers **Undo**, which re-enables and starts exactly what it changed. When a
-  fixed unit runs again (D-Bus activation, a system update), OXP3 Deck says so and offers the fix again; it never
-  repeats it by itself.
+  Fix for me). **Masking is allowed only there too**: only through Fix for me, only for the `MASKABLE` units (the
+  `FIXABLE` units that D-Bus or another unit starts again: power-profiles-daemon, tuned-ppd, tuned, thermald,
+  intel_lpmd), never over an admin's own unit file in `/etc/systemd/system`, said in the dialog, and always undone
+  by Undo (unmask first). It never uninstalls a package, never edits another plugin's settings or files, never
+  unmasks a unit it did not mask, and never acts on its own: no tick, event, enable or start-up ever runs a fix or
+  an undo. It records what it changed (power.json `fixed`) and offers **Undo**, which unmasks, re-enables and starts
+  exactly what it changed. When a fixed unit runs again (a system update re-enabling an unmasked one, or a masked
+  one that did not stop), OXP3 Deck says so and offers the fix again where it can; it never repeats it by itself.
 - **Write only what is ours to write**: PL1 (`long_term`) and PL2 (`short_term`) of every `package-*` zone of
   `intel-rapl` and `intel-rapl-mmio`; `min_freq` / `max_freq` and (0.4) `power_profile` (`base` / `power_saving`
   only) of the render GT; `energy_performance_preference` of every cpufreq policy; `intel_pstate/no_turbo`; (0.4)
@@ -1070,15 +1073,15 @@ known too, and a `not-found` one is not offered), reads
 |---|---|---|---|---|---|
 | `simpledeckytdp` | Decky plugin "SimpleDeckyTDP", enabled | blocks | no | no (a plugin) | Decky → Settings → Plugins: disable or uninstall SimpleDeckyTDP (Power tab → Import first) |
 | `powercontrol` | Decky plugin "PowerControl" or "PowerTools", enabled | blocks | no | no (a plugin) | same, for that plugin |
-| `powerstation` | `powerstation.service` active, or comm `powerstation` | blocks | no | `powerstation.service` | `sudo systemctl disable --now powerstation.service`. On Bazzite, Steam's TDP slider uses it, and Bazzite's hardware setup turns it back on after a system update |
-| `thermald` | `thermald.service` active, or comm `thermald` | blocks | no | `thermald.service` | `sudo systemctl disable --now thermald.service`: on this CPU it rewrites the sustained limit within seconds. The CPU's own heat limit and the fan curve still protect the device |
+| `powerstation` | `powerstation.service` active, or comm `powerstation` | blocks | no | `powerstation.service` (not masked) | `sudo systemctl disable --now powerstation.service`. On Bazzite, Steam's TDP slider uses it, and Bazzite's hardware setup turns it back on after a system update |
+| `thermald` | `thermald.service` active, or comm `thermald` | blocks | no | `thermald.service` (+ mask) | `sudo systemctl disable --now thermald.service`: on this CPU it rewrites the sustained limit within seconds. The CPU's own heat limit and the fan curve still protect the device |
 | `hhd` | `hhd@*.service` / `hhd.service` / `hhd_local@*.service` active, or comm `hhd` | blocks | **yes** | no (it may run the controller) | turn off TDP control in Handheld Daemon's settings, then "I've handled it" (adds it to `ignore`) |
 | `oxp3-tdp-sync` | `oxp3-tdp-sync.service` active | blocks | no | `oxp3-tdp-sync.service` | `sudo systemctl disable --now oxp3-tdp-sync.service` (it copies MMIO PL1 into MSR every 2 s; OXP3 Deck writes both) |
 | `onex3-tdp` | `onex3-tdp.service` active | blocks | no | `onex3-tdp.service` | `sudo systemctl disable --now onex3-tdp.service` |
 | `steamos-remote` | a file in `/etc/steamos-manager/remotes.d/` or `/usr/share/steamos-manager/remotes.d/` containing `TdpLimit1` | blocks | yes | no (a file, often read-only) | Steam's TDP slider writes through it: turn Steam's "TDP limit" off in Quick Access → Performance, then "I've handled it" (no "remove the file": under `/usr/share` it cannot be) |
-| `ppd` | `power-profiles-daemon.service` active | cpu | yes | `power-profiles-daemon.service` | `sudo systemctl disable --now power-profiles-daemon.service` |
-| `tuned` | `tuned.service` or `tuned-ppd.service` active | cpu | yes | `tuned-ppd.service`, `tuned.service` | `sudo systemctl disable --now tuned-ppd.service tuned.service` |
-| `intel_lpmd` | `intel_lpmd.service` active | cpu | yes | `intel_lpmd.service` | `sudo systemctl disable --now intel_lpmd.service` (CachyOS enables it on this CPU; it sets EPP and parks cores, not the power limits) |
+| `ppd` | `power-profiles-daemon.service` active | cpu | yes | `power-profiles-daemon.service` (+ mask) | `sudo systemctl disable --now power-profiles-daemon.service` |
+| `tuned` | `tuned.service` or `tuned-ppd.service` active | cpu | yes | `tuned-ppd.service`, `tuned.service` (+ mask) | `sudo systemctl disable --now tuned-ppd.service tuned.service` |
+| `intel_lpmd` | `intel_lpmd.service` active | cpu | yes | `intel_lpmd.service` (+ mask) | `sudo systemctl disable --now intel_lpmd.service` (CachyOS enables it on this CPU; it sets EPP and parks cores, not the power limits) |
 
 - **blocks**: `enable(true)` answers `{ok: false, error: "another power manager is active: PowerStation", state,
   conflicts}` and writes nothing; one appearing while enabled sets `state.blocked` and writes stop (nothing is
@@ -1090,8 +1093,8 @@ known too, and a `not-found` one is not offered), reads
   OXP3 Deck does not split the two.)
 - Each answer row: `{id, name, kind, ignorable, ignored, why, fix, fix_units, fix_plan, fixed}` (`fix_units`: the
   `FIXABLE` units of this id that systemd has loaded now, `[]` when Fix for me is not offered; `fix_plan`:
-  `{disable, stop}`, the units fix would disable (`UnitFileState` enabled, one `show` per unit at the scan) and stop
-  (running) now, for the confirm dialog, or null when not offered or `show` cannot tell; `fixed`: the record below, or
+  `{disable, stop, mask}`, the units fix would disable (`UnitFileState` enabled, one `show` per unit at the scan) and stop
+  (running) and mask (the `MASKABLE` ones) now, for the confirm dialog, or null when not offered or `show` cannot tell; `fixed`: the record below, or
   null); only active ones are listed. A failing `systemctl` gives one row `{id: "unknown", kind: "suspect", ...}`
   ("could not list services: ...") that blocks nothing; Fix for me and Undo are then refused ("could not list
   services").
@@ -1106,22 +1109,40 @@ known too, and a `not-found` one is not offered), reads
 ("intel_lpmd.service",)}`. No unit name ever comes from the frontend or from a file: the frontend sends a conflict
 id; the record's units are checked against `FIXABLE[id]` when read.
 
-**`fix(ctx, cid)`** (`power_fix`), under `_LOCK`, in the executor (it is not a job; at most 2 systemctl runs of 30 s):
+`MASKABLE` (a constant, a subset of the `FIXABLE` units) is what Fix for me also masks, because a stop and disable
+does not hold for them (field report: power-profiles-daemon `was_enabled` "disabled", `was_active` true, came back
+right after the fix and reset EPP to `balance_performance`): `power-profiles-daemon.service` (D-Bus activated:
+`net.hadess.PowerProfiles` / `org.freedesktop.UPower.PowerProfiles`, `SystemdService=power-profiles-daemon.service`,
+on CachyOS and Bazzite alike), `tuned-ppd.service` (the same bus names, `SystemdService=tuned-ppd.service`),
+`tuned.service` (`tuned-ppd.service` has `Requires=tuned.service`, so starting one starts the other),
+`thermald.service` (`SystemdService=dbus-org.freedesktop.thermald.service`, its alias) and `intel_lpmd.service`
+(`SystemdService=org.freedesktop.intel_lpmd.service`, its alias). Not `powerstation`, `oxp3-tdp-sync` or
+`onex3-tdp`: nothing activates them (a Bazzite update re-enabling powerstation shows as "came back").
+
+**`fix(ctx, cid)`** (`power_fix`), under `_LOCK`, in the executor (it is not a job; at most 4 systemctl runs of 30 s):
 1. `cid` must be a str key of `FIXABLE`, else `{ok: false, error: "power_fix: <cid> cannot be fixed by OXP3 Deck"}`.
    `_rows(force=True)`: the conflict must be active now (`"<name> is not running"` otherwise) and systemctl must
    have answered.
 2. For each unit of `FIXABLE[cid]` that systemd has loaded: `systemctl show --property=LoadState,UnitFileState,
    ActiveState -- <unit>` (`Key=Value` lines). Skip `LoadState` other than `loaded` (not-found, masked: nothing to
-   do). Record `{unit, was_enabled: UnitFileState, was_active: ActiveState in (active, activating, reloading)}`.
+   do). A `MASKABLE` unit with `/etc/systemd/system/<unit>` already there (a file or a link other than to
+   `/dev/null`: an admin override that `mask` would replace) refuses the whole fix with nothing run and nothing
+   recorded: "<unit> has its own unit file in /etc/systemd/system (an admin override), so OXP3 Deck will not mask
+   it; nothing was changed. Turn it off yourself (Details: Do it yourself)". Record `{unit, was_enabled:
+   UnitFileState, was_active: ActiveState in (active, activating, reloading)}`, plus `was_masked: false` for a
+   `MASKABLE` unit (it was not masked: a masked one is never fixed; Undo unmasks the units that carry it).
    When a record for `cid` already exists (Fix again after it came back), each unit keeps its earlier `was_enabled`
    (the state before OXP3 Deck first touched it) unless it is `enabled` now (something enabled it again and this fix
    disables it, so Undo must enable it); `was_active` becomes true if either says so. The record's other units stay
-   in it only while `show` still reads them `loaded` (an uninstalled or masked one is dropped).
+   in it only while `show` still reads them `loaded`, or `masked` when the entry has `was_masked: false` (OXP3
+   Deck's own mask); an uninstalled or user-masked one is dropped.
 3. Save the record to power.json **before** running anything (`fixed[cid] = {at: time.time(), boot_id, units}`), so a
    crash half-way still leaves an Undo.
-4. `systemctl --no-ask-password disable -- <units whose UnitFileState is enabled>` (never a static, indirect,
-   generated or alias unit: there is nothing to disable), then `systemctl --no-ask-password stop -- <units that
-   are active>`. Each through `sysexec.run` (clean env, stdin /dev/null, no shell, argv list), timeout 30 s, with
+4. `systemctl --no-ask-password stop -- <units that are active>`, then `systemctl --no-ask-password disable --
+   <units whose UnitFileState is enabled>` (never a static, indirect, generated or alias unit: there is nothing to
+   disable), then `systemctl --no-ask-password mask -- <the MASKABLE units>` (persistent: `/etc`, no `--runtime`,
+   no `--now`). A masked unit that is running again after the mask (D-Bus started it between the stop and the
+   mask) is stopped once more. Each through `sysexec.run` (clean env, stdin /dev/null, no shell, argv list), timeout 30 s, with
    the absolute path `sysexec.which("systemctl") or "/usr/bin/systemctl"`.
 5. Re-read each unit (`show` again) for the answer's steps; `_rows(force=True)`; `_update_blocked`, and when it
    cleared, `apply_at = now`; for a "cpu" id, when `_may_write`, `_apply` at once (EPP and turbo are ours again).
@@ -1134,11 +1155,15 @@ id; the record's units are checked against `FIXABLE[id]` when read.
    stderr line ("<unit>: <text>"), the record stays (Undo still works for what did change).
 
 **`unfix(ctx, cid)`** (`power_unfix`): `cid` must be a `FIXABLE` key with a record. Each recorded unit (checked
-against `FIXABLE[cid]`) is `show`n first: one whose `LoadState` is not `loaded` (uninstalled, or masked by the user)
-is dropped from the record with the note "<unit> is no longer installed (or is masked); nothing to turn back on", so
-the record can always be cleared. Then, for the rest: `systemctl --no-ask-password enable -- <units whose
-was_enabled is "enabled">`, then `systemctl --no-ask-password start -- <units with was_active>`. Nothing else: a
-unit that was static or disabled is never enabled, one that was not running is not started. A unit whose command
+against `FIXABLE[cid]`) is `show`n first. One that reads `masked` and has `was_masked: false` (a `MASKABLE` unit
+OXP3 Deck masked) is unmasked first: `systemctl --no-ask-password unmask -- <those units>`; a failing unmask keeps
+them in the record and runs nothing else for them; one that, unmasked, reads not `loaded` (uninstalled while
+masked) gets the note below. Any other unit whose `LoadState` is not `loaded` (uninstalled, or masked by the user;
+an older record without `was_masked` is never unmasked) is dropped from the record with the note "<unit> is no
+longer installed (or is masked); nothing to turn back on", so the record can always be cleared. Then, for the
+rest: `systemctl --no-ask-password enable -- <units whose was_enabled is "enabled">`, then `systemctl
+--no-ask-password start -- <units with was_active>`. Nothing else: a unit that was static or disabled is never
+enabled, one that was not running is not started, so the unit ends exactly as before the fix. A unit whose command
 succeeded leaves the record; the record goes when it is empty. Then `_rows(force=True)` and `_update_blocked`: the
 conflict is back, so a "blocks" id blocks again (nothing is restored, as for any blocker) and a "cpu" id leaves EPP
 and turbo to it again. Answer `PowerFixRes` like fix.
@@ -1146,20 +1171,31 @@ and turbo to it again. Answer `PowerFixRes` like fix.
 **Came back**: a row whose id has a record gets `fixed` with `came_back: true` (it is running again although OXP3
 Deck turned it off). The UI says who most likely did it (`ppd`, `tuned`: "the desktop's power mode switch or a game
 launcher started it again"; `powerstation`: "a Bazzite update turned it back on"; others: "something started it
-again") and offers "Fix again" (the same confirm) and Undo. A record whose units all run again and are enabled again
+again") and offers "Fix again" (the same confirm) and Undo. A unit OXP3 Deck masked should not come back; if one
+runs anyway (it did not stop, or was started outside systemd), its row reads "It's running even though OXP3 Deck
+masked it." and its Details say a restart stops it and Undo unmasks it; `fix` refuses with "<name> is running
+although OXP3 Deck masked it (it was not stopped, or was started outside systemd); a restart stops it, Undo
+unmasks it" (its `fix_units` are empty: the unit is not `loaded`). A record whose units all run again and are enabled again
 (the user or the system turned them back on) is Undo's no-op case: Undo runs the same commands (harmless) and drops
 the record.
 
-**Known limit, said in the dialog**: power-profiles-daemon, tuned-ppd, thermald and intel_lpmd are D-Bus
-activated; a disabled unit still starts when a program asks for it (KDE's power applet, `powerprofilesctl`,
-CachyOS's `game-performance`). Only `mask` would stop that, and OXP3 Deck does not mask. So the ppd and tuned
-dialogs say "It may start again when the desktop or a game launcher asks for it; OXP3 Deck will tell you."
+**Masking, said in the dialog**: power-profiles-daemon, tuned-ppd, thermald and intel_lpmd are D-Bus activated (and
+tuned-ppd pulls in tuned); a disabled unit still starts when a program asks for it (KDE's power applet,
+`powerprofilesctl`, Steam, CachyOS's `game-performance`). So Fix for me masks those units (the owner asked for a fix
+that holds). The dialog of a `MASKABLE` id says "OXP3 Deck will stop <who>, keep it from starting at boot and mask
+it: while masked, nothing can start it again, not the desktop, a game launcher or another service.", what stops
+working (ppd: "the power mode switch in Desktop Mode (KDE's power profiles) and profile switching by Steam or
+CachyOS's game launcher (game-performance)"; tuned: the same and TuneD's own tuning), and "Undo unmasks it and
+turns it back on as before."; the commands list the `mask` line. The other ids' dialogs never say "mask".
 
 **Records** (power.json `fixed`, survives a reboot so Undo works after one): `{"ppd": {"at": 1730800000.0,
 "boot_id": "…", "units": [{"unit": "power-profiles-daemon.service", "was_enabled": "enabled", "was_active":
-true}]}}`. `_norm_data` keeps only ids in `FIXABLE`, units in `FIXABLE[id]` (deduplicated), `was_enabled` a str of
-at most 32 chars, `was_active` a bool, `at` a number; anything else is dropped (power.json sits in a folder the user
-owns, so a planted record can at most enable and start a whitelisted unit). Missing = `{}`.
+true, "was_masked": false}]}}`. `_norm_data` keeps only ids in `FIXABLE`, units in `FIXABLE[id]` (deduplicated),
+`was_enabled` a str of at most 32 chars, `was_active` a bool, `at` a number; `was_masked` is kept only as `false`
+on a `MASKABLE` unit (any other value or unit: the key is dropped, the entry kept); anything else is dropped
+(power.json sits in a folder the user owns, so a planted record can at most unmask, enable and start a whitelisted
+unit). Records written before masking have no `was_masked` and are undone as before (enable, start; no unmask).
+Missing = `{}`.
 
 Not offered (guidance only, in Details): the Decky plugins (Decky keeps loader.json in memory and would overwrite an
 edit by root; its `disablePlugin` route is not public API), hhd (stopping it can stop the controller), the steamos
@@ -1173,7 +1209,8 @@ unmask services") and one whose listed units all `show` as not loaded; a failing
 `show` or a power.json that cannot be saved refuses with nothing run. A record keeps an earlier unit that is no longer
 in the listing while `show` reads it `loaded`. `ok` is false with "<name> is still running" when every command exited 0 but the conflict is still there (a
 D-Bus restart at once); the row then has `fixed.came_back`. Each step's `ok` needs its command's exit 0 and the
-re-read (`UnitFileState` no longer `enabled` after disable, `ActiveState` not active after stop). `unfix` writes
+re-read (`UnitFileState` no longer `enabled` after disable, `ActiveState` not active after stop, `LoadState`
+`masked` after mask). `unfix` writes
 nothing (nothing becomes OXP3 Deck's); its record keeps only the units whose command failed. `recheck_at` is set
 only while TDP control is on (a disabled tick is idle). `cpu_blocked` reads "<name> controls energy preference and
 CPU boost"; the steamos remote's file path moved from `fix` into `why`. Tests: `tests/test_power.py` `FixTest`
@@ -1184,22 +1221,25 @@ with a stateful fake systemctl (`powerfake.Systemctl`).
 `fix_plan`, so it says exactly what runs: "OXP3 Deck will stop <who> and keep it from starting at boot." (both), "OXP3
 Deck will stop <who>. It is not set to start at boot, so nothing else changes." (stop only), "OXP3 Deck will keep
 <who> from starting at boot. It is not running now." (disable only); the `lines` hold only those commands (without
-a plan: both, for every offered unit). Then "Nothing is uninstalled." ("Nothing is deleted." for the scripts); for a
-"cpu" id while power control is on, "Then OXP3 Deck can set energy preference and CPU boost."; then the rest below;
-then "Undo turns it back on."
+a plan: both, for every offered unit). For a `MASKABLE` id the lead is instead "OXP3 Deck will stop <who>, keep it
+from starting at boot and mask it: while masked, nothing can start it again, not the desktop, a game launcher or
+another service." (the stop / boot parts as the plan says), and the `lines` are `stop`, `disable`, `mask` in that
+order (`fix_plan.mask`, or the row's `MASKABLE` units). Then "Nothing is uninstalled." ("Nothing is deleted." for
+the scripts); for a "cpu" id while power control is on, "Then OXP3 Deck can set energy preference and CPU boost.";
+then the rest below; then "Undo turns it back on." (masked: "Undo unmasks it and turns it back on as before.").
 
 | id | Title | <who> | Rest |
 |---|---|---|---|
-| `ppd` | Turn off Power Profiles? | power-profiles-daemon | The power mode switch in Desktop Mode stops working. It may start again when the desktop or a game launcher asks for it; OXP3 Deck will tell you. |
-| `tuned` | Turn off TuneD? | TuneD (tuned-ppd and tuned) ("them") | The power mode switch in Desktop Mode stops working. It may start again when the desktop asks for it; OXP3 Deck will tell you. |
+| `ppd` | Turn off Power Profiles? | power-profiles-daemon | What stops working: the power mode switch in Desktop Mode (KDE's power profiles) and profile switching by Steam or CachyOS's game launcher (game-performance). |
+| `tuned` | Turn off TuneD? | TuneD (tuned-ppd and tuned) ("them") | What stops working: the power mode switch in Desktop Mode (KDE's power profiles), profile switching by Steam or a game launcher, and TuneD's own tuning. |
 | `intel_lpmd` | Turn off Intel's low-power daemon? | intel_lpmd | Light tasks and video may use a bit more battery; games are not affected. |
 | `thermald` | Turn off the thermal daemon? | thermald | It lowers the power limit on its own within seconds, so OXP3 Deck cannot hold yours. The CPU's own heat limit and the fan still protect the device; the case may get warmer at high power. |
 | `powerstation` | Turn off PowerStation? | PowerStation | Steam's own TDP slider stops working; OXP3 Deck's replaces it. On Bazzite, a system update may turn it back on; OXP3 Deck will tell you. |
 | `oxp3-tdp-sync`, `onex3-tdp` | Turn off <name>? | <name> | OXP3 Deck already sets these limits. |
 
-Undo confirm: title "Turn <name> back on?", text "OXP3 Deck turns back on what it turned off (<date>). Then <name>
-controls <energy preference and CPU boost | the power limits> again.", lines the enable/start commands, ok "Turn it
-back on". The Undo row's Details: "OXP3 Deck turned it off (<date>)." (`when()` gives only the time for today).
+Undo confirm: title "Turn <name> back on?", text "OXP3 Deck [unmasks and ]turns back on what it turned off (<date>).
+Then <name> controls <energy preference and CPU boost | the power limits> again.", lines the unmask (units with
+`was_masked: false`), enable and start commands in that order, ok "Turn it back on". The Undo row's Details: "OXP3 Deck turned it off (<date>)." (`when()` gives only the time for today).
 
 ### main.py
 
@@ -1258,13 +1298,14 @@ export type PowerZone = {
 export type PowerConflict = {
   id: string; name: string; kind: "blocks" | "cpu" | "suspect";
   ignorable: boolean; ignored: boolean; why: string; fix: string;
-  fix_units: string[];                     // what Fix for me would stop and disable; [] = not offered
-  fix_plan?: { disable: string[]; stop: string[] } | null;   // what it would run now; null = cannot tell
+  fix_units: string[];                     // what Fix for me would stop and disable (and mask); [] = not offered
+  fix_plan?: { disable: string[]; stop: string[]; mask?: string[] } | null;   // what it would run now; null = cannot tell
   fixed: PowerFixed | null;                // OXP3 Deck turned it off earlier (came_back: it runs again)
 };
-export type PowerFixedUnit = { unit: string; was_enabled: string; was_active: boolean };
+// was_masked: only on a unit Fix for me masked (always false: it was not masked before), so Undo unmasks it first
+export type PowerFixedUnit = { unit: string; was_enabled: string; was_active: boolean; was_masked?: boolean };
 export type PowerFixed = { id: string; name: string; at: number; units: PowerFixedUnit[]; came_back: boolean };
-export type PowerFixStep = { unit: string; action: "disable" | "stop" | "enable" | "start"; ok: boolean;
+export type PowerFixStep = { unit: string; action: "stop" | "disable" | "mask" | "unmask" | "enable" | "start"; ok: boolean;
                              error: string | null };
 export type PowerOverridden = { what: string; ours: string; now: string; since: number; suspects: string[] };
 export type PowerApply = {
@@ -1480,9 +1521,10 @@ from the fixtures, `show` from a per-unit table and each command with a chosen r
 - `fix("ppd")` on the owner's units (fixture `units-cachyos-owner.txt`: power-profiles-daemon and thermald
   active, powerstation not-found): records `{unit: "power-profiles-daemon.service", was_enabled: "enabled",
   was_active: true}` in power.json **before** the first command; runs exactly `[systemctl, "--no-ask-password",
-  "disable", "--", "power-profiles-daemon.service"]` then `[..., "stop", "--", "power-profiles-daemon.service"]`;
-  every argv's first item is absolute; `env_extra` is not passed (clean env); no argv contains "mask", "--now",
-  "--runtime", "kill" or a unit outside `FIXABLE["ppd"]`; after it, `cpu_blocked` is null and EPP/turbo are
+  "stop", "--", "power-profiles-daemon.service"]`, then `[..., "disable", ...]`, then `[..., "mask", ...]` (record
+  `was_masked: false`); every argv's first item is absolute; `env_extra` is not passed (clean env); no argv
+  contains "--now", "--runtime", "kill", "--force" or a unit outside `FIXABLE["ppd"]`, and `mask` / `unmask` only
+  `MASKABLE` units; after it, `cpu_blocked` is null and EPP/turbo are
   applied (enabled) or not written (disabled); `recheck_at` is set and the tick 10 s later re-scans.
 - `fix("tuned")` with only tuned-ppd loaded: one unit recorded and changed; a static unit is stopped but not
   disabled; a not-found or masked unit is skipped.
@@ -1498,12 +1540,21 @@ from the fixtures, `show` from a per-unit table and each command with a chosen r
 - came back: a record plus the unit active again → the row's `fixed.came_back` true; Fix again keeps the first
   `was_enabled` ("enabled", not the "disabled" seen now); a unit first fixed while `disabled` and enabled again
   later records "enabled" on Fix again, and Undo enables it.
-- Undo of a unit uninstalled or masked after the fix: no enable/start for it, the note, the record goes.
+- Undo of a unit uninstalled or masked by the user after the fix: no enable/start for it, the note, the record
+  goes.
+- Masking (`FixTest`, the fake systemctl answers `mask`/`unmask` and refuses `enable`/`start` of a masked unit as
+  systemd does): the field case (ppd `disabled` + running, a D-Bus restart after every stop) ends masked and not
+  running (`stop`, `mask`, `stop` again), stays gone over later ticks, Undo runs `unmask` then `start` (never
+  `enable`: it was disabled); Undo order `unmask`, `enable`, `start`; a failing unmask keeps the record and runs
+  nothing else; `/etc/systemd/system/<unit>` as a file or a non-`/dev/null` link refuses with "admin override" and
+  nothing run or recorded; a record without `was_masked` (written before masking) is undone with enable/start only;
+  a masked unit running again gets `came_back` and `fix` refuses with "running although OXP3 Deck masked it";
+  `powerstation` is stopped and disabled, never masked; `MASKABLE` is exactly the five units, all in `FIXABLE`.
 - power.json `fixed` validation: an unknown id, a unit not in `FIXABLE[id]` (e.g. `sshd.service`, `../../x`), a
   non-bool `was_active`, a 1000-char `was_enabled` → dropped; `options()` cannot write `fixed`.
 - no fix or undo without a call: `tick`, `enable`, `game`, AC and resume never run `disable`, `stop`, `enable` or
   `start` (the recorder sees only `list-units` and `show`).
-- `CONFLICTS` fix texts contain no "mask"; `_UNITS["hhd"]` matches `hhd_local@jordan.service`; the no-RAPL problem
+- `CONFLICTS` fix texts contain no "mask" (masking is only Fix for me's, never advice); `_UNITS["hhd"]` matches `hhd_local@jordan.service`; the no-RAPL problem
   names `processor_thermal_rapl`.
 
 **`tests/test_main.py`**: the eleven calls in `CALLS` (with `"power_fix": ("ppd",)`, `"power_unfix": ("ppd",)`) (e.g. `"power_set": ("default", "main", {"pl1_w": 15})`);
@@ -1513,8 +1564,12 @@ module (`power: null`). The signature test covers the `_mod("power")` calls.
 
 **`tests/js/conflicts.test.mjs`**: every id of power.py's `CONFLICTS` (read from the file) has a friendly name, a
 one-liner of at most 80 chars and no "sudo", "systemctl" or "/" in it; every FIXABLE id has a `fixConfirm` whose
-`lines` name each unit and whose text says "Undo"; ppd's and tuned's say "may start again"; no text says "mask"
-except "not masked"; `undoConfirm` lines are enable/start only. **`tests/js/text.test.mjs`**: `firstSentence`.
+`lines` name each unit and whose text says "Undo"; `MASKABLE` is power.py's; the lines are `stop`, `disable`, then
+`mask` (only `MASKABLE` units) for ppd, tuned, thermald and intel_lpmd, with "nothing can start it again" and
+"Undo unmasks it" in the text, and ppd's/tuned's naming KDE's power profiles and Steam's / game-performance's
+profile switching; the other ids' texts never say "mask", nor any Details outside the Fix for me sentence;
+`undoConfirm` lines are `unmask` (only `was_masked: false` on a `MASKABLE` unit), `enable`, `start`, in that
+order, and an older record's are enable/start only. **`tests/js/text.test.mjs`**: `firstSentence`.
 **`tests/js/pages.test.mjs`** also: no `explain(` call with a second argument in `src/`; no `tooltip=` and no
 `explainer=` prop; no "sudo " in a `description=` or `explain(` string; `PowerControls.tsx` and `Power.tsx` render
 `<ConflictRow`; `power_fix(` and `power_unfix(` are each called only after a `confirm(` in the same function.
@@ -1528,8 +1583,9 @@ stale answer ignored, flush), `editSlot`, `shown`, `pl2Floor`, `clampW`, `effect
 On the device (owner, after the build): MSR and MMIO read-back under load (`act_freq` 2300 MHz at 35 W with
 `reasons` none), AC unplug and plug (MMIO reset re-applied), suspend and resume, a game switch, Steam's TDP slider
 flagged as drift, `enable(False)` back to 25/52 and 35/52 W. Fix for me on power-profiles-daemon and thermald (EPP
-and CPU boost become settable; `systemctl is-enabled` reads disabled, nothing masked), Undo (both enabled and running
-again), then Fix again after starting CachyOS's game-performance (came back shown). The ☰ Details footer on a
+and CPU boost become settable; `systemctl is-enabled` reads masked; `powerprofilesctl` and CachyOS's
+game-performance no longer start ppd, EPP stays as set), Undo (both unmasked, enabled and running again, as
+before), then powerstation on Bazzite re-enabled by an update (came back shown, Fix again). The ☰ Details footer on a
 ToggleField, SliderField and DropdownItem, and A on a Status row with Details.
 
 ### Docs and credits
@@ -1539,7 +1595,8 @@ ToggleField, SliderField and DropdownItem, and A on a Status row with Details.
   `tests/fixtures/power/`; "State the plugin keeps" gets `power.json` and `/run/oxp3deck/power-run.json`; Frontend
   gets the Power section and tab (pointing here).
 - README (this change, done): replace "OXP3 Deck never stops, disables or masks another service" with the Fix for me
-  rule (stop and disable after a confirm, never mask or uninstall, Undo; the D-Bus "may start again" limit); the
+  rule (stop and disable after a confirm, mask only the D-Bus-started whitelisted units, never uninstall, Undo
+  unmasks); the
   conflicts table gets the Fix for me column and loses the powerstation mask advice.
 - README: "Power (TDP and GPU clocks)": what it sets and why both RAPL interfaces; "Moving from SimpleDeckyTDP"
   (Import, then disable or uninstall it in Decky, turn TDP control on); the conflicts table with the fixes above; the

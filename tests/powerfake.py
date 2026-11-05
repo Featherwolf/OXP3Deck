@@ -360,7 +360,8 @@ class Writer:
 
 class Systemctl:
     """sysexec.run's stand-in for systemctl: a table of units {name: [load, unit_file_state, active]} that
-    list-units and show answer from, and that disable / stop / enable / start change. rc[action] = (rc, stderr)
+    list-units and show answer from, and that stop / disable / mask / unmask / enable / start change (a masked
+    unit reads LoadState and UnitFileState "masked", and enable / start of it fail as systemd's do). rc[action] = (rc, stderr)
     fails that action; restart: units that come back (active) right after a stop (a D-Bus activation)."""
 
     def __init__(self, units: dict | None = None):
@@ -369,6 +370,7 @@ class Systemctl:
         self.rc: dict = {}
         self.restart: set = set()
         self.listing_rc = 0
+        self.masked: dict = {}         # unit: (load, unit_file_state) before mask, what unmask brings back
 
     def actions(self) -> list[list[str]]:
         """The calls that change something (not list-units, not show)."""
@@ -397,12 +399,23 @@ class Systemctl:
             return sysexec.Result(rc, "", err)
         for n in names:
             u = self.units[n]
-            if action == "disable" and u[1] == "enabled":
+            if action in ("enable", "start") and u[0] == "masked":
+                return sysexec.Result(1, "", f"Failed to {action} unit: Unit {n} is masked.")
+        for n in names:
+            u = self.units[n]
+            if action == "mask":
+                if u[0] != "masked":
+                    self.masked[n] = (u[0], u[1])
+                u[0], u[1] = "masked", "masked"
+            elif action == "unmask":
+                if u[0] == "masked":
+                    u[0], u[1] = self.masked.pop(n, ("loaded", "disabled"))
+            elif action == "disable" and u[1] == "enabled":
                 u[1] = "disabled"
             elif action == "enable" and u[1] == "disabled":
                 u[1] = "enabled"
             elif action == "stop":
-                u[2] = n in self.restart
+                u[2] = n in self.restart and u[0] != "masked"      # a masked unit cannot be started again
             elif action == "start":
                 u[2] = True
         return sysexec.Result(0, "", "")

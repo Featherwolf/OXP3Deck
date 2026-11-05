@@ -15,6 +15,15 @@ export const FIXABLE: Record<string, string[]> = {
   intel_lpmd: ["intel_lpmd.service"],
 };
 
+/** The FIXABLE units that D-Bus or another unit can start again, so Fix for me also masks them: power.py's MASKABLE. */
+export const MASKABLE: ReadonlySet<string> = new Set([
+  "power-profiles-daemon.service", "tuned-ppd.service", "tuned.service", "thermald.service", "intel_lpmd.service",
+]);
+
+/** True when a record says OXP3 Deck masked one of its units (older records never did). */
+const maskedByUs = (rec: Pick<PowerFixed, "units"> | null | undefined): boolean =>
+  !!rec?.units?.some((u) => u.was_masked === false && MASKABLE.has(u.unit));
+
 /** The conflicts that take energy preference and CPU boost, not the power limits. */
 const CPU = new Set(["ppd", "tuned", "intel_lpmd"]);
 
@@ -28,7 +37,7 @@ const TEXTS: Record<string, Text> = {
     name: "Power Profiles", line: CPU_LINE,
     body: [
       "The desktop's power mode service. It sets the CPU's energy preference from the power mode you pick in Desktop Mode, so OXP3 Deck leaves energy preference and CPU boost alone while it runs. Power limits and GPU speed still work.",
-      "Turning it off: the power mode switch in Desktop Mode stops working. CachyOS's game launcher (game-performance) then runs games without its profile, and may start it again.",
+      "Turning it off: the power mode switch in Desktop Mode (KDE's power profiles) stops working, and so does profile switching by Steam or CachyOS's game launcher (game-performance): games run without its profile.",
     ],
     tech: "power-profiles-daemon.service; it writes EPP/EPB and platform_profile.",
   },
@@ -131,15 +140,17 @@ const short = (s: string): string => {
   return t.length <= 80 ? t : `${t.slice(0, 79).replace(/\s+\S*$/, "")}…`;
 };
 
-/** Who most likely started a unit OXP3 Deck turned off. */
-export const cameBackText = (id: string): string =>
-  id === "ppd" || id === "tuned" ? "It started again, likely from the desktop's power mode or a game launcher."
+/** Who most likely started a unit OXP3 Deck turned off. `fixed`: its record; a masked unit cannot be started by
+ * systemd, so running again means it did not stop or was started outside systemd. */
+export const cameBackText = (id: string, fixed?: Pick<PowerFixed, "units"> | null): string =>
+  maskedByUs(fixed) ? "It's running even though OXP3 Deck masked it."
+    : id === "ppd" || id === "tuned" ? "It started again, likely from the desktop's power mode or a game launcher."
     : id === "powerstation" ? "It's back on, likely after a Bazzite update."
     : "It started again.";
 
 /** The one line a conflict row shows up front. */
 export const oneLine = (row: Pick<PowerConflict, "id" | "why"> & { fixed?: PowerFixed | null }): string => {
-  if (row.fixed?.came_back) return cameBackText(row.id);
+  if (row.fixed?.came_back) return cameBackText(row.id, row.fixed);
   const t = known(row.id);
   if (t) return t.line;
   const why = (row.why ?? "").replace(/^[^:]*:\s*/, "");
@@ -156,8 +167,16 @@ export const explainBody = (row: Pick<PowerConflict, "id" | "name" | "why" | "fi
   const t = known(row.id);
   const name = friendlyName(row.id, row.name);
   const body = t ? [...t.body] : [row.why ? row.why[0].toUpperCase() + row.why.slice(1) + "." : "It changes the same settings as OXP3 Deck."];
-  if (row.fixed?.came_back) body.unshift(`${cameBackText(row.id)} OXP3 Deck turned it off earlier; "Fix again" turns it off again, "Undo" turns it back on for good.`);
-  if (row.fix_units?.length) body.push("\"Fix for me\" turns it off after you confirm, and \"Undo\" turns it back on. Nothing is uninstalled.");
+  if (row.fixed?.came_back) {
+    body.unshift(maskedByUs(row.fixed)
+      ? `${cameBackText(row.id, row.fixed)} It did not stop, or something started it outside systemd. A restart stops it; "Undo" unmasks it and turns it back on.`
+      : `${cameBackText(row.id, row.fixed)} OXP3 Deck turned it off earlier; "Fix again" turns it off again, "Undo" turns it back on for good.`);
+  }
+  if (row.fix_units?.length) {
+    body.push((row.fix_units.some((u) => MASKABLE.has(u))
+      ? "\"Fix for me\" turns it off after you confirm and masks it, so nothing can start it again; \"Undo\" unmasks it and turns it back on."
+      : "\"Fix for me\" turns it off after you confirm, and \"Undo\" turns it back on.") + " Nothing is uninstalled.");
+  }
   if (t?.tech) body.push(`Technical: ${t.tech}`);
   return { title: name, body, lines: manualCommand(row.fix), linesTitle: "Do it yourself:" };
 };
@@ -170,7 +189,7 @@ const manualCommand = (fix: string | null | undefined): string[] => {
 };
 
 /** One command Fix for me runs (the backend leaves out a disable for a unit that is not enabled, a stop for one not
- * running: the row's fix_plan says which, when it could tell). */
+ * running, and masks only MASKABLE units: the row's fix_plan says which, when it could tell). */
 const cmd = (action: string, units: string[]) => `systemctl --no-ask-password ${action} -- ${units.join(" ")}`;
 
 export type DialogText = { title: string; text: string; lines: string[]; linesTitle: string; ok: string; effect: EffectSpec };
@@ -180,11 +199,11 @@ type FixText = { title: string; who: string; them?: boolean; rest: string };
 const FIX_TEXT: Record<string, FixText> = {
   ppd: {
     title: "Turn off Power Profiles?", who: "power-profiles-daemon",
-    rest: "The power mode switch in Desktop Mode stops working. It may start again when the desktop or a game launcher asks for it; OXP3 Deck will tell you.",
+    rest: "What stops working: the power mode switch in Desktop Mode (KDE's power profiles) and profile switching by Steam or CachyOS's game launcher (game-performance).",
   },
   tuned: {
     title: "Turn off TuneD?", who: "TuneD (tuned-ppd and tuned)", them: true,
-    rest: "The power mode switch in Desktop Mode stops working. It may start again when the desktop asks for it; OXP3 Deck will tell you.",
+    rest: "What stops working: the power mode switch in Desktop Mode (KDE's power profiles), profile switching by Steam or a game launcher, and TuneD's own tuning.",
   },
   intel_lpmd: {
     title: "Turn off Intel's low-power daemon?", who: "intel_lpmd",
@@ -200,9 +219,15 @@ const FIX_TEXT: Record<string, FixText> = {
   },
 };
 
-/** "OXP3 Deck will stop X and keep it from starting at boot." for what the plan really does. */
-const lead = (who: string, them: boolean, disable: boolean, stop: boolean): string => {
+/** "OXP3 Deck will stop X and keep it from starting at boot." for what the plan really does; with `mask`, also
+ * that it is masked so nothing can start it again. */
+const lead = (who: string, them: boolean, disable: boolean, stop: boolean, mask: boolean): string => {
   const it = them ? "them" : "it";
+  if (mask) {
+    const acts = [...(stop ? [`stop ${who}`] : []), ...(disable ? [`keep ${it} from starting at boot`] : [])];
+    const all = acts.length ? `${acts.join(", ")} and mask ${it}` : `mask ${who}`;
+    return `OXP3 Deck will ${all}: while masked, nothing can start ${it} again, not the desktop, a game launcher or another service.`;
+  }
   if (stop && disable) return `OXP3 Deck will stop ${who} and keep ${it} from starting at boot.`;
   if (stop) return `OXP3 Deck will stop ${who}. ${them ? "They are" : "It is"} not set to start at boot, so nothing else changes.`;
   return `OXP3 Deck will keep ${who} from starting at boot. ${them ? "They are" : "It is"} not running now.`;
@@ -217,28 +242,33 @@ export const fixConfirm = (row: Pick<PowerConflict, "id" | "name"> & Partial<Pic
   const plan = row.fix_plan && (row.fix_plan.disable.length || row.fix_plan.stop.length) ? row.fix_plan : null;
   const disable = plan ? plan.disable : units;
   const stop = plan ? plan.stop : units;
+  const mask = plan?.mask ?? units.filter((u) => MASKABLE.has(u));
   const t: FixText = FIX_TEXT[row.id] ?? { title: `Turn off ${name}?`, who: name, rest: "OXP3 Deck already sets these limits." };
   const after = CPU.has(row.id) && powerOn ? " Then OXP3 Deck can set energy preference and CPU boost." : "";
   const kept = FIX_TEXT[row.id] ? "Nothing is uninstalled." : "Nothing is deleted.";
   return {
     title: t.title,
-    text: `${lead(t.who, !!t.them, disable.length > 0, stop.length > 0)} ${kept}${after} ${t.rest} Undo turns it back on.`,
-    lines: [...(disable.length ? [cmd("disable", disable)] : []), ...(stop.length ? [cmd("stop", stop)] : [])],
+    text: `${lead(t.who, !!t.them, disable.length > 0, stop.length > 0, mask.length > 0)} ${kept}${after} ${t.rest} ${mask.length ? `Undo unmasks ${t.them ? "them" : "it"} and turns ${t.them ? "them" : "it"} back on as before.` : "Undo turns it back on."}`,
+    lines: [...(stop.length ? [cmd("stop", stop)] : []), ...(disable.length ? [cmd("disable", disable)] : []),
+      ...(mask.length ? [cmd("mask", mask)] : [])],
     linesTitle: "Commands (run as root):",
     ok: "Turn it off",
     effect: "now",
   };
 };
 
-/** The Undo confirmation: turns on exactly what OXP3 Deck turned off. `date`: the record's time, formatted. */
+/** The Undo confirmation: unmasks what OXP3 Deck masked, then turns on exactly what it turned off. `date`: the
+ * record's time, formatted. */
 export const undoConfirm = (rec: Pick<PowerFixed, "id" | "name" | "units">, date: string): DialogText => {
   const name = friendlyName(rec.id, rec.name);
   const en = rec.units.filter((u) => u.was_enabled === "enabled").map((u) => u.unit);
   const st = rec.units.filter((u) => u.was_active).map((u) => u.unit);
-  const lines = [...(en.length ? [cmd("enable", en)] : []), ...(st.length ? [cmd("start", st)] : [])];
+  const um = rec.units.filter((u) => u.was_masked === false && MASKABLE.has(u.unit)).map((u) => u.unit);
+  const lines = [...(um.length ? [cmd("unmask", um)] : []), ...(en.length ? [cmd("enable", en)] : []),
+    ...(st.length ? [cmd("start", st)] : [])];
   return {
     title: `Turn ${name} back on?`,
-    text: `OXP3 Deck turns back on what it turned off${date ? ` (${date})` : ""}. Then ${name} controls ${controls(rec.id)} again.${lines.length ? "" : " Nothing needs to run: it was neither on at boot nor running."}`,
+    text: `OXP3 Deck ${um.length ? "unmasks and " : ""}turns back on what it turned off${date ? ` (${date})` : ""}. Then ${name} controls ${controls(rec.id)} again.${lines.length ? "" : " Nothing needs to run: it was neither on at boot nor running."}`,
     lines,
     linesTitle: "Commands (run as root):",
     ok: "Turn it back on",
@@ -248,4 +278,4 @@ export const undoConfirm = (rec: Pick<PowerFixed, "id" | "name" | "units">, date
 
 /** The Undo row's Details: the units as they were before OXP3 Deck changed them. */
 export const fixedLines = (rec: Pick<PowerFixed, "units">): string[] =>
-  rec.units.map((u) => `${u.unit}: was ${u.was_enabled || "unknown"}${u.was_active ? ", running" : ", not running"}`);
+  rec.units.map((u) => `${u.unit}: was ${u.was_enabled || "unknown"}${u.was_active ? ", running" : ", not running"}${u.was_masked === false ? ", not masked (OXP3 Deck masked it)" : ""}`);

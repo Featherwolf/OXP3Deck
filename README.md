@@ -216,27 +216,30 @@ yourself.
 
 **Fix for me.** For the system services in the table, OXP3 Deck can turn the service off for you: tap **Fix for
 me**, read the dialog (it names the service and the exact commands), and confirm. OXP3 Deck then stops and disables
-that service (`systemctl disable` and `systemctl stop`, as root). It never masks a service, never uninstalls a
+that service (`systemctl stop` and `systemctl disable`, as root). power-profiles-daemon, tuned-ppd, tuned, thermald
+and intel_lpmd start again whenever another program asks for them over D-Bus (the desktop's power mode switch,
+Steam, CachyOS's game-performance), so for these five, and only these, it also **masks** the service
+(`systemctl mask`), so nothing can start it until you undo it; the dialog says so and what stops working (for
+power-profiles-daemon: KDE's power profiles switch and Steam's or game-performance's profile switching). It will not
+mask over an admin's own unit file in `/etc/systemd/system` (it says so and changes nothing), never uninstalls a
 package and never changes another Decky plugin, and it never does this on its own: only after you confirm. It
-remembers what it changed, so **Undo** turns on again exactly what it turned off (enables what was enabled, starts
-what was running), also after a reboot. Some of these services (power-profiles-daemon, tuned-ppd, thermald,
-intel_lpmd) start again when another program asks for them, for example the desktop's power mode switch or a game
-launcher, and Bazzite's update can turn PowerStation back on: OXP3 Deck then shows it as back and offers **Fix
-again**; it never repeats the fix by itself. **I've handled it** acknowledges the ones where only you can tell
+remembers what it changed, so **Undo** puts back exactly what was there (unmasks what it masked, enables what was
+enabled, starts what was running), also after a reboot. Bazzite's update can turn PowerStation back on: OXP3 Deck
+then shows it as back and offers **Fix again**; it never repeats the fix by itself. **I've handled it** acknowledges the ones where only you can tell
 whether they still set the limits.
 
 | Found | Effect | Fix for me | Do it yourself |
 |---|---|---|---|
 | SimpleDeckyTDP, PowerControl or PowerTools (Decky plugins) | blocks | no | Decky → Settings → Plugins: disable or uninstall it (import from SimpleDeckyTDP first) |
 | PowerStation (`powerstation.service`, Bazzite) | blocks | yes | `sudo systemctl disable --now powerstation.service`; Steam's TDP slider uses it, and a Bazzite update may turn it back on |
-| thermald | blocks | yes | `sudo systemctl disable --now thermald.service`: on this CPU it rewrites the sustained limit within seconds |
+| thermald | blocks | yes (also masked) | `sudo systemctl disable --now thermald.service`: on this CPU it rewrites the sustained limit within seconds |
 | Handheld Daemon (`hhd`) | blocks, can be acknowledged | no (it may run the controller) | turn off TDP control in Handheld Daemon's settings, then **I've handled it** |
 | `oxp3-tdp-sync.service` | blocks | yes | `sudo systemctl disable --now oxp3-tdp-sync.service` (it copies MMIO PL1 into MSR; OXP3 Deck writes both) |
 | `onex3-tdp.service` | blocks | yes | `sudo systemctl disable --now onex3-tdp.service` |
 | a steamos-manager TDP remote (`remotes.d` file with `TdpLimit1`) | blocks, can be acknowledged | no | turn Steam's **TDP limit** off in Quick Access → Performance, then **I've handled it** |
-| power-profiles-daemon | EPP | yes (may start again) | `sudo systemctl disable --now power-profiles-daemon.service` |
-| tuned / tuned-ppd | EPP | yes (may start again) | `sudo systemctl disable --now tuned-ppd.service tuned.service` |
-| intel_lpmd (CachyOS enables it on this CPU) | EPP | yes | `sudo systemctl disable --now intel_lpmd.service` (it sets EPP and parks cores, not the power limits) |
+| power-profiles-daemon | EPP | yes (also masked) | `sudo systemctl disable --now power-profiles-daemon.service` |
+| tuned / tuned-ppd | EPP | yes (also masked) | `sudo systemctl disable --now tuned-ppd.service tuned.service` |
+| intel_lpmd (CachyOS enables it on this CPU) | EPP | yes (also masked) | `sudo systemctl disable --now intel_lpmd.service` (it sets EPP and parks cores, not the power limits) |
 
 **The thermald trade-off.** Disabling thermald does not leave the OXP3 unprotected: the SoC's own thermal limit
 (it throttles at its maximum temperature) and the fan curve still apply. What you lose is thermald lowering PL1
@@ -334,8 +337,8 @@ next start. No re-login is needed.
   next reboot.** Turn TDP control off first to get the firmware's values back at once (SimpleDeckyTDP cannot reset
   the xe GPU clocks if you go back to it).
 - It writes no power limit until you turn TDP control on, never PL4 or the GPU's media engine. It stops and
-  disables another power manager's service only when you tap **Fix for me** and confirm (never masks it, never
-  uninstalls it, Undo turns it back on).
+  disables another power manager's service only when you tap **Fix for me** and confirm (it masks only the five
+  D-Bus-started ones listed above, never uninstalls anything, and Undo unmasks and turns it back on).
 
 ## Troubleshooting
 
