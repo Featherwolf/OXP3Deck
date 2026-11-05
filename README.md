@@ -216,6 +216,11 @@ pnpm zip
 It only replaces `vendor/` when the file matches its SHA-256 and is at least the version the plugin needs
 (`MIN_VERSION` in `py_modules/oxp3deck/oxp3tool.py`).
 
+Releases: set the version in `package.json`, run `pnpm build && pnpm zip`, commit, then push an annotated tag
+(`git tag -a --cleanup=verbatim -F NOTES.md v0.2.0 && git push origin v0.2.0`). The Release workflow checks that
+the tag, `package.json` and the zip agree, and publishes `OXP3Deck.zip` with its SHA-256; the tag's message becomes
+the release notes, and versions below 1.0.0 are marked pre-release.
+
 Tests:
 
 ```bash

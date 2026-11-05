@@ -1,0 +1,46 @@
+name: Release
+
+# Push an annotated tag such as v0.1.0 to publish release/OXP3Deck.zip as a GitHub release.
+# The tag must match package.json's version and the version inside the committed zip (run pnpm build && pnpm zip
+# and commit release/OXP3Deck.zip first). The tag's message becomes the release notes. Versions below 1.0.0 are
+# published as pre-releases.
+on:
+  push:
+    tags: ["v*"]
+
+permissions:
+  contents: write
+
+jobs:
+  release:
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+      - name: Check the versions match the tag
+        run: |
+          python3 - <<'PY'
+          import hashlib, io, json, os, sys, zipfile
+          want = os.environ["GITHUB_REF_NAME"].removeprefix("v")
+          repo = json.load(open("package.json"))["version"]
+          with zipfile.ZipFile("release/OXP3Deck.zip") as z:
+              bad = z.testzip()
+              inner = json.loads(z.read("OXP3Deck/package.json"))["version"]
+              tool = z.read("OXP3Deck/bin/oxp3-tool")
+              sums = z.read("OXP3Deck/bin/oxp3-tool.sha256").decode().split()[0]
+          print(f"tag {want}, package.json {repo}, zip {inner}")
+          if bad or not (want == repo == inner) or hashlib.sha256(tool).hexdigest() != sums:
+              sys.exit("the zip is damaged or its version does not match the tag: rebuild and commit it")
+          PY
+      - name: Publish
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          cd release
+          sha256sum OXP3Deck.zip > OXP3Deck.zip.sha256
+          pre=""
+          case "${GITHUB_REF_NAME#v}" in 0.*) pre="--prerelease" ;; esac
+          gh release create "$GITHUB_REF_NAME" OXP3Deck.zip OXP3Deck.zip.sha256 \
+            --verify-tag --notes-from-tag --title "OXP3 Deck ${GITHUB_REF_NAME#v}" $pre
