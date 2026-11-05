@@ -13,6 +13,7 @@ their own licences. This file lists them, says where they are and holds their li
 | [react-icons](https://github.com/react-icons/react-icons) 5.5.0 | `dist/index.js` (`IconContext`, `IconBase`, `GenIcon`); `dist/index.js.map` | MIT |
 | [Material Design icons](https://github.com/google/material-design-icons) by Google, as react-icons packs them | `dist/index.js` (eight icons); `dist/index.js.map` (all of `react-icons/md`) | Apache-2.0 |
 | [xess-xmx-linux](https://github.com/HHHHanasak1/xess-xmx-linux) | the launch-option descriptions in `dist/index.js` and `README.md` | MIT (see below) |
+| [oxp3-tool](https://github.com/Featherwolf/OXP3-Tool-for-Bazzite) 0.4.1 (same author) | `bin/oxp3-tool`; its own `LICENSE` and `THIRD_PARTY_NOTICES.md` are packed inside it | MIT |
 | [gamescope](https://github.com/ValveSoftware/gamescope) | `bin/oxp3-tool`: the display profile in `oxp3_tool/templates.py` | BSD-2-Clause |
 | [onexplayer3-steamos-setup](https://github.com/HHHHanasak1/onexplayer3-steamos-setup) | `bin/oxp3-tool`: the display profile in `oxp3_tool/templates.py` | MIT |
 

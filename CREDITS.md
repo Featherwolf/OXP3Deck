@@ -66,8 +66,9 @@ kamijin_fanta): its icon component and eight of its icons, which are Google's
 
 `bin/oxp3-tool` is oxp3-tool from
 [OXP3-Tool-for-Bazzite](https://github.com/Featherwolf/OXP3-Tool-for-Bazzite) (its `dist/oxp3-tool`, kept here
-in `vendor/`). Where its fixes come from is in its
-[main README](https://github.com/Featherwolf/OXP3-Tool-for-Bazzite#background). Its gamescope display profile is
+in `vendor/`), MIT License, Copyright (c) 2026 Featherwolf. Its `LICENSE` and `THIRD_PARTY_NOTICES.md` are packed
+inside it (`unzip -p bin/oxp3-tool LICENSE`). Where its fixes come from is in its
+[README](https://github.com/Featherwolf/OXP3-Tool-for-Bazzite#background-and-credits). Its gamescope display profile is
 modelled on [gamescope](https://github.com/ValveSoftware/gamescope)'s for the same panel (BSD-2-Clause) and on the
 [ONEXPLAYER 3 SteamOS setup](https://github.com/HHHHanasak1/onexplayer3-steamos-setup) fix pack's (MIT).
 
