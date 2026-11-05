@@ -289,3 +289,31 @@ test("the extras calls are in api.ts and wrapped in backend.ts", () => {
     assert.match(b, new RegExp(`export const ${n} = guard\\("${n}", \\{ (live|extras): null \\}\\)`), n);
   }
 });
+
+test("review fixes: greyed-out reasons, pending rows after success, one error, one live poller", () => {
+  // the XeSS installer is refused while a game runs: greyed out with the reason, not refused after the confirm
+  for (const n of ["pages/XeSS.tsx", "pages/Quick.tsx", "pages/Updates.tsx"]) {
+    assert.match(src(n), /useRunningApp\(\)/, n);
+    assert.match(src(n), /Quit \$\{game\.name\} first\./, n);
+  }
+  assert.match(src("pages/XeSS.tsx"), /disabled=\{busy \|\| !!game\}/);
+  assert.match(src("pages/XeSS.tsx"), /why=\{running \? "Wait for the running task\." : x\.relogin_needed \? "Log out and back in first\." : null\}/);
+  assert.match(src("pages/Kernel.tsx"), /EFFECTS\["reboot"\], running \? "Wait for the running task\." : null\)/);
+  // the default-driver dropdown is remounted only when the switch did not happen
+  assert.match(src("pages/XeSS.tsx"), /\} else setDrvRev\(\(n\) => n \+ 1\);/);
+  // a fix's log-out row only once its job is done
+  const a = src("actions.tsx");
+  assert.match(a, /afterJob\(r\.job\.id, \(j\) => \{\n\s*if \(j\.state === "done"\)/);
+  assert.doesNotMatch(a, /if \(!err\) for \(const f of fixes\)/);
+  // one Problem row per refused power_set
+  assert.match(src("components/PowerControls.tsx"), /errors=\{!s\.enabled\}/);
+  assert.match(src("pages/Power.tsx"), /battery=\{false\} errors=\{false\}/);
+  // the Live Details do not repeat the GPU clock and the reason
+  assert.doesNotMatch(src("components/LiveRows.tsx"), /Why it is slow/);
+  // one shared poller; the Power tab stops while the page is hidden
+  const s = src("store.ts");
+  assert.match(s, /const liveSubs = new Set/);
+  assert.match(src("components/LiveRows.tsx"), /useLive\(active && shown\)/);
+  // no "Saved" next to the pending row while the game runs
+  assert.match(src("components/GameControls.tsx"), /setSaved\(r\.ok && !\(running && what\)\);/);
+});

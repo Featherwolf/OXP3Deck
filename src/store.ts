@@ -275,30 +275,55 @@ export const usePowerState = (active: boolean) => {
 /** How often the live readouts are read while a panel shows them. */
 export const LIVE_MS = 1000;
 const liveStops = new Set<() => void>();
+type LiveState = { live: Live | null; error: string | null };
+// one poller for every panel that shows the readouts (the quick panel over the Power tab): samples closer than the
+// backend's 0.2 s would read as null
+const liveSubs = new Set<(n: LiveState) => void>();
+let liveLast: LiveState = { live: null, error: null };
+let liveHandle: ReturnType<typeof setTimeout> | null = null;
+let liveBusy = false;
+
+const liveStep = async () => {
+  liveHandle = null;
+  if (!liveSubs.size || stopped || liveBusy) return;
+  liveBusy = true;
+  const r = await power_live();
+  liveBusy = false;
+  liveLast = r.ok ? { live: r.live, error: null } : { live: null, error: r.error };
+  liveSubs.forEach((f) => { try { f(liveLast); } catch { /* a dead subscriber */ } });
+  if (liveSubs.size && !stopped && !liveHandle) liveHandle = setTimeout(liveStep, LIVE_MS);
+};
+liveStops.add(() => { if (liveHandle) clearTimeout(liveHandle); liveHandle = null; liveSubs.clear(); });
+
+/** The page is in front: false while Steam has it hidden (document.hidden; a game in front may hide it). */
+export const usePageVisible = (): boolean => {
+  const [v, set] = useReducer((_: boolean, n: boolean) => n, typeof document === "undefined" || !document.hidden);
+  useEffect(() => {
+    if (typeof document === "undefined") return undefined;
+    const f = () => set(!document.hidden);
+    document.addEventListener("visibilitychange", f);
+    return () => document.removeEventListener("visibilitychange", f);
+  }, []);
+  return v;
+};
 
 /**
  * The live readouts: power_live() every LIVE_MS, only while mounted and `active` (the quick panel or the Power tab
- * shows), one call in flight at a time; stopped on unmount, when it goes inactive and by stopPolling.
+ * shows), one call in flight at a time and one poller for all panels; stopped on unmount, when it goes inactive
+ * and by stopPolling.
  */
-export const useLive = (active: boolean): { live: Live | null; error: string | null } => {
-  const [state, set] = useReducer((_: { live: Live | null; error: string | null }, n: { live: Live | null; error: string | null }) => n,
-    { live: null, error: null });
+export const useLive = (active: boolean): LiveState => {
+  const [state, set] = useReducer((_: LiveState, n: LiveState) => n, { live: null, error: null });
   useEffect(() => {
     if (!active || stopped) return undefined;
-    let alive = true;
-    let handle: ReturnType<typeof setTimeout> | null = null;
-    const step = async () => {
-      handle = null;
-      if (!alive) return;
-      const r = await power_live();
-      if (!alive) return;
-      set(r.ok ? { live: r.live, error: null } : { live: null, error: r.error });
-      if (alive && !stopped) handle = setTimeout(step, LIVE_MS);
+    const f = (n: LiveState) => set(n);
+    liveSubs.add(f);
+    if (liveSubs.size > 1) set(liveLast);     // LIVE_MS of power_live() is already running
+    else if (!liveHandle && !liveBusy) liveStep();
+    return () => {
+      liveSubs.delete(f);
+      if (!liveSubs.size && liveHandle) { clearTimeout(liveHandle); liveHandle = null; }
     };
-    const stop = () => { alive = false; if (handle) clearTimeout(handle); handle = null; };
-    liveStops.add(stop);
-    step();
-    return () => { stop(); liveStops.delete(stop); };
   }, [active]);
   return state;
 };

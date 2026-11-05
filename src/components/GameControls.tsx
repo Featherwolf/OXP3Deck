@@ -131,7 +131,8 @@ export const GameControls: FC<{ app: RunningApp; quick?: boolean; running?: bool
     setOpts(now);
     if (now !== next) setRev((n) => n + 1);
     setErr(r.ok ? null : r.error);
-    setSaved(r.ok);
+    // while the game runs, the pending row ("Restart … to apply") says it instead of "Saved"
+    setSaved(r.ok && !(running && what));
     if (r.ok && running && what) notePending({ id: what.id, effect: EFFECTS["game.xess"], label: what.label, appid: app.appid, game: app.name });
   };
   const change = (c: Partial<Record<ManagedKey, string | null>>, id: string, what: string) => write(setManaged(text, c), { id, label: what });

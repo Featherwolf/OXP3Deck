@@ -4,7 +4,7 @@ import { PanelSection, PanelSectionRow } from "@decky/ui";
 import { FC } from "react";
 
 import { LIVE_SOURCES, liveLine, liveRows } from "../live";
-import { useLive } from "../store";
+import { useLive, usePageVisible } from "../store";
 import type { Live } from "../types";
 import { DetailsSpec, paragraphs } from "./confirm";
 import { Problem, Status } from "./Hint";
@@ -31,7 +31,8 @@ export const LiveRow: FC<{ active: boolean }> = ({ active }) => {
 
 /** The Power tab's "Live readouts": one value per row. */
 export const LiveSection: FC<{ active: boolean }> = ({ active }) => {
-  const { live, error } = useLive(active);
+  const shown = usePageVisible();      // the tab can stay mounted behind a game: no reads (they wake the GPU) then
+  const { live, error } = useLive(active && shown);
   const rows = liveRows(live);
   const d = liveDetails(live);
   return (

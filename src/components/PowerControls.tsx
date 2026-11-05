@@ -430,21 +430,24 @@ export const PowerSection: FC<{ quick?: boolean; app?: RunningApp | null }> = ({
         <ValuesEditor state={s} info={p.info} profileKey={s.active.key} slot={slot} stored={stored} active quick={quick}
           label={`${s.active.key === "default" ? "the default profile" : `the profile of ${s.active.name || `app ${s.active.key}`}`}${p.info?.options.split_ac ? (slot === "ac" ? " (plugged-in values)" : " (battery values)") : ""}`} />
       )}
-      {s && <ExtrasRows profileKey={s.active.key} slot={slot} stored={stored} x={ex.x} />}
+      {s && <ExtrasRows profileKey={s.active.key} slot={slot} stored={stored} x={ex.x} errors={!s.enabled} />}
     </PanelSection>
   );
 };
 
-/** Fan mode and scheduler mode of a profile slot (also while power control is off), then the battery's own rows. */
-export const ExtrasRows: FC<{ profileKey: string; slot: Slot; stored: PowerValues; x: ExtrasState | null; battery?: boolean }> =
-  ({ profileKey, slot, stored, x, battery = true }) => {
+/**
+ * Fan mode and scheduler mode of a profile slot (also while power control is off), then the battery's own rows.
+ * errors: show a refused power_set here too (false where a ValuesEditor beside it already shows the same error).
+ */
+export const ExtrasRows: FC<{ profileKey: string; slot: Slot; stored: PowerValues; x: ExtrasState | null; battery?: boolean; errors?: boolean }> =
+  ({ profileKey, slot, stored, x, battery = true, errors = true }) => {
     const d = useDraft(profileKey, slot, stored);
     if (!x) return null;
     return (
       <PanelSectionRow>
         <ProfileExtras v={d.values} write={d.write} x={x} />
         {battery && <ChargeRows x={x} />}
-        <Problem what="Power" error={d.error} />
+        {errors && <Problem what="Power" error={d.error} />}
       </PanelSectionRow>
     );
   };

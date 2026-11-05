@@ -1687,7 +1687,10 @@ gpu: {busy_pct, cur_mhz, act_mhz, reasons} | null, throttle: {cpu_ms, cpu, gpu: 
 be null; `throttle.gpu` = `gpu.reasons`).
 
 Frontend: `useLive(active)` in store.ts polls `power_live()` every `LIVE_MS = 1000` only while mounted and `active`
-(the quick panel or Power tab is shown), one call in flight at a time, stopped on unmount and on `stopPolling`. Quick
+(the quick panel or Power tab is shown), one call in flight at a time and one shared poller for every mounted
+user (the quick panel over the Power tab would otherwise sample twice within the backend's 0.2 s and read nulls),
+stopped on unmount and on `stopPolling`. The Power tab also stops while `document.hidden` (`usePageVisible`; whether
+Steam hides the page behind a running game is to be checked on the device). Quick
 panel: one row (top of the Power section, also while TDP control is off) "Live" with the line from `live.ts`
 `liveLine(live)`: "18.4 W · 62 °C · GPU 87 % · 3 h 10 min left" (parts that are null left out); Details: every value
 of the table, "requested 1500 MHz, running 1450 MHz", why it is slow (`whySlow(live)`: "CPU too hot" when
@@ -1958,7 +1961,9 @@ after a change that is not immediate, in a pending row.
   (`session`; for XeSS the backend's `relogin_needed` is the source instead, and the row goes when it clears), "Reboot
   to apply" (`reboot`; the existing "Reboot to finish" row covers oxp3-tool's `reboot_pending`, so no second row). A
   pending row sits right under the control that caused it; the list is lost when the frontend reloads (the backend
-  flags cover the lasting cases).
+  flags cover the lasting cases). A row for a change made by a job (a fix's log-out) is noted only when that job ends
+  `done` (`afterJob(id, fn)` in store.ts), never at its start. A control greyed out because a game runs (the XeSS
+  install / update / repair / uninstall buttons, which the backend refuses then) says "Quit <game> first."
 
 | Setting id | Control | Tag |
 |---|---|---|

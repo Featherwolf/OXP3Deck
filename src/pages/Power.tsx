@@ -148,7 +148,7 @@ const EditorSection: FC<{ info: PowerInfo; state: PowerState; x: ExtrasState | n
       </PanelSectionRow>
       <ValuesEditor key={`${k}/${slot}`} state={state} info={info} profileKey={k} slot={slot} stored={stored} active={active && state.enabled}
         label={`${name}${info.options.split_ac ? (slot === "ac" ? " (plugged-in values)" : " (battery values)") : ""}`} />
-      <ExtrasRows key={`x-${k}/${slot}`} profileKey={k} slot={slot} stored={stored} x={x} battery={false} />
+      <ExtrasRows key={`x-${k}/${slot}`} profileKey={k} slot={slot} stored={stored} x={x} battery={false} errors={false} />
       <PanelSectionRow>
         {canAdd && (
           <ButtonItem layout="below" disabled={!!act.busy}
