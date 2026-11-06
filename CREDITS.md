@@ -30,7 +30,8 @@ lib/active).
 
 Also following ClawDeck's approach, without its code: OptiScaler per game with a manifest and backups, the
 subfolder layout, `XESS_FG` with OptiScaler's XeFG and the DXVK vendor id for 3x/4x (`optiscaler.py`, as of ClawDeck
-commit 07918cc and its later notes). ClawDeck is under AGPLv3 since 2026-11-05 (commit 47559f4) and its
+commit 07918cc and its later notes), and the non-game exe name filter for the generic setup (`optigames.SKIP_EXE`:
+the idea of ClawDeck's MAIN_EXE_SKIP at 07918cc, the list written here). ClawDeck is under AGPLv3 since 2026-11-05 (commit 47559f4) and its
 `assets/games.json` is GPL-3.0 (derived from OptiScaler): neither is copied; OXP3 Deck's games table is written by
 hand from OptiScaler's own wiki and source.
 
@@ -90,9 +91,11 @@ of 20261104), with its licence in `tests/fixtures/xess/LICENSE`.
 ## OptiScaler
 
 [OptiScaler](https://github.com/optiscaler/OptiScaler) by cdozdil and the OptiScaler contributors (GPL-3.0) takes
-a game's DLSS, XeSS or FSR calls and runs another upscaler and frame generation in their place. For The Witcher 3,
-OXP3 Deck downloads a pinned OptiScaler build from its GitHub release when you tap Install, and puts it into the
-game's folder; the game is set to DLSS and DLSS frame generation, and OptiScaler runs XeSS and XeSS frame generation.
+a game's DLSS, XeSS or FSR calls and runs another upscaler and frame generation in their place. OXP3 Deck downloads a
+pinned OptiScaler build from its GitHub release when you tap Install, and puts it into the game's folder: for The
+Witcher 3 with its tested setup (the game set to DLSS and DLSS frame generation, OptiScaler running XeSS and XeSS
+frame generation), for the games OptiScaler's wiki documents as the wiki says, and for any other game with a generic,
+experimental setup.
 OptiScaler is not part of OXP3 Deck and is never run by it ([THIRD_PARTY_NOTICES.md](THIRD_PARTY_NOTICES.md) says
 what is downloaded and where it goes).
 
@@ -103,7 +106,21 @@ Sources of the games table in `optiscaler.py` (facts, no code): OptiScaler's wik
 notes. The route itself (DLSS and DLSS frame generation in the game, XeSS and XeFG from OptiScaler, on the same
 chip) comes from ETA Prime's video of ClawDeck on SteamOS. xess-xmx-linux's `docs/games.md` gave its OptiScaler
 recipe (Dxgi spoofing off, `WINEDLLOVERRIDES=dxgi=n,b`) and its `docs/debugging.md` the need for `force_vk_vendor=0`
-in The Witcher 3. [Decky Framegen](https://github.com/xXJSONDeruloXx/Decky-Framegen) is named because OXP3 Deck
+in The Witcher 3.
+
+Sources of the known-games table and the generic rules in `optigames.py` (facts only, every note written for OXP3
+Deck): the [OptiScaler wiki](https://github.com/optiscaler/OptiScaler/wiki) at commit `288adff` (2026-11-03): each
+entry names its game's page (for example
+[Cyberpunk 2077](https://github.com/optiscaler/OptiScaler/wiki/Cyberpunk-2077)) for the exe folder, the file names
+that work, the API, what to pick in the game and the frame-generation inputs; its Manual Installation page (the
+Unreal `-Shipping` exe, `WINEDLLOVERRIDES=<name>=n,b`), its Compatibility List (only games with DLSS 2+, FSR 2+ or XeSS;
+anti-cheat games do not work), its Known Issues page (Intel Arc spoofing artifacts, OptiFG and Steam Input) and its
+Installation page ("do not use this mod with online games"). The wiki has no licence file, so none of its text is
+copied. From OptiScaler's source (master `d6b0245`, facts only, no code): `OptiScaler/misc/GameConfigs.cpp` (which
+exes OptiScaler already gives per-game ini defaults, so the table repeats none), `dllmain.cpp` and `setup_linux.sh`
+(the proxy file names and their order), `Config.h`'s process exclusion list (exe names that are not the game, ACE's
+file names), `OptiScaler.ini` (the Vulkan and DirectX 11 upscaler keys, `Hotfix DisableOverlays`) and `README.md`
+(what each API supports). [Decky Framegen](https://github.com/xXJSONDeruloXx/Decky-Framegen) is named because OXP3 Deck
 detects its installs (its `framegen_patch` marker and `.b` backups) and leaves them alone.
 
 ## Decky Loader

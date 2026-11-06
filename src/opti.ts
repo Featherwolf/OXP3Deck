@@ -4,7 +4,7 @@
 // never writes launch options; components/OptiControls.tsx reads and writes Steam.
 import { hasArg, hasListEntry, managed, type ManagedKey, MANAGED_KEYS, parse, setArg, setListEntry, setManaged } from "./launchopts";
 import type { EffectSpec } from "./effects";
-import type { GameInfo, LaunchPlan, OptiChoices, OptiFg, OptiFgInput, OptiInfo, OptiUpscaler } from "./types";
+import type { GameInfo, LaunchPlan, OptiApi, OptiChoices, OptiFg, OptiFgInput, OptiInfo, OptiKind, OptiUpscaler } from "./types";
 
 /** The keys an OptiScaler game drops (DESIGN.md "With xess-xmx-linux"); the backend's plan says it too. */
 export const OPTI_DROPPED: readonly ManagedKey[] = ["XESS", "FSR", "FSR_FG", "force_vk_vendor"];
@@ -267,6 +267,7 @@ export const FGS: { data: OptiFg; label: string }[] = [
 ];
 export const INPUTS: { data: OptiFgInput; label: string }[] = [
   { data: "dlssg", label: "DLSS frame generation" },
+  { data: "fsrfg", label: "FSR frame generation" },
   { data: "xefg", label: "XeSS frame generation" },
   { data: "upscaler", label: "None: OptiScaler makes its own" },
 ];
@@ -289,32 +290,64 @@ export const readChoices = (v: unknown): OptiChoices | null => {
   return up !== undefined && fg !== undefined && input !== undefined ? { upscaler: up, fg, fg_input: input } : null;
 };
 
+/**
+ * What the checklist and the texts need to know about the game's setup (DESIGN.md "OptiScaler for any game"):
+ * tested (The Witcher 3, the texts as before), known (OptiScaler's wiki documents the game: `pick` says what to pick
+ * in it) or generic (experimental). An older backend sends none of it: the tested setup.
+ */
+export type OptiSetup = { kind: OptiKind; api: OptiApi; pick: string | null; name?: string | null };
+export const TESTED: OptiSetup = { kind: "tested", api: "dx12", pick: null };
+export const setupOf = (info: OptiInfo | null | undefined): OptiSetup => ({
+  kind: info?.kind === "known" || info?.kind === "generic" ? info.kind : "tested",
+  api: info?.api === "dx11" || info?.api === "vulkan" ? info.api : "dx12",
+  pick: typeof info?.pick === "string" && info.pick ? info.pick : null,
+  name: info?.name ?? null,
+});
+export const API_LABELS: Record<OptiApi, string> = { dx12: "DirectX 12", dx11: "DirectX 11", vulkan: "Vulkan" };
+/** Frame generation (OptiScaler's XeFG output) only for a DirectX 12 game. */
+export const fgPossible = (setup: OptiSetup): boolean => setup.api === "dx12";
+const GENERIC_PICK = "DLSS, FSR or XeSS";
+
 /** The game's upscaling choice OptiScaler takes the place of, and its frame generation (for the checklist). */
-const inGame = (input: OptiFgInput): { upscale: string; fg: string | null } =>
-  input === "dlssg" ? { upscale: "DLSS", fg: "DLSS Frame Generation" }
-    : input === "xefg" ? { upscale: "XeSS", fg: "XeSS Frame Generation" }
-    : { upscale: "DLSS", fg: null };
+const inGame = (input: OptiFgInput, setup: OptiSetup = TESTED): { upscale: string; fg: string | null } => {
+  const fg = input === "dlssg" ? "DLSS Frame Generation" : input === "fsrfg" ? "FSR Frame Generation"
+    : input === "xefg" ? "XeSS Frame Generation" : null;
+  if (setup.kind !== "tested") return { upscale: setup.pick ?? GENERIC_PICK, fg };
+  return input === "dlssg" ? { upscale: "DLSS", fg } : input === "xefg" ? { upscale: "XeSS", fg }
+    : input === "fsrfg" ? { upscale: "FSR", fg } : { upscale: "DLSS", fg: null };
+};
+const lowerFg = (fg: string) => fg.replace("Frame Generation", "frame generation");
 
 /** The checklist's one line up front (≤ 80 characters). */
-export const checklistLine = (input: OptiFgInput, fg: OptiFg): string => {
-  const g = inGame(input);
-  if (!fg || !g.fg) return `Pick ${g.upscale} in the game, then restart it once.`;
-  return input === "dlssg" ? "Pick DLSS and DLSS frame generation, then restart the game."
-    : "Pick XeSS and XeSS frame generation, then restart the game.";
+export const checklistLine = (input: OptiFgInput, fg: OptiFg, setup: OptiSetup = TESTED): string => {
+  const g = inGame(input, setup);
+  const on = !!fg && !!g.fg && fgPossible(setup);
+  if (setup.kind === "tested") {
+    if (!on) return `Pick ${g.upscale} in the game, then restart it once.`;
+    return input === "dlssg" ? "Pick DLSS and DLSS frame generation, then restart the game."
+      : "Pick XeSS and XeSS frame generation, then restart the game.";
+  }
+  const line = on ? `Pick ${g.upscale} and ${lowerFg(g.fg as string)}, then restart the game.`
+    : `Pick ${g.upscale} in the game, then restart it once.`;
+  return line.length <= 80 ? line : on ? "Pick the upscaler and frame generation in the game, then restart it."
+    : "Pick the upscaler OptiScaler's wiki names in the game, then restart it.";
 };
 
 /** The numbered steps in the checklist's Details (DESIGN.md "UI"). */
-export const checklist = (input: OptiFgInput, fg: OptiFg): string[] => {
-  const g = inGame(input);
+export const checklist = (input: OptiFgInput, fg: OptiFg, setup: OptiSetup = TESTED): string[] => {
+  const g = inGame(input, setup);
+  const fgOn = !!fg && fgPossible(setup);
   const steps = [
-    "Start the game (it starts in DirectX 12).",
-    "Graphics: Display mode Borderless (XeSS frame generation refuses exclusive fullscreen).",
-    `Upscaling: ${g.upscale} (any quality).`,
+    setup.kind === "tested" ? "Start the game (it starts in DirectX 12)."
+      : setup.api === "dx12" ? "Start the game (in DirectX 12, if it lets you choose)."
+      : `Start the game (OptiScaler is set up for ${API_LABELS[setup.api]}).`,
   ];
-  if (fg && g.fg) steps.push(`Frame Generation: ${g.fg} on.`);
-  else if (fg) steps.push("Frame Generation: off in the game; OptiScaler makes the frames itself.");
+  if (setup.kind === "tested" || fgOn) steps.push("Graphics: Display mode Borderless (XeSS frame generation refuses exclusive fullscreen).");
+  steps.push(setup.kind === "generic" ? `Upscaling: ${g.upscale}, whichever the game offers (any quality).` : `Upscaling: ${g.upscale} (any quality).`);
+  if (fgOn && g.fg) steps.push(`Frame Generation: ${g.fg} on.`);
+  else if (fgOn) steps.push("Frame Generation: off in the game; OptiScaler makes the frames itself.");
   steps.push("Quit and start the game again, once.");
-  steps.push(fg ? "Check: OptiScaler's menu (Insert on a keyboard) shows XeSS and FG Output XeFG."
+  steps.push(fgOn ? "Check: OptiScaler's menu (Insert on a keyboard) shows XeSS and FG Output XeFG."
     : "Check: OptiScaler's menu (Insert on a keyboard) shows the upscaler you picked.");
   return steps.map((t, i) => `${i + 1}. ${t}`);
 };
@@ -324,13 +357,32 @@ export const CHECKLIST_HELP = [
   "If DLSS is greyed out in the game: pick \"XeSS frame generation\" as the game setting it replaces (Games tab) and XeSS in the game.",
   "If the picture flickers with DLSS: pick XeSS in the game (OptiScaler's wiki, Known Issues).",
 ];
+/** The same for a known or generic setup. */
+export const checklistHelp = (setup: OptiSetup): string[] => setup.kind === "tested" ? CHECKLIST_HELP : [
+  "If DLSS is greyed out in the game: pick FSR or XeSS. OXP3 Deck turns OptiScaler's GPU spoof off on Intel (with it XeSS runs on the slower path), so some games hide DLSS.",
+  "If OptiScaler's menu never shows: the game may need another file name or setup. Remove OptiScaler; OptiScaler's wiki may have a page for the game.",
+  ...(setup.kind === "generic" ? ["OptiScaler only works when the game has DLSS 2 or newer, FSR 2 or newer, or XeSS."] : []),
+];
+
+/** The install row's line up front: what this setup is (≤ 80 characters). */
+export const installLine = (info: OptiInfo | null | undefined): string => {
+  const s = setupOf(info);
+  if (s.kind === "tested") return "Runs XeSS and XeSS frame generation in place of the game's DLSS.";
+  if (s.kind === "known") return info?.fit === "poor" ? "OptiScaler's wiki documents this game, with limits. Untested here."
+    : "OptiScaler's wiki documents this game. Untested on this device.";
+  return "Experimental: replaces the game's DLSS, FSR or XeSS. Untested here.";
+};
+
+/** The ini key and value the Upscaler choice writes, for Details. */
+export const upscalerIni = (api: OptiApi, up: OptiUpscaler): string =>
+  api === "dx11" ? `Upscalers Dx11Upscaler=${up}` : `Upscalers ${api === "vulkan" ? "VulkanUpscaler" : "Dx12Upscaler"}=${up === "fsr31" ? "ffx" : "xess"}`;
 
 /** The status row's line up front. */
 export const statusLine = (info: OptiInfo | null | undefined): string => {
   if (!info) return "Checking…";
   if (info.state === "other") return "Another OptiScaler is installed";
   if (info.state === "partial") return "Partly removed: open Details";
-  if (info.state === "none") return "Not installed";
+  if (info.state === "none") return setupOf(info).kind === "generic" ? "Not installed · experimental" : "Not installed";
   if (info.update) return "Update available";
   const c = info.choices;
   if (!c) return "Installed";
@@ -372,16 +424,25 @@ export const confirmInstall = (info: OptiInfo | null | undefined, name: string, 
   const same = !!d && d.upscaler === choices.upscaler && d.fg === choices.fg && d.fg_input === choices.fg_input;
   const plan = info?.launch ?? (same ? info?.launch_new ?? null : null);
   const pl = planLines(plan);
+  const st = setupOf(info);
+  const proxy = info?.proxy ?? "dxgi";
+  const fg = choices.fg && fgPossible(st) ? choices.fg : 0;
   return {
     title: "Install OptiScaler?",
     text: [
       `${info?.cached ? "Puts OptiScaler" : `Downloads OptiScaler (${size}) and puts it`} in ${name}'s folder. Remove puts everything back.`,
-      `It runs ${l.upscaler}${choices.fg ? ` and XeSS frame generation ${choices.fg}x` : ""} when the game asks for ${inGame(choices.fg_input).upscale}. Install stops if the folder already has a dxgi.dll or another OptiScaler; the game's own files are not touched.`,
+      st.kind === "tested"
+        ? `It runs ${l.upscaler}${fg ? ` and XeSS frame generation ${fg}x` : ""} when the game asks for ${inGame(choices.fg_input).upscale}. Install stops if the folder already has a ${proxy}.dll or another OptiScaler; the game's own files are not touched.`
+        : `It runs ${l.upscaler}${fg ? ` and XeSS frame generation ${fg}x` : ""} when the game asks for ${inGame(choices.fg_input, st).upscale}. It goes in as ${proxy}.dll, a name the folder does not have; install stops if another OptiScaler is there, and the game's own files are not touched.`,
+      ...(st.kind === "generic" ? ["Experimental: OXP3 Deck chose this setup from the game's files, and nobody has tested OptiScaler with this game here. If the game does not start or OptiScaler's menu never shows, tap Remove."] : []),
+      ...(st.kind === "known" ? ["OptiScaler's wiki documents this game; this setup follows it but is not tested on this device."] : []),
       "The launch options change too: OXP3 Deck takes out the XeSS settings OptiScaler replaces and adds what it needs; Remove puts them back.",
       "OptiScaler is not part of OXP3 Deck: it is downloaded from its GitHub release (GPL-3.0).",
     ],
     lines: [
       ...(info?.folder ? [`Folder: ${info.folder}`] : []),
+      ...(st.kind !== "tested" && info?.exe ? [`Next to: ${info.exe} (${API_LABELS[st.api]}${info.api_why ? `: ${info.api_why}` : ""})`] : []),
+      ...(st.kind !== "tested" ? [`As: ${proxy}.dll`] : []),
       ...(pl.adds.length ? [`Adds to launch options: ${pl.adds.join(" ")}`] : []),
       ...(pl.removes.length ? [`Removes: ${pl.removes.join(" ")}`] : [`Removes: ${OPTI_DROPPED.join(", ")} (when set)`]),
     ],
@@ -410,8 +471,8 @@ export const confirmRemove = (info: OptiInfo | null | undefined, name: string, e
 };
 
 /** The toast after the launch options were written for a new install. */
-export const readyToast = (name: string, input: OptiFgInput, fg: OptiFg): string => {
-  const g = inGame(input);
-  return fg && g.fg ? `OptiScaler ready for ${name}: pick ${g.upscale} and ${g.fg.replace("Frame Generation", "frame generation")} in the game.`
+export const readyToast = (name: string, input: OptiFgInput, fg: OptiFg, setup: OptiSetup = TESTED): string => {
+  const g = inGame(input, setup);
+  return fg && g.fg && fgPossible(setup) ? `OptiScaler ready for ${name}: pick ${g.upscale} and ${lowerFg(g.fg)} in the game.`
     : `OptiScaler ready for ${name}: pick ${g.upscale} in the game.`;
 };

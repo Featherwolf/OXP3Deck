@@ -12,7 +12,7 @@ import tempfile
 import unittest
 from unittest import mock
 
-from oxp3deck import downloads, optiscaler, steamlib, sysexec, userexec
+from oxp3deck import downloads, optigames, optiscaler, pe, steamlib, sysexec, userexec
 from tests.test_steamlib import ROOT, World, write
 
 WITCHER = "292030"
@@ -271,8 +271,9 @@ class ExeDirTest(Base):
         os.mkdir(os.path.join(self.folder, "witcher3.exe"))        # a folder by that name is not the exe
         self.assertIsNone(optiscaler.exe_dir(self.ctx, WITCHER)[0])
 
-    def test_not_installed_and_not_in_the_table(self):
-        self.assertEqual(optiscaler.exe_dir(self.ctx, "1091500"), (None, optiscaler.NO_SETUP))
+    def test_not_installed_and_not_a_steam_game(self):
+        self.assertEqual(optiscaler.exe_dir(self.ctx, "1091500"), (None, "Cyberpunk 2077 is not installed."))
+        self.assertEqual(optiscaler.exe_dir(self.ctx, "../x"), (None, optiscaler.NO_SETUP))
         os.unlink(os.path.join(self.w.steam, "steamapps", f"appmanifest_{WITCHER}.acf"))
         self.assertEqual(optiscaler.exe_dir(self.ctx, WITCHER), (None, "The Witcher 3 is not installed."))
 
@@ -294,19 +295,29 @@ class RefusalTest(Base):
             res = self.remove()
         self.assertEqual(res["error"], "Quit The Witcher 3 first.")
 
-    def test_not_in_the_table(self):
-        self.refused(optiscaler.NO_SETUP, "1091500")
+    def test_not_installed(self):
+        self.refused("Cyberpunk 2077 is not installed.", "1091500")
+        self.refused("This game is not installed.", "1234567")
+        self.refused(optiscaler.NO_SETUP, "12x")
 
     def test_exe_folder_missing(self):
         shutil.rmtree(self.folder)
         self.refused("Can't find witcher3.exe in bin/x64_dx12 of the game's folder.")
 
     def test_anticheat(self):
-        for rel in ("EasyAntiCheat/x", "bin/BattlEye/x", "bin/x64/start_protected_game.exe", "Game_BE.exe",
-                    "bin/EAAntiCheat.GameServiceLauncher.dll"):
+        for rel, what, shown in (("EasyAntiCheat/x", "EasyAntiCheat", "EasyAntiCheat/"),
+                                 ("bin/BattlEye/x", "BattlEye", "bin/BattlEye/"),
+                                 ("bin/x64/start_protected_game.exe", "EasyAntiCheat",
+                                  "bin/x64/start_protected_game.exe"),
+                                 ("Game_BE.exe", "BattlEye", "Game_BE.exe"),
+                                 ("bin/EAAntiCheat.GameServiceLauncher.dll", "EA AntiCheat",
+                                  "bin/EAAntiCheat.GameServiceLauncher.dll"),
+                                 ("BEClient_x64.dll", "BattlEye", "BEClient_x64.dll"),
+                                 ("bin/ace-setup64.exe", "ACE", "bin/ace-setup64.exe")):
             with self.subTest(rel=rel):
                 p = write(os.path.join(self.game, rel), b"x")
-                self.refused(optiscaler.ANTICHEAT)
+                self.refused(f"The Witcher 3 uses anti-cheat ({what}: {shown} found). OptiScaler's guide says not "
+                             "to use it with online games: it can stop the game starting or get the account banned.")
                 os.unlink(p)
                 if os.path.basename(os.path.dirname(p)) in ("EasyAntiCheat", "BattlEye"):
                     os.rmdir(os.path.dirname(p))
@@ -795,6 +806,400 @@ class BackupTest(Base):
         self.assertTrue(self.record()["games"][WITCHER]["partial"])
 
 
+def make_pe(imports=(), delay=(), pad=0, text=b""):
+    """A minimal PE32+ image whose import (and delay-import) tables name `imports` (`delay`); pad: extra bytes."""
+    names = b""
+    offs = []
+    for n in list(imports) + list(delay):
+        offs.append(len(names))
+        names += n.encode() + b"\0"
+    nimp, ndel = len(imports), len(delay)
+    imp_size = 20 * (nimp + 1)
+    del_size = 32 * (ndel + 1)
+    va, raw = 0x1000, 0x400
+    names_rva = va + imp_size + del_size
+    sec = bytearray()
+    for i in range(nimp):
+        d = bytearray(20)
+        d[12:16] = (names_rva + offs[i]).to_bytes(4, "little")
+        sec += d
+    sec += bytes(20)
+    for i in range(ndel):
+        d = bytearray(32)
+        d[0:4] = (1).to_bytes(4, "little")
+        d[4:8] = (names_rva + offs[nimp + i]).to_bytes(4, "little")
+        sec += d
+    sec += bytes(32)
+    sec += names
+    hdr = bytearray(raw)
+    hdr[0:2] = b"MZ"
+    hdr[0x3C:0x40] = (64).to_bytes(4, "little")
+    hdr[64:68] = b"PE\0\0"
+    coff = 68
+    hdr[coff:coff + 2] = (0x8664).to_bytes(2, "little")
+    hdr[coff + 2:coff + 4] = (1).to_bytes(2, "little")
+    hdr[coff + 16:coff + 18] = (240).to_bytes(2, "little")
+    opt = coff + 20
+    hdr[opt:opt + 2] = (0x20B).to_bytes(2, "little")
+    hdr[opt + 108:opt + 112] = (16).to_bytes(4, "little")
+    dd = opt + 112
+    if nimp:
+        hdr[dd + 8:dd + 12] = va.to_bytes(4, "little")
+        hdr[dd + 12:dd + 16] = imp_size.to_bytes(4, "little")
+    if ndel:
+        hdr[dd + 104:dd + 108] = (va + imp_size).to_bytes(4, "little")
+        hdr[dd + 108:dd + 112] = del_size.to_bytes(4, "little")
+    sh = opt + 240
+    hdr[sh:sh + 8] = b".idata\0\0"
+    hdr[sh + 8:sh + 12] = len(sec).to_bytes(4, "little")
+    hdr[sh + 12:sh + 16] = va.to_bytes(4, "little")
+    hdr[sh + 16:sh + 20] = len(sec).to_bytes(4, "little")
+    hdr[sh + 20:sh + 24] = raw.to_bytes(4, "little")
+    return bytes(hdr) + bytes(sec) + text + b"\0" * pad
+
+
+class AnyGameTest(Base):
+    """The generic setup and the known-games table against fake game folders (DESIGN.md "OptiScaler for any
+    game")."""
+
+    def setUp(self):
+        super().setUp()
+        optiscaler.forget_listing()
+        self.addCleanup(optiscaler.forget_listing)
+
+    def make(self, appid, name, tree):
+        game, _pfx = self.w.app(appid, name)
+        for rel, data in tree.items():
+            write(os.path.join(game, rel), data)
+        own_tree(game, self.w.uid)
+        return game
+
+    def unreal(self):
+        return self.make("999001", "Fake Unreal", {
+            "FakeUnreal.exe": make_pe(["kernel32.dll"]),                              # the root stub
+            "Engine/Binaries/Win64/CrashReportClient.exe": make_pe(["d3d11.dll"], pad=4000),
+            "Engine/Binaries/ThirdParty/D3D12/D3D12Core.dll": b"MZ agility",
+            "Fake/Binaries/Win64/Fake-Win64-Shipping.exe": make_pe(["kernel32.dll", "dxgi.dll", "d3d12.dll"],
+                                                                   pad=2000),
+            "Fake/Plugins/DLSS/nvngx_dlss.dll": b"MZ dlss",
+            "Fake/Content/Paks/fake.pak": b"pak",
+        })
+
+    def plain(self, extra=None):
+        tree = {"bin/game.exe": make_pe(["kernel32.dll", "d3d11.dll", "dxgi.dll"], pad=9000),
+                "bin/unins000.exe": make_pe([], pad=20000),
+                "launcher.exe": make_pe(["d3d12.dll"], pad=30000),
+                "_CommonRedist/vcredist_x64.exe": make_pe([], pad=40000),
+                "data/levels.bin": b"data"}
+        tree.update(extra or {})
+        return self.make("999002", "Plain Game", tree)
+
+    def run_install(self, appid, **kw):
+        return optiscaler.install(self.ctx, None, self.job, appid, self.choices(**kw))
+
+    def test_unreal_round_trip(self):
+        game = self.unreal()
+        before = snapshot(game)
+        e, why = optiscaler.resolve(self.ctx, "999001")
+        self.assertIsNone(why)
+        self.assertEqual((e["kind"], e["folder"], e["exe"], e["how"], e["api"], e["proxy"], e["has_upscaler"]),
+                         ("generic", "Fake/Binaries/Win64", "Fake-Win64-Shipping.exe", "unreal", "dx12", "dxgi", True))
+        self.assertEqual(e["api_why"], "the exe loads d3d12.dll")
+        info = optiscaler.info(self.ctx, "999001")["opti"]
+        self.assertEqual((info["kind"], info["api"], info["fg_ok"], info["why"], info["name"]),
+                         ("generic", "dx12", True, None, "Fake Unreal"))
+        self.assertEqual(info["defaults"], {"upscaler": "xess", "fg": 0, "fg_input": "upscaler"})
+        self.assertIn(optiscaler.EXPERIMENTAL, info["notes"])
+        self.assertNotIn(optiscaler.NO_UPSCALER, info["notes"])
+        res = self.run_install("999001", fg=2, fg_input="upscaler")
+        self.assertTrue(res["ok"], res)
+        folder = os.path.join(game, "Fake/Binaries/Win64")
+        self.assertEqual(sorted(os.listdir(folder)), [".oxp3deck-optiscaler", "Fake-Win64-Shipping.exe", "OptiScaler",
+                                                      "OptiScaler.ini", "dxgi.dll"])
+        self.assertIn("in its graphics settings", res["next"])
+        self.assertTrue(any("the generic setup (experimental)" in line for line in self.job.lines), self.job.lines)
+        with open(os.path.join(folder, "OptiScaler.ini")) as f:
+            ini = f.read()
+        for line in ("Dx12Upscaler=xess", "Dxgi=false", "FGInput=upscaler", "HUDFix=true", "DisableOverlays=false"):
+            self.assertIn(line, ini)
+        g = self.record()["games"]["999001"]
+        self.assertEqual((g["kind"], g["api"], g["exe"], g["proxy"]), ("generic", "dx12", "Fake-Win64-Shipping.exe",
+                                                                         "dxgi"))
+        info = optiscaler.info(self.ctx, "999001")["opti"]
+        self.assertEqual((info["state"], info["kind"], info["proxy"]), ("installed", "generic", "dxgi"))
+        # a choice change keeps the record's setup (our dxgi.dll is in the folder now: the proxy stays dxgi)
+        res = optiscaler.set_choices(self.ctx, "999001", self.choices(upscaler="fsr31", fg=0))
+        self.assertTrue(res["ok"], res)
+        self.assertEqual(res["opti"]["launch"]["dll_override"], "dxgi")
+        res = optiscaler.remove(self.ctx, None, self.job, "999001")
+        self.assertTrue(res["ok"], res)
+        self.assertEqual(snapshot(game), before)
+
+    def test_plain_dx11_layout(self):
+        game = self.plain()
+        e, _why = optiscaler.resolve(self.ctx, "999002")
+        self.assertEqual((e["folder"], e["exe"], e["how"], e["api"], e["proxy"], e["fg_inputs"]),
+                         ("bin", "game.exe", "largest", "dx11", "dxgi", ()))
+        info = optiscaler.info(self.ctx, "999002")["opti"]
+        self.assertFalse(info["fg_ok"])
+        self.assertIn(optiscaler.NO_UPSCALER, info["notes"])
+        self.assertTrue(any(n.startswith("DirectX 11 game: OptiScaler replaces its upscaler only") for n in
+                            info["notes"]))
+        res = self.run_install("999002", fg=2)
+        self.assertFalse(res["ok"])
+        self.assertEqual(res["error"], "OptiScaler: frame generation needs DirectX 12; Plain Game runs in DirectX 11")
+        self.assertTrue(self.run_install("999002", fg=0, upscaler="fsr31")["ok"])
+        with open(os.path.join(game, "bin/OptiScaler.ini")) as f:
+            ini = f.read()
+        self.assertIn("Dx11Upscaler=fsr31", ini)
+        self.assertIn("Dx12Upscaler=ffx", ini)          # both: OptiScaler reads only the running API's key
+        self.assertEqual(self.record()["games"]["999002"]["launch"]["set"], {})
+
+    def test_an_existing_dxgi_is_never_overwritten(self):
+        game = self.plain({"bin/dxgi.dll": b"reshade", "bin/WINMM.dll": b"another"})
+        before = self.read_game(game, "bin/dxgi.dll")
+        e, _why = optiscaler.resolve(self.ctx, "999002")
+        self.assertEqual((e["proxy"], e["taken"]), ("version", ["dxgi", "winmm"]))
+        res = self.run_install("999002", fg=0)
+        self.assertTrue(res["ok"], res)
+        self.assertEqual(res["launch"]["dll_override"], "version")
+        self.assertEqual(self.read_game(game, "bin/dxgi.dll"), before)
+        self.assertEqual(self.read_game(game, "bin/version.dll"), PACKAGE["OptiScaler.dll"])
+        self.assertTrue(optiscaler.remove(self.ctx, None, self.job, "999002")["ok"])
+        # every name taken: refused, and nothing written
+        for n in ("version.dll", "dbghelp.dll"):
+            write(os.path.join(game, "bin", n), b"another")
+        snap = snapshot(game)
+        why = ("The game folder already has dxgi.dll, winmm.dll, version.dll and dbghelp.dll (other mods); "
+               "OptiScaler needs one of these names free.")
+        self.assertEqual(optiscaler.check(self.ctx, "999002", installing=True)["why"], why)
+        self.assertEqual(self.run_install("999002", fg=0)["error"], why)
+        self.assertEqual(snapshot(game), snap)
+
+    def read_game(self, game, rel):
+        with open(os.path.join(game, rel), "rb") as f:
+            return f.read()
+
+    def test_anticheat_folder(self):
+        game = self.plain({"EasyAntiCheat/EasyAntiCheat_EOS_Setup.exe": b"MZ"})
+        snap = snapshot(game)
+        why = ("Plain Game uses anti-cheat (EasyAntiCheat: EasyAntiCheat/ found). OptiScaler's guide says not to use "
+               "it with online games: it can stop the game starting or get the account banned.")
+        self.assertEqual(self.run_install("999002", fg=0)["error"], why)
+        self.assertEqual(optiscaler.info(self.ctx, "999002")["opti"]["why"], why)
+        self.assertEqual(snapshot(game), snap)
+        self.assertEqual(self.downloads, [])
+
+    def test_vulkan_only(self):
+        game = self.make("999003", "Vulkan Game", {"VulkanGame.exe": make_pe(["vulkan-1.dll", "kernel32.dll"]),
+                                                   "amd_fidelityfx_vk.dll": b"MZ fsr"})
+        e, _why = optiscaler.resolve(self.ctx, "999003")
+        self.assertEqual((e["folder"], e["api"], e["proxy"], e["fg_inputs"]), ("", "vulkan", "winmm", ()))
+        info = optiscaler.info(self.ctx, "999003")["opti"]
+        self.assertEqual((info["fg_ok"], info["fg_inputs"], info["upscaler_found"]), (False, [], True))
+        self.assertTrue(any(n.startswith("Vulkan game") for n in info["notes"]))
+        self.assertIn("needs DirectX 12", self.run_install("999003", fg=2)["error"])
+        res = self.run_install("999003", fg=0)
+        self.assertTrue(res["ok"], res)
+        self.assertEqual(res["launch"], {"set": {}, "remove": ["XESS", "FSR", "FSR_FG", "force_vk_vendor", "XESS_FG"],
+                                         "dll_override": "winmm", "dxvk_config": None, "args": []})
+        with open(os.path.join(game, "OptiScaler.ini")) as f:
+            ini = f.read()
+        self.assertIn("VulkanUpscaler=xess", ini)
+        self.assertTrue(os.path.isfile(os.path.join(game, "winmm.dll")))
+        self.assertFalse(os.path.exists(os.path.join(game, "dxgi.dll")))
+
+    def test_unsupported_cases_are_refused_with_a_reason(self):
+        self.make("999004", "Linux Game", {"game.x86_64": b"\x7fELF", "lib/libfoo.so": b"x"})
+        self.assertEqual(optiscaler.check(self.ctx, "999004", installing=True)["why"],
+                         "Linux Game runs as a Linux game here; OptiScaler needs its Windows version (Proton).")
+        self.make("999005", "Old Game", {"old.exe": make_pe(["d3d9.dll"])})
+        self.assertEqual(optiscaler.check(self.ctx, "999005", installing=True)["why"],
+                         "Old Game uses DirectX 9; OptiScaler needs DirectX 11, DirectX 12 or Vulkan.")
+        self.make("999006", "Mystery", {"m.exe": b"MZ not a real image"})
+        self.assertIn("can't tell whether Mystery uses DirectX 11, DirectX 12 or Vulkan",
+                      optiscaler.check(self.ctx, "999006", installing=True)["why"])
+        self.make("999007", "Only Helpers", {"UnityCrashHandler64.exe": make_pe(["d3d11.dll"]),
+                                             "unins000.exe": make_pe([])})
+        self.assertIn("Can't tell which file is Only Helpers's exe",
+                      optiscaler.check(self.ctx, "999007", installing=True)["why"])
+        self.make("730", "Counter-Strike Global Offensive", {"game/bin/win64/cs2.exe": make_pe(["d3d11.dll"])})
+        self.assertEqual(optiscaler.check(self.ctx, "730", installing=True)["why"],
+                         "Counter-Strike Global Offensive is an online game. OptiScaler's guide says not to use it "
+                         "with online games, so OXP3 Deck does not install it.")
+        self.make("782330", "DOOMEternal", {"DOOMEternalx64vk.exe": make_pe(["vulkan-1.dll"])})
+        self.assertEqual(optiscaler.check(self.ctx, "782330", installing=True)["why"],
+                         "OptiScaler's wiki documents DOOMEternal only with OptiPatcher on Intel GPUs, which OXP3 "
+                         "Deck does not set up.")
+        for appid in ("999004", "730"):
+            info = optiscaler.info(self.ctx, appid)["opti"]
+            self.assertTrue(info["why"])
+        self.assertEqual(self.downloads, [])
+
+    def test_known_game(self):
+        game = self.make("1091500", "Cyberpunk 2077", {
+            "REDprelauncher.exe": make_pe(["d3d11.dll"], pad=50000),
+            "bin/x64/Cyberpunk2077.exe": make_pe(["d3d12.dll"], pad=1000),
+            "bin/x64/nvngx_dlss.dll": b"MZ"})
+        e, _why = optiscaler.resolve(self.ctx, "1091500")
+        self.assertEqual((e["kind"], e["folder"], e["exe"], e["api"], e["proxy"], e["pick"]),
+                         ("known", "bin/x64", "Cyberpunk2077.exe", "dx12", "dxgi", "XeSS"))
+        self.assertEqual(e["fg_inputs"], ("dlssg", "upscaler"))
+        info = optiscaler.info(self.ctx, "1091500")["opti"]
+        self.assertEqual(info["sources"][0], "github.com/optiscaler/OptiScaler/wiki/Cyberpunk-2077")
+        self.assertNotIn(optiscaler.EXPERIMENTAL, info["notes"])
+        self.assertIn("xefg", optiscaler.check_choices(e, self.choices(fg=2, fg_input="xefg"))[1])
+        # the wiki's second name when dxgi.dll is taken
+        write(os.path.join(game, "bin/x64/dxgi.dll"), b"another mod")
+        e, _why = optiscaler.resolve(self.ctx, "1091500", fresh=True)
+        self.assertEqual(e["proxy"], "wininet")
+        res = self.run_install("1091500", fg=2)
+        self.assertTrue(res["ok"], res)
+        self.assertEqual(res["launch"]["dll_override"], "wininet")
+        self.assertIn("pick XeSS and DLSS frame generation", res["next"])
+
+    def test_a_known_game_whose_exe_moved_gets_the_generic_setup(self):
+        self.make("1091500", "Cyberpunk 2077", {"bin/x64/Cyberpunk2077_new.exe": make_pe(["d3d12.dll"])})
+        e, _why = optiscaler.resolve(self.ctx, "1091500")
+        self.assertEqual((e["kind"], e["exe"], e["api"]), ("generic", "Cyberpunk2077_new.exe", "dx12"))
+        self.assertIn("was not found in its folder", e["notes"][1])
+        self.assertTrue(e["sources"])
+
+    def test_unity_layout(self):
+        # a real Unity <Name>.exe is a stub that imports UnityPlayer.dll; the graphics imports are in the player
+        self.make("999008", "Unity Game", {"UnityGame.exe": make_pe(["unityplayer.dll", "kernel32.dll"]),
+                                           "UnityPlayer.dll": make_pe(["d3d11.dll", "dxgi.dll"], pad=18000),
+                                           "UnityGame_Data/globalgamemanagers": b"x",
+                                           "UnityCrashHandler64.exe": make_pe([], pad=2000),
+                                           "Tools/Editor.exe": make_pe(["d3d11.dll"], pad=90000)})
+        e, why = optiscaler.resolve(self.ctx, "999008")
+        self.assertIsNone(why)
+        self.assertEqual((e["exe"], e["how"], e["api"], e["proxy"]), ("UnityGame.exe", "unity", "dx11", "dxgi"))
+        # a DirectX 12 Unity player names d3d12.dll (loaded at run time)
+        self.make("999009", "Unity DX12", {"U.exe": make_pe(["unityplayer.dll"]),
+                                           "UnityPlayer.dll": make_pe(["kernel32.dll"], text=b"..d3d12.dll..d3d11.dll"),
+                                           "U_Data/globalgamemanagers": b"x"})
+        e, why = optiscaler.resolve(self.ctx, "999009")
+        self.assertEqual((e["how"], e["api"], e["api_why"]), ("unity", "dx12", "the exe names d3d12.dll"), why)
+
+    def test_anticheat_in_the_exe_folder(self):
+        # below SCAN_DEPTH of the install folder, in Unreal's Binaries/Win64
+        for appid, ac, tree in (
+                ("999101", "BattlEye", {"BEGame/Binaries/Win64/BEGame-Win64-Shipping.exe": make_pe(["d3d12.dll"]),
+                                        "BEGame/Binaries/Win64/BattlEye/BEClient_x64.dll": b"MZ"}),
+                ("999102", "EasyAntiCheat", {"G/Binaries/Win64/G-Win64-Shipping.exe": make_pe(["d3d12.dll"]),
+                                             "G/Binaries/Win64/EasyAntiCheat/Settings.json": b"{}"})):
+            with self.subTest(ac=ac):
+                game = self.make(appid, f"AC {appid}", tree)
+                snap = snapshot(game)
+                why = optiscaler.check(self.ctx, appid, installing=True)["why"]
+                self.assertTrue(why and why.startswith(f"AC {appid} uses anti-cheat ({ac}: "), why)
+                self.assertIn("Binaries/Win64/", why)
+                self.assertEqual(optiscaler.info(self.ctx, appid)["opti"]["why"], why)
+                self.assertEqual(self.run_install(appid, fg=0)["error"], why)
+                self.assertEqual(snapshot(game), snap)
+        self.assertEqual(self.downloads, [])
+
+    def test_unreal_with_both_apis_gets_both_upscaler_keys(self):
+        game = self.make("999103", "UE4 Both", {"G/Binaries/Win64/G-Win64-Shipping.exe": make_pe(
+            ["kernel32.dll"], ["d3d11.dll", "d3d12.dll"], pad=3000)})
+        e, _why = optiscaler.resolve(self.ctx, "999103")
+        self.assertEqual(e["api"], "dx12")
+        self.assertTrue(self.run_install("999103", fg=0, upscaler="xess")["ok"])
+        with open(os.path.join(game, "G/Binaries/Win64/OptiScaler.ini")) as f:
+            ini = f.read()
+        self.assertIn("Dx11Upscaler=xess", ini)
+        self.assertIn("Dx12Upscaler=xess", ini)
+
+    def test_not_offered_and_online_messages(self):
+        for appid, name, why in (
+                ("1245620", "ELDEN RING", "OptiScaler's wiki documents ELDEN RING only with the ERSS-FG mod, which "
+                                          "OXP3 Deck does not set up."),
+                ("1623730", "Palworld", "OptiScaler's wiki documents Palworld only with OptiPatcher or the GPU spoof, "
+                                        "which OXP3 Deck does not set up."),
+                ("230410", "Warframe", "Warframe is an online game. OptiScaler's guide says not to use it with online "
+                                       "games, so OXP3 Deck does not install it.")):
+            with self.subTest(name=name):
+                self.make(appid, name, {"g.exe": make_pe(["d3d12.dll"])})
+                self.assertEqual(optiscaler.check(self.ctx, appid, installing=True)["why"], why)
+        for appid in ("1623730", "1139900", "2457220", "1774580", "1245620"):
+            self.assertNotIn(appid, optigames.KNOWN)
+            self.assertNotIn(appid, optigames.ONLINE)
+
+
+class OptigamesTest(unittest.TestCase):
+    def test_pick_exe(self):
+        files = [("bin/x64/witcher3.exe", 100), ("bin/x64_dx12/witcher3.exe", 100), ("REDprelauncher.exe", 500)]
+        self.assertEqual(optigames.pick_exe(files, set()), ("bin/x64_dx12", "witcher3.exe", "largest"))
+        self.assertEqual(optigames.pick_exe(list(reversed(files)), set()), ("bin/x64_dx12", "witcher3.exe", "largest"))
+        files = [("Phoenix/Binaries/Win64/HogwartsLegacy.exe", 9), ("HogwartsLegacy.exe", 1),
+                 ("Engine/Binaries/Win64/x.exe", 99)]
+        self.assertEqual(optigames.pick_exe(files, set()), ("Phoenix/Binaries/Win64", "HogwartsLegacy.exe", "unreal"))
+        self.assertIsNone(optigames.pick_exe([("_CommonRedist/DirectX/game.exe", 9), ("uninstall.exe", 9)], set()))
+        # a tool deeper down is not the game, even when larger
+        files = [("Game.exe", 3000), ("tools/ModEditor.exe", 90000), ("bin/DedicatedServer.exe", 90000),
+                 ("Benchmark.exe", 90000), ("GameConfig.exe", 90000)]
+        self.assertEqual(optigames.pick_exe(files, set()), ("", "Game.exe", "largest"))
+        files = [("Game.exe", 3000), ("data/Other.exe", 90000)]
+        self.assertEqual(optigames.pick_exe(files, set()), ("data", "Other.exe", "largest"))   # a tiny root stub
+        files = [("Game.exe", 30000), ("data/Other.exe", 90000)]
+        self.assertEqual(optigames.pick_exe(files, set()), ("", "Game.exe", "largest"))        # shallower first
+
+    def test_decide_api(self):
+        d = optigames.decide_api
+        self.assertEqual(d("bin/x64_dx12", "witcher3.exe", set(), None)[0], "dx12")
+        self.assertEqual(d("", "control_dx12.exe", set(), None)[0], "dx12")
+        self.assertEqual(d("", "ffxiv_dx11.exe", set(), ["d3d12.dll"])[0], "dx11")
+        self.assertEqual(d("", "DOOMEternalx64vk.exe", set(), None)[0], "vulkan")
+        self.assertEqual(d("", "g.exe", {"sl.interposer.dll"}, ["d3d11.dll"]),
+                         ("dx12", "the game ships sl.interposer.dll"))
+        self.assertEqual(d("", "g.exe", set(), ["vulkan-1.dll", "d3d11.dll"])[0], "dx11")
+        self.assertEqual(d("", "g.exe", set(), [], {b"d3d12.dll", b"d3d11.dll"}), ("dx12", "the exe names d3d12.dll"))
+        self.assertEqual(d("", "g.exe", set(), ["opengl32.dll"]), (None, "OpenGL"))
+        self.assertEqual(d("", "g.exe", set(), None), (None, ""))
+
+    def test_pick_proxy(self):
+        p = optigames.pick_proxy
+        self.assertEqual(p("dx12", set()), ("dxgi", []))
+        self.assertEqual(p("dx11", {"dxgi.dll", "winmm.dll", "version.dll", "dbghelp.dll"}),
+                         (None, ["dxgi", "winmm", "version", "dbghelp"]))           # never d3d12 for DirectX 11
+        self.assertEqual(p("vulkan", set()), ("winmm", []))
+        self.assertEqual(p("dx12", set(), None, ["version.dll", "kernel32.dll"]), ("version", []))
+        self.assertEqual(p("dx12", {"dxgi.dll"}, ("dxgi",)), (None, ["dxgi"]))
+        self.assertEqual(p("dx11", set(), ("d3d12", "dxgi")), ("dxgi", []))
+        nms = optigames.KNOWN["275850"]
+        self.assertEqual((nms["api"], nms["proxies"]), ("vulkan", ("dbghelp", "dxgi")))
+        self.assertEqual(p("vulkan", set(), nms["proxies"]), ("dbghelp", []))
+        self.assertNotIn("dxgi", optigames.PROXIES_BY_API["vulkan"])
+
+    def test_pe_imports(self):
+        with tempfile.TemporaryDirectory() as d:
+            path = os.path.join(d, "a.exe")
+            with open(path, "wb") as f:
+                f.write(make_pe(["KERNEL32.dll", "d3d12.dll"], ["dxgi.dll"], text=b"..Vulkan-1.DLL.."))
+            self.assertEqual(pe.imports(path), ["kernel32.dll", "d3d12.dll", "dxgi.dll"])
+            self.assertEqual(pe.mentions(path, (b"vulkan-1.dll", b"d3d9.dll")), {b"vulkan-1.dll"})
+            with open(path, "wb") as f:
+                f.write(b"MZ" + b"\0" * 100)
+            self.assertIsNone(pe.imports(path))
+            self.assertIsNone(pe.imports(os.path.join(d, "missing.exe")))
+
+    def test_table(self):
+        self.assertNotIn(WITCHER, optigames.KNOWN)
+        for appid, k in optigames.KNOWN.items():
+            with self.subTest(appid=appid):
+                self.assertTrue(appid.isdigit())
+                self.assertIn(k["api"], optigames.APIS)
+                self.assertTrue(k["sources"] and k["sources"][0].startswith(optigames.WIKI))
+                self.assertTrue(all(p in optigames.ALL_PROXIES for p in k["proxies"]))
+                self.assertTrue(all(i in optigames.FG_INPUTS for i in k["fg_inputs"]))
+                self.assertEqual(bool(k["fg_inputs"]), k["api"] == "dx12")
+                self.assertTrue(all(e == e.lower() and e.endswith(".exe") for e in k["exes"]))
+                self.assertNotIn(appid, optigames.ONLINE)
+                self.assertNotIn(appid, optigames.NOT_OFFERED)
+        self.assertGreaterEqual(len(optigames.KNOWN), 39)
+
+
 class PureTest(unittest.TestCase):
     E = optiscaler.GAMES[WITCHER]
 
@@ -852,7 +1257,9 @@ class PureTest(unittest.TestCase):
             from tests import stub_decky
             ctx = stub_decky.make_ctx(d)
             info = optiscaler.info(ctx, "1091500")["opti"]
-            self.assertEqual((info["supported"], info["why"], info["state"]), (False, optiscaler.NO_SETUP, "none"))
+            self.assertEqual((info["supported"], info["why"], info["state"], info["kind"]),
+                             (False, "Cyberpunk 2077 is not installed.", "none", "known"))
+            self.assertTrue(info["sources"][0].endswith("/wiki/Cyberpunk-2077"))
             self.assertFalse(optiscaler.info(ctx, "../x")["ok"])
 
 

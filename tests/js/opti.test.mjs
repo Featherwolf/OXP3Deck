@@ -267,14 +267,19 @@ test("every OptiScaler control has its game.opti tag and a running check before 
   assert.match(s, /afterJob\(r\.job\.id, \(j\) => \{[\s\S]*if \(j\.state !== "done" \|\| !out\?\.ok\) \{[\s\S]{0,400}?\n        return;\n      \}/);
   // a failed update that already removed OptiScaler: its launch options come out as for Remove
   assert.match(s, /if \(kind === "update"\) \{\s*void opti_info\(appid\)\.then\(\(r\) => \{\s*if \(r\.ok && r\.opti\?\.state === "none"\) syncLaunch\(null, "game\.opti_remove", "OptiScaler removed"\);/);
-  // the Upscaler's Details show the ini value that is written (ffx for FSR 3.1 in DirectX 12)
-  assert.match(s, /Dx12Upscaler=\$\{choices\.upscaler === "fsr31" \? "ffx" : "xess"\}/);
+  // the Upscaler's Details show the ini value that is written (ffx for FSR 3.1 in DirectX 12), by the game's API
+  assert.match(s, /lines: \[upscalerIni\(setup\.api, choices\.upscaler\)\]/);
+  assert.equal(o.upscalerIni("dx12", "fsr31"), "Upscalers Dx12Upscaler=ffx");
+  assert.equal(o.upscalerIni("dx11", "fsr31"), "Upscalers Dx11Upscaler=fsr31");
+  assert.equal(o.upscalerIni("vulkan", "xess"), "Upscalers VulkanUpscaler=xess");
+  // frame generation only for a DirectX 12 game: the dropdown offers Off only and is greyed
+  assert.match(s, /disabled=\{!!act\.busy \|\| !info \|\| !!why \|\| !fgOk\} rgOptions=\{fgs\}/);
   // no backup promise: every conflict is a refusal
   assert.doesNotMatch(s, /moved into a backup folder/);
   // the install, update and remove ask first
   assert.match(s, /if \(!\(await confirm\(\{ title: c\.title,[\s\S]{0,200}effect: c\.effect \}\)\)\) return null;/);
   // the game setting it replaces and the FPS counter: Games tab only
-  assert.match(s, /\{!quick && \(\s*<WithDetails details=\{inputD\}>/);
+  assert.match(s, /\{!quick && fgOk && \(\s*<WithDetails details=\{inputD\}>/);
   assert.match(s, /\{!quick && installed && \(\s*<WithDetails details=\{overlayD\}>/);
 });
 
@@ -301,4 +306,62 @@ test("api.ts and backend.ts have every OptiScaler call", () => {
     assert.match(api, new RegExp(`export const ${n} = callable<`), n);
     assert.match(b, new RegExp(`export const ${n} = guard\\("${n}", \\{`), n);
   }
+});
+
+// ---- any game (DESIGN.md "OptiScaler for any game") ---------------------------------------------------------------
+
+test("setupOf: an older backend's answer is the tested setup; known and generic texts", () => {
+  assert.deepEqual(o.setupOf({}), { kind: "tested", api: "dx12", pick: null, name: null });
+  assert.deepEqual(o.setupOf(null), { kind: "tested", api: "dx12", pick: null, name: null });
+  const gen = o.setupOf({ kind: "generic", api: "vulkan", pick: null });
+  assert.equal(o.fgPossible(gen), false);
+  assert.equal(o.checklistLine("upscaler", 0, gen), "Pick DLSS, FSR or XeSS in the game, then restart it once.");
+  // frame generation is never offered in the texts for a Vulkan or DirectX 11 game
+  assert.equal(o.checklistLine("dlssg", 2, gen), "Pick DLSS, FSR or XeSS in the game, then restart it once.");
+  assert.doesNotMatch(o.checklist("dlssg", 2, gen).join(" "), /Frame Generation|XeFG|Borderless/);
+  assert.match(o.checklist("upscaler", 0, gen)[0], /set up for Vulkan/);
+  assert.match(o.checklist("upscaler", 0, o.setupOf({ kind: "generic", api: "dx12" }))[1], /whichever the game offers/);
+  const known = o.setupOf({ kind: "known", api: "dx12", pick: "FSR 3.1" });
+  assert.equal(o.checklistLine("fsrfg", 2, known), "Pick FSR 3.1 and FSR frame generation, then restart the game.");
+  assert.match(o.checklist("fsrfg", 2, known).join(" "), /Upscaling: FSR 3\.1 \(any quality\)\. .*FSR Frame Generation on/);
+  assert.equal(o.readyToast("Lies of P", "fsrfg", 2, known), "OptiScaler ready for Lies of P: pick FSR 3.1 and FSR frame generation in the game.");
+  assert.equal(o.readyToast("V", "dlssg", 2, gen), "OptiScaler ready for V: pick DLSS, FSR or XeSS in the game.");
+  assert.notDeepEqual(o.checklistHelp(gen), o.CHECKLIST_HELP);
+  assert.deepEqual(o.checklistHelp(o.TESTED), o.CHECKLIST_HELP);
+  // a long pick still gives a line of at most 80 characters
+  const long = o.setupOf({ kind: "known", api: "dx12", pick: "DLSS (pick it again after each start), or anything else it offers" });
+  for (const f of [0, 2]) assert.ok(o.checklistLine("dlssg", f, long).length <= MAX_LINE);
+  assert.ok(o.INPUTS.some((i) => i.data === "fsrfg"));
+  assert.deepEqual(o.readChoices({ upscaler: "xess", fg: 0, fg_input: "fsrfg" }), { upscaler: "xess", fg: 0, fg_input: "fsrfg" });
+});
+
+test("install line, status and dialog by setup", () => {
+  const VAR = /\b(XESS|XESS_FG|FSR_FG|WINEDLLOVERRIDES|DXVK_CONFIG|force_vk_vendor)\b|=/;
+  for (const info of [{}, { kind: "known" }, { kind: "known", fit: "poor" }, { kind: "generic" }]) {
+    const l = o.installLine(info);
+    assert.ok(l.length <= MAX_LINE, l);
+    assert.doesNotMatch(l, VAR, l);
+  }
+  assert.equal(o.installLine({}), "Runs XeSS and XeSS frame generation in place of the game's DLSS.");
+  assert.match(o.installLine({ kind: "generic" }), /^Experimental/);
+  assert.equal(o.statusLine({ state: "none", kind: "generic" }), "Not installed · experimental");
+  const info = { kind: "generic", api: "dx11", api_why: "the exe loads d3d11.dll", exe: "game.exe", proxy: "winmm",
+    folder: "/g/bin", cached: true, fg_ok: false };
+  const c = o.confirmInstall(info, "Plain Game", { upscaler: "fsr31", fg: 2, fg_input: "upscaler" });
+  assert.match(c.text[1], /It runs FSR 3\.1 when the game asks for DLSS, FSR or XeSS\. It goes in as winmm\.dll, a name the folder does not have/);
+  assert.ok(c.text.some((t) => t.startsWith("Experimental:")));
+  assert.ok(c.lines.includes("Next to: game.exe (DirectX 11: the exe loads d3d11.dll)"));
+  assert.ok(c.lines.includes("As: winmm.dll"));
+  // the tested game's dialog is unchanged
+  assert.match(o.confirmInstall({ cached: true }, "W", o.DEFAULT_CHOICES).text[1], /Install stops if the folder already has a dxgi\.dll or another OptiScaler/);
+});
+
+test("OptiControls: every game's row, the setup's texts", () => {
+  const s = src("components/OptiControls.tsx");
+  assert.match(s, /description=\{explainWhen\(installLine\(info\), EFFECTS\["game\.opti"\]/);
+  assert.match(s, /checklistLine\(choices\.fg_input, choices\.fg, setup\)/);
+  assert.match(s, /checklist\(choices\.fg_input, choices\.fg, setup\), \.\.\.checklistHelp\(setup\)/);
+  assert.match(s, /readyToast\(app\.name, choices\.fg_input, choices\.fg, setup\)/);
+  // the games backend answers opti_entry for every Steam game; the component still checks it (older backends)
+  assert.match(s, /if \(!isSteamApp\(appid\) \|\| !game\?\.opti_entry\) return null;/);
 });

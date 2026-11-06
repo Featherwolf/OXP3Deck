@@ -179,7 +179,7 @@ export type GameInfo = {
   checks?: GameCheck[];
   // 0.5 (DESIGN.md "OptiScaler"; older backends: absent)
   opti_installed?: boolean;                // optiscaler.json says OptiScaler is in this game
-  opti_entry?: boolean;                    // the game is in optiscaler.py's GAMES table
+  opti_entry?: boolean;                    // the game's row shows OptiScaler (0.5.1: every Steam game; 0.5: the table's)
 };
 export type GameSuggest = { key: ManagedKey; value: string; why: string };
 export type GameInfoRes = Res & { game: GameInfo | null };
@@ -187,7 +187,10 @@ export type GameInfoRes = Res & { game: GameInfo | null };
 // ---- OptiScaler (DESIGN.md "OptiScaler (0.5)") ---------------------------------------------------------------------
 
 export type OptiUpscaler = "xess" | "fsr31";
-export type OptiFgInput = "dlssg" | "xefg" | "upscaler";
+export type OptiFgInput = "dlssg" | "fsrfg" | "xefg" | "upscaler";
+/** tested: OXP3 Deck's own setup (The Witcher 3); known: OptiScaler's wiki documents the game; generic: experimental. */
+export type OptiKind = "tested" | "known" | "generic";
+export type OptiApi = "dx12" | "dx11" | "vulkan";
 export type OptiFg = 0 | 2 | 3 | 4;
 export type OptiChoices = { upscaler: OptiUpscaler; fg: OptiFg; fg_input: OptiFgInput };
 /** What the launch options get while OptiScaler is in the game (optiscaler.launch_plan); the frontend applies it. */
@@ -213,6 +216,17 @@ export type OptiInfo = {
   version?: string | null;                              // OptiScaler's version of the pinned build
   backed_up?: string[];                                 // files the install moved into the backup folder
   sources?: string[];                                   // the table entry's sources
+  // 0.5.1 (DESIGN.md "OptiScaler for any game"; older backends: absent, read as the tested setup)
+  kind?: OptiKind;
+  name?: string | null;                                 // the game's name (its appmanifest's)
+  api?: OptiApi | null;                                 // the API the setup is for
+  api_why?: string | null;                              // generic: what showed it ("the exe loads d3d12.dll")
+  exe?: string | null;                                  // the exe OptiScaler goes next to
+  proxy?: string | null;                                // the file name OptiScaler takes ("dxgi" for dxgi.dll)
+  pick?: string | null;                                 // known: what to pick in the game ("XeSS or DLSS")
+  fg_ok?: boolean;                                      // frame generation possible (DirectX 12 only)
+  upscaler_found?: boolean | null;                      // a DLSS, FSR 2+ or XeSS library was seen in the game
+  fit?: "good" | "poor" | null;                         // known: the wiki's setup fits this device less well
 };
 export type OptiInfoRes = Res & { opti: OptiInfo | null };
 export type OptiJobResult = Res & {

@@ -508,14 +508,13 @@ class Plugin:
             raise Unavailable(f"{running.title} is running; try again when it has ended")
 
     def _opti_title(self, verb: str, appid) -> str:
-        e = _mod("optiscaler").entry(str(appid))
-        return f"{verb} for {e['name'] if e else appid}"
+        return f"{verb} for {_mod('optiscaler').game_name(self.ctx, str(appid)) or appid}"
 
     def _opti_precheck(self, appid, choices=None, installing=False):
         """Why the job cannot start, or None: bad choices and the refusals are answered before any job."""
         o = _mod("optiscaler")
         if choices is not None:
-            _c, why = o.check_choices(o.entry(str(appid)), choices)
+            why = o.choices_why(self.ctx, str(appid), choices)
             if why:
                 return why
         return o.check(self.ctx, str(appid), installing=installing)["why"]

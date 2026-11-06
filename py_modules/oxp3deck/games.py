@@ -513,11 +513,11 @@ def _checks(game: dict) -> list[dict]:
 
 
 def _opti(ctx, appid: str) -> tuple[bool, bool]:
-    """(OptiScaler has a tested setup for the game, the record says it is in the game). Cheap: the table and the
-    record, no folder scan; imported here so a broken optiscaler module never breaks game info."""
+    """(the game's row shows OptiScaler: every Steam game, DESIGN.md "OptiScaler for any game"; the record says it
+    is in the game). Cheap: no folder scan; imported here so a broken optiscaler module never breaks game info."""
     try:
         from . import optiscaler
-        return optiscaler.entry(appid) is not None, optiscaler.installed_for(ctx, appid)
+        return optiscaler.offered(appid), optiscaler.installed_for(ctx, appid)
     except Exception:
         log.exception("game info %s: OptiScaler state", appid)
         return False, False

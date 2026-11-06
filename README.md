@@ -329,31 +329,58 @@ next start. No re-login is needed.
   Properties → General → Launch options; it applies when you start the game again. When copying does not work in
   Game Mode, the line shows in a text field to copy with Steam's keyboard.
 
-## OptiScaler (The Witcher 3)
+## OptiScaler (any game; tested setup for The Witcher 3)
 
-For The Witcher 3 (Steam), whose own XeSS frame generation does not start on this device ("Latency reduction is not
-enabled"), the Games tab and the game's section in Quick Access offer **OptiScaler**. OptiScaler sits between the game
-and its upscaler: the game is set to DLSS and DLSS frame generation, and OptiScaler runs XeSS upscaling and XeSS frame
-generation (XeFG) in their place, driving Xe Low Latency itself. This is the setup from ETA Prime's video on the same
-chip; **it is not tested on the ONEXPLAYER 3 with this plugin yet**.
+Every Steam game's section (the Games tab and Quick Access) has an **OptiScaler** part. OptiScaler sits between the
+game and its upscaler: when the game asks for DLSS, FSR 2+ or XeSS, OptiScaler runs XeSS or FSR 3.1 instead, and in
+DirectX 12 games XeSS frame generation (XeFG) in place of the game's frame generation, driving Xe Low Latency itself.
+It only works in games that already offer DLSS 2+, FSR 2+ or XeSS. There are three kinds of setup, and the row says
+which one a game gets:
+
+- **The Witcher 3: the tested setup.** Its own XeSS frame generation does not start on this device ("Latency
+  reduction is not enabled"); the game is set to DLSS and DLSS frame generation and OptiScaler runs XeSS and XeFG in
+  their place. This is the setup from ETA Prime's video on the same chip; **it is not tested on the ONEXPLAYER 3
+  with this plugin yet**.
+- **About 40 games OptiScaler's wiki documents** (Cyberpunk 2077, Black Myth: Wukong, Hogwarts Legacy, the Spider-Man,
+  Horizon and Last of Us ports, …): the exe folder, the file name and what to pick in the game follow the game's wiki
+  page. Not tested on this device.
+- **Any other game: experimental.** OXP3 Deck finds the game's exe (Unreal's `…/Binaries/Win64/*-Shipping.exe`,
+  Unity's `<Name>.exe`, else the largest exe near the top that is not a launcher, crash reporter, installer,
+  editor, server or tool), its graphics API
+  (from its files and the DLLs the exe loads) and a file name the folder does not have yet (`dxgi.dll` first; never
+  over an existing file). The steps in the game are the generic ones: pick DLSS, FSR or XeSS (and its frame
+  generation, if you turn that on) in the game's graphics settings.
+
+DirectX 11 and Vulkan games get the upscaler only: OptiScaler's frame generation needs DirectX 12. Not offered, with
+the reason in the row: games with anti-cheat files (EasyAntiCheat, BattlEye, EA AntiCheat, ACE, …), online games
+(Counter-Strike 2, Dota 2, Path of Exile 2, …; OptiScaler's guide says not to use it with online games), games whose
+only documented setup needs another mod (REFramework for the Capcom games, OptiPatcher for DOOM Eternal on Intel, ERSS-FG for ELDEN RING;
+Palworld, Ghostrunner, Avowed and Jedi: Survivor, whose only input DLSS needs OptiPatcher or the GPU spoof, …),
+native Linux games (OptiScaler needs the Windows version under Proton), DirectX 9 and OpenGL games, and a game whose
+API cannot be told from its files.
 
 OptiScaler is not part of OXP3 Deck: it is downloaded from its GitHub release when you tap Install (GPL-3.0, pinned by
-its checksum, about 69 MB, once). XeSS fast mode (xess-xmx-linux) is still needed for XeSS on the XMX cores.
+its checksum, about 69 MB, once). XeSS fast mode (xess-xmx-linux) is still needed for XeSS on the XMX cores. On every
+game OXP3 Deck turns OptiScaler's GPU spoof off (`Spoofing Dxgi=false`): with it, XeSS runs on the slower path on
+Intel; the cost is that some games then hide DLSS, so pick FSR or XeSS in them.
 
-1. Quit the game. Tap **Install OptiScaler for this game** and confirm. The files go into the game's
-   `bin/x64_dx12` folder as your user. Install stops if the folder already has a dxgi.dll or another OptiScaler;
-   the game's own files are not touched.
-2. Pick the **Upscaler** (XeSS, or FSR 3.1) and **Frame generation** (Off, XeFG 2x, 3x or 4x). On the Games tab,
-   **Game setting it replaces** chooses which of the game's settings OptiScaler takes over (DLSS frame generation by
-   default; XeSS frame generation if DLSS is greyed out in the game).
-3. **In the game, once** (its Details have the steps): start the game; Display mode Borderless; Upscaling DLSS;
-   Frame Generation DLSS Frame Generation on; quit and start it again once; OptiScaler's menu (Insert on a keyboard)
-   should show XeSS and FG Output XeFG. **Show OptiScaler's FPS counter** (Games tab) helps check it works.
+1. Quit the game. Tap **Install OptiScaler for this game** and confirm. The files go into the game's exe folder (for
+   The Witcher 3 `bin/x64_dx12`) as your user. Install stops if the folder already has another OptiScaler (and, for
+   The Witcher 3, a dxgi.dll); the game's own files are not touched.
+2. Pick the **Upscaler** (XeSS, or FSR 3.1) and, in DirectX 12 games, **Frame generation** (Off, XeFG 2x, 3x or 4x;
+   The Witcher 3 starts at 2x, every other game at Off). On the Games tab, **Game setting it replaces** chooses which
+   of the game's settings OptiScaler takes over (for The Witcher 3 DLSS frame generation by default; XeSS frame
+   generation if DLSS is greyed out in the game).
+3. **In the game, once** (its Details have the steps). The Witcher 3: start the game; Display mode Borderless;
+   Upscaling DLSS; Frame Generation DLSS Frame Generation on; quit and start it again once; OptiScaler's menu (Insert
+   on a keyboard) should show XeSS and FG Output XeFG. Other games: pick what the row says (or DLSS, FSR or XeSS),
+   restart once, check OptiScaler's menu. **Show OptiScaler's FPS counter** (Games tab) helps check it works.
 
 The launch options change with it, never while the game runs (then a few seconds after you quit it): `XESS=`,
 `FSR=`, `FSR_FG=` and `force_vk_vendor=` come out while OptiScaler is in the game (`XESS=latest` is not needed),
-`XESS_FG=<n>` follows OptiScaler's frame generation, `WINEDLLOVERRIDES` gains `dxgi=n,b`, 3x and 4x add
-`DXVK_CONFIG="dxgi.customVendorId = 8086"`, and `-dx12` is added after `%command%`; your own entries in these
+`XESS_FG=<n>` follows OptiScaler's frame generation, `WINEDLLOVERRIDES` gains `<name>=n,b` for OptiScaler's file
+name (`dxgi=n,b` for The Witcher 3), 3x and 4x add `DXVK_CONFIG="dxgi.customVendorId = 8086"`, and `-dx12` is added
+after `%command%` for The Witcher 3 (and the few games whose wiki page asks for it); your own entries in these
 variables stay. The XeSS options above OptiScaler's are greyed with "Set by OptiScaler for this game." **Copy launch
 options** includes OptiScaler's options too.
 
@@ -361,7 +388,9 @@ options** includes OptiScaler's options too.
 gives the launch options back what OptiScaler replaced (exactly the text from before, when you have not changed it
 since). **Update** appears when a new OXP3 Deck pins a newer OptiScaler build and keeps your choices. Uninstalling
 OXP3 Deck does not remove OptiScaler from a game: remove it from each game first. Another OptiScaler (Decky Framegen,
-a manual copy) or a game with anti-cheat is refused.
+a manual copy) is left alone and refused. If an experimental setup does not work (the game does not start, or
+OptiScaler's menu never shows), tap Remove: the game may need another file name or setup, and OptiScaler's wiki may
+have a page for it.
 
 ## What it never does
 

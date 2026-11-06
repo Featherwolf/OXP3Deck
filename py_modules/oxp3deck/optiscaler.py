@@ -1,6 +1,9 @@
-"""OptiScaler per game (DESIGN.md "OptiScaler (0.5)"): a pinned OptiScaler build is downloaded once, unpacked as the
-desktop user into ~/.local/share/oxp3deck/optiscaler/<build>/, and put into a tested game's exe folder with backups
-of anything in the way; Remove takes it out again from root's record and puts the backups back.
+"""OptiScaler per game (DESIGN.md "OptiScaler (0.5)" and "OptiScaler for any game"): a pinned OptiScaler build is
+downloaded once, unpacked as the desktop user into ~/.local/share/oxp3deck/optiscaler/<build>/, and put into a game's
+exe folder with backups of anything in the way; Remove takes it out again from root's record and puts the backups
+back. The Witcher 3 has a tested setup (GAMES); a game OptiScaler's wiki documents gets its install-level facts from
+optigames.KNOWN; any other game gets the generic, experimental setup (its exe, API and a free proxy name found from
+its files, optigames.py).
 
 Written for OXP3 Deck. It follows ClawDeck's approach (download once, put into a game with a manifest and backups,
 take out again) as of ClawDeck commit 07918cc (2026-11-05, MIT); no code from later ClawDeck commits (AGPLv3) and
@@ -28,7 +31,7 @@ import tempfile
 import threading
 import time
 
-from . import context, downloads, steamlib, userexec
+from . import context, downloads, optigames, pe, steamlib, userexec
 
 log = logging.getLogger("oxp3deck")
 
@@ -50,11 +53,16 @@ BUILDS = {
     },
 }
 
-# Hand-written, one entry per tested game, each with its sources; a game is added only with a source.
+DEFAULT_BUILD = "v10-20261105"
+
+# Hand-written, one entry per game tested on the device, each with its sources; a game is added only with a source.
+# Games OptiScaler's wiki documents are optigames.KNOWN; every other game gets the generic setup (resolve()).
 GAMES = {
     "292030": {                                   # The Witcher 3: Wild Hunt
+        "kind": "tested",
         "name": "The Witcher 3",
         "exe": "witcher3.exe",
+        "proxies": ("dxgi",),                     # the tested name only: a dxgi.dll that is not ours is a refusal
         "folder": "bin/x64_dx12",                 # wiki: install in "The Witcher 3\bin\x64_dx12"; bin/x64 is DX11
         "proxy": "dxgi",                          # wiki Filename: dxgi.dll
         "api": "dx12",
@@ -76,7 +84,11 @@ UPSCALERS = ("xess", "fsr31")
 FG_MULTIPLIERS = (0, 2, 3, 4)
 # What the "fsr31" choice is called in OptiScaler.ini: for DirectX 12 the FidelityFX upscalers are "ffx" since v10
 # (OptiTypes.cpp CodeToUpscalerFfx reads an old "fsr31" as ffx); for DirectX 11 "fsr31" is still its own upscaler.
-UPSCALER_INI = {"dx12": {"xess": "xess", "fsr31": "ffx"}, "dx11": {"xess": "xess", "fsr31": "fsr31"}}
+# Vulkan: "ffx" is native FidelityFX 2.3 / 3.1 (OptiScaler.ini [Upscalers] VulkanUpscaler).
+UPSCALER_INI = {"dx12": {"xess": "xess", "fsr31": "ffx"}, "dx11": {"xess": "xess", "fsr31": "fsr31"},
+                "vulkan": {"xess": "xess", "fsr31": "ffx"}}
+UPSCALER_KEY = {"dx12": "Upscalers_Dx12Upscaler", "dx11": "Upscalers_Dx11Upscaler",
+                "vulkan": "Upscalers_VulkanUpscaler"}
 
 CACHE_REL = ".local/share/oxp3deck/optiscaler"
 PACKAGE_LIST = ".oxp3deck-package.json"
@@ -106,19 +118,24 @@ _HEX = re.compile(r"^[0-9a-f]{64}$")
 # ClawDeck's manifest folder. `<proxy>.dll.b` (Decky Framegen's backup) is checked for every proxy name.
 FOREIGN_NAMES = ("optiscaler.ini", "optiscaler.log", "optiscaler.dll", "optiscaler", "nvngx.ini", "fgmod",
                  "framegen_patch", ".clawdeck-optiscaler")
-PROXIES = ("dxgi", "winmm", "version", "dbghelp", "d3d12", "wininet", "winhttp")
+PROXIES = optigames.ALL_PROXIES
 # Anti-cheat: folders and file patterns (lower case) searched SCAN_DEPTH levels under the install folder.
-ANTICHEAT_DIRS = ("easyanticheat", "battleye")
-ANTICHEAT_FILES = ("eaanticheat*", "start_protected_game.exe", "*_be.exe", "mhypbase.dll", "vgk.sys")
+ANTICHEAT_DIRS = optigames.ANTICHEAT_DIRS
+ANTICHEAT_FILES = optigames.ANTICHEAT_FILES
+# The install folder is listed this deep, at most this many entries, for the exe and API of a game without a tested
+# setup; the listing is kept for LIST_TTL seconds (info() runs for every game page).
+LIST_MAX = 40000
+LIST_TTL = 30.0
 # Package files that stay in the cache (Windows set-up helpers, licences, the "extract all files" note).
 SKIP_NAMES = ("setup_linux.sh", "setup_windows.bat")
 # Files OptiScaler writes next to the exe at run time (not in the record), removed by fixed names only.
 RUNTIME_LOGS = ("optiscaler*.log",)
 RUNTIME_DIRS = ("D3D12_Optiscaler",)
 
-NO_SETUP = "OXP3 Deck has no tested OptiScaler setup for this game yet."
+NO_SETUP = "OptiScaler: not a Steam game."
 FLATPAK = "Not supported with Flatpak Steam."
-ANTICHEAT = "This game has anti-cheat; OptiScaler could get the account banned."
+ANTICHEAT = "This game has anti-cheat; OptiScaler could get the account banned."      # (fallback wording)
+GUIDE = "OptiScaler's guide says not to use it with online games"
 FOREIGN = "Another OptiScaler install is in this game. Remove it with the tool that added it."
 GONE = "This OptiScaler build is no longer published: update OXP3 Deck."
 
@@ -216,15 +233,30 @@ def _open_in(folder: str, rel_dir: str = "") -> int:
 
 
 def entry(appid) -> dict | None:
-    return GAMES.get(str(appid))
+    """The table entry of a game: the tested setup (GAMES) or the wiki's facts (optigames.KNOWN), else None (the
+    generic setup). Cheap: no folder is read."""
+    appid = str(appid)
+    if appid in GAMES:
+        return GAMES[appid]
+    k = optigames.KNOWN.get(appid)
+    return dict(k, kind="known") if k else None
+
+
+def offered(appid) -> bool:
+    """Whether the game's row shows OptiScaler at all: every Steam game (a refusal is shown in the row)."""
+    return bool(_APPID.match(str(appid or "")))
 
 
 def defaults(e: dict) -> dict:
-    return {"upscaler": "xess", "fg": 2, "fg_input": e["fg_input"]}
+    """The tested game starts with frame generation 2x; every other game with upscaling only."""
+    if e.get("kind") == "tested":
+        return {"upscaler": "xess", "fg": 2, "fg_input": e["fg_input"]}
+    return {"upscaler": "xess", "fg": 0, "fg_input": e.get("fg_input") or "upscaler"}
 
 
 def check_choices(e: dict | None, choices) -> tuple[dict | None, str | None]:
-    """The choices as stored ({upscaler, fg, fg_input}), or (None, why)."""
+    """The choices as stored ({upscaler, fg, fg_input}), or (None, why). Frame generation only for a DirectX 12
+    game, with one of its inputs; with it off any input is kept (it is used when frame generation is turned on)."""
     if e is None:
         return None, NO_SETUP
     if not isinstance(choices, dict):
@@ -234,9 +266,24 @@ def check_choices(e: dict | None, choices) -> tuple[dict | None, str | None]:
         return None, f"OptiScaler: unknown upscaler {str(up)[:20]!r}"
     if isinstance(fg, bool) or not isinstance(fg, int) or fg not in FG_MULTIPLIERS:
         return None, f"OptiScaler: frame generation must be 0, 2, 3 or 4, not {str(fg)[:10]!r}"
-    if inp not in e["fg_inputs"]:
+    if fg and e.get("api", "dx12") != "dx12":
+        return None, f"OptiScaler: frame generation needs DirectX 12; {e['name']} runs in " \
+                     f"{optigames.API_NAMES.get(e.get('api'), e.get('api'))}"
+    if inp not in (e["fg_inputs"] if fg else optigames.FG_INPUTS):
         return None, f"OptiScaler: unknown frame generation input {str(inp)[:20]!r}"
     return {"upscaler": up, "fg": fg, "fg_input": inp}, None
+
+
+def choices_why(ctx, appid, choices) -> str | None:
+    """main.py's check before a job starts: the choices against the game's setup (the table's, the record's or
+    the generic one), None when they are fine or the game is refused anyway (check() then says why)."""
+    try:
+        e, _why = resolve(ctx, appid)
+    except Exception:
+        log.exception("optiscaler: resolving %s", appid)
+        e = None
+    e = e or entry(appid) or _generic_base(str(appid), "This game")
+    return check_choices(e, choices)[1]
 
 
 # ---- the record (root's, in the settings folder) -------------------------------------------------------------------
@@ -325,61 +372,323 @@ def _install_root(ctx, folder: str) -> str | None:
     return None
 
 
-def exe_dir(ctx, appid) -> tuple[str | None, str | None]:
-    """(the resolved exe folder, None) or (None, why): the install folder + the entry's folder, each part a real
-    folder (not a link) matched without regard to case, holding the entry's exe as a regular file."""
+def game_name(ctx, appid) -> str | None:
+    """The game's name: its appmanifest's, else the table's, else None."""
+    appid = str(appid or "")
+    if not _APPID.match(appid):
+        return None
+    try:
+        for lib in steamlib.libraries(ctx):
+            acf = steamlib.read_vdf(os.path.join(lib, "steamapps", f"appmanifest_{appid}.acf"))
+            name = steamlib.vdf_get(acf, "AppState", "name") if acf else None
+            if isinstance(name, str) and name.strip():
+                return name.strip()[:120]
+    except Exception:
+        log.exception("optiscaler: the name of %s", appid)
     e = entry(appid)
-    if e is None:
-        return None, NO_SETUP
-    install = steamlib.app_install_dir(ctx, str(appid))
-    if not install:
-        return None, f"{e['name']} is not installed."
+    if e:
+        return e["name"]
+    if appid in optigames.ONLINE:
+        return optigames.ONLINE[appid]
+    if appid in optigames.NOT_OFFERED:
+        return optigames.NOT_OFFERED[appid][0]
+    return None
+
+
+def _name(ctx, appid: str) -> str:
+    e = GAMES.get(appid)
+    return e["name"] if e else game_name(ctx, appid) or "This game"
+
+
+def _real_dir(install: str, rel: str) -> str | None:
+    """install/rel resolved, each part a real folder (no link), matched without regard to case; else None."""
     cur = os.path.realpath(install)
-    missing = f"Can't find {e['exe']} in {e['folder']} of the game's folder."
-    for part in e["folder"].split("/"):
+    for part in _parts(rel):
         try:
             dfd = userexec.open_dir(cur)
         except OSError:
-            return None, missing
+            return None
         try:
             name = _ci_name(dfd, part)
             st = _lstat(dfd, name) if name else None
         finally:
             os.close(dfd)
         if st is None or not stat.S_ISDIR(st.st_mode):
-            return None, missing
+            return None
         cur = os.path.join(cur, name)
+    return cur
+
+
+def _parts(rel: str) -> list[str]:
+    return [p for p in rel.split("/") if p and p != "."] if rel else []
+
+
+def _has_exe(folder: str, exe: str) -> str | None:
+    """The exe's spelling in folder when it is a regular file there (any case), else None."""
     try:
-        dfd = userexec.open_dir(cur)
+        dfd = userexec.open_dir(folder)
     except OSError:
-        return None, missing
+        return None
     try:
-        name = _ci_name(dfd, e["exe"])
+        name = _ci_name(dfd, exe)
         st = _lstat(dfd, name) if name else None
     finally:
         os.close(dfd)
-    if st is None or not stat.S_ISREG(st.st_mode):
+    return name if st is not None and stat.S_ISREG(st.st_mode) else None
+
+
+def _tested_dir(ctx, appid: str, e: dict) -> tuple[str | None, str | None]:
+    """The tested setup's folder exactly: the install folder + the entry's folder, holding its exe."""
+    install = steamlib.app_install_dir(ctx, appid)
+    if not install:
+        return None, f"{e['name']} is not installed."
+    missing = f"Can't find {e['exe']} in {e['folder']} of the game's folder."
+    cur = _real_dir(install, e["folder"])
+    if cur is None or _has_exe(cur, e["exe"]) is None:
         return None, missing
     return cur, None
 
 
-def _anticheat(folder: str) -> str | None:
-    """The first anti-cheat file or folder SCAN_DEPTH levels under `folder` (links not followed), else None."""
+_LISTINGS: dict[str, tuple[float, str, dict]] = {}
+
+
+def _listing(install: str) -> dict:
+    """The install folder, optigames.MAX_DEPTH levels deep, no link followed: {files: [(rel, size)] (size only for
+    .exe files, which are regular files), dirs: {rel lower}, any_exe, truncated}. Kept LIST_TTL seconds."""
+    now = time.monotonic()
+    hit = _LISTINGS.get(install)
+    if hit and now - hit[0] < LIST_TTL and hit[1] == install:
+        return hit[2]
+    files: list[tuple[str, int]] = []
+    dirs: set[str] = set()
+    out = {"files": files, "dirs": dirs, "any_exe": False, "truncated": False}
+    base = install.rstrip("/")
+    n = 0
+    try:
+        for top, dnames, fnames, dfd in os.fwalk(install, follow_symlinks=False):
+            rel_top = "" if top == base else top[len(base) + 1:]
+            depth = len(_parts(rel_top))
+            for d in dnames:
+                dirs.add(f"{rel_top}/{d}".lower() if rel_top else d.lower())
+            for f in fnames:
+                size = 0
+                if f.lower().endswith(".exe"):
+                    st = _lstat(dfd, f)
+                    if st is None or not stat.S_ISREG(st.st_mode):
+                        continue
+                    size = st.st_size
+                    out["any_exe"] = True
+                files.append((f"{rel_top}/{f}" if rel_top else f, size))
+            n += len(dnames) + len(fnames)
+            if n > LIST_MAX:
+                out["truncated"] = True
+                dnames[:] = []
+            elif depth >= optigames.MAX_DEPTH - 1:
+                dnames[:] = []
+            else:
+                dnames[:] = [d for d in dnames if d.lower() not in ("optiscaler", MARK_DIR)]
+    except OSError:
+        out["truncated"] = True
+    if len(_LISTINGS) > 32:
+        _LISTINGS.clear()
+    _LISTINGS[install] = (now, install, out)
+    return out
+
+
+def forget_listing() -> None:
+    _LISTINGS.clear()
+
+
+def _generic_base(appid: str, name: str) -> dict:
+    return {"kind": "generic", "name": name, "exe": None, "folder": "", "api": "dx12", "proxies": None,
+            "build": DEFAULT_BUILD, "ini": {}, "fg_inputs": ("dlssg", "fsrfg", "xefg", "upscaler"),
+            "fg_input": "upscaler", "args": (), "notes": (), "sources": (), "pick": None, "how": None,
+            "api_why": None, "has_upscaler": None}
+
+
+def _known_base(appid: str, k: dict) -> dict:
+    return {"kind": "known", "name": k["name"], "exe": k["exes"][0] if k["exes"] else None, "folder": k["folder"],
+            "api": k["api"], "proxies": k["proxies"], "build": DEFAULT_BUILD, "ini": {},
+            "fg_inputs": k["fg_inputs"], "fg_input": k["fg_input"], "args": k["args"], "notes": k["notes"],
+            "sources": k["sources"], "pick": k["pick"], "how": "known", "api_why": "OptiScaler's wiki",
+            "has_upscaler": None, "fit": k["fit"], "conf": k["conf"]}
+
+
+EXPERIMENTAL = ("Experimental: OXP3 Deck chose this setup from the game's files; nobody has tested OptiScaler with "
+                "this game here. Remove puts everything back if it does not work.")
+NO_UPSCALER = "No DLSS, FSR 2+ or XeSS found; OptiScaler only works when the game offers one of them."
+
+
+def _api_note(api: str) -> str | None:
+    if api == "dx12":
+        return None
+    return (f"{optigames.API_NAMES[api]} game: OptiScaler replaces its upscaler only; its frame generation (XeSS "
+            "frame generation) needs DirectX 12.")
+
+
+def _with_api(e: dict, api: str, files: list | None, names: set[str] | None) -> dict:
+    e["api"] = api
+    if api != "dx12":
+        e["fg_inputs"] = ()
+        e["fg_input"] = "upscaler"
+    note = _api_note(api)
+    if note and note not in e["notes"]:
+        e["notes"] = (*e["notes"], note)
+    if names is not None:
+        e["has_upscaler"] = optigames.has_upscaler(names)
+    return e
+
+
+def resolve(ctx, appid, *, fresh: bool = False) -> tuple[dict | None, str | None]:
+    """(entry, None) or (None, why): the game's setup with its exe folder found. Installed (the record exists, and
+    not fresh): the record's folder, proxy and API. The tested game: its fixed folder. A known game: its exe where
+    the wiki puts it, else anywhere; not found: the generic setup. Any other game: the generic rules (optigames).
+    The entry gains dir (the resolved exe folder), proxy (None when every name is taken) and taken."""
+    appid = str(appid or "")
+    if not _APPID.match(appid):
+        return None, NO_SETUP
+    name = _name(ctx, appid)
+    g = None if fresh else _game_rec(ctx, appid)
+    tested = GAMES.get(appid)
+    known = optigames.KNOWN.get(appid)
+    if g is not None:
+        e = copy.deepcopy(tested) if tested else _known_base(appid, known) if known else _generic_base(appid, name)
+        e["build"] = tested["build"] if tested else DEFAULT_BUILD
+        kind = g.get("kind") if g.get("kind") in ("tested", "known", "generic") else e.get("kind", "tested")
+        if kind == "generic" and e.get("kind") == "known":
+            e = dict(_generic_base(appid, name), sources=e["sources"], notes=e["notes"], pick=e["pick"])
+        api = g.get("api") if g.get("api") in optigames.APIS else e.get("api", "dx12")
+        if not tested:
+            _with_api(e, api, None, None)
+        if kind == "generic" and EXPERIMENTAL not in e["notes"]:
+            e["notes"] = (EXPERIMENTAL, *e["notes"])
+        e.update(kind=kind, name=name, dir=g.get("folder"), proxy=g.get("proxy") or e.get("proxy"), taken=[])
+        if isinstance(g.get("exe"), str):
+            e["exe"] = g["exe"]
+        return e, None
+    if tested:
+        folder, why = _tested_dir(ctx, appid, tested)
+        if folder is None:
+            return None, why
+        e = copy.deepcopy(tested)
+        e.update(dir=folder, folder=tested["folder"])
+        e["proxy"], e["taken"] = optigames.pick_proxy(e["api"], _names(folder), e["proxies"])
+        return e, None
+    install = steamlib.app_install_dir(ctx, appid)
+    if not install:
+        return None, f"{name} is not installed."
+    install = os.path.realpath(install)
+    lst = _listing(install)
+    files = lst["files"]
+    if not lst["any_exe"]:
+        if lst["truncated"]:
+            return None, f"Can't find {name}'s exe: its folder is too big to search."
+        return None, f"{name} runs as a Linux game here; OptiScaler needs its Windows version (Proton)."
+    names = optigames.lib_names(files)
+    e = None
+    if known:
+        hit = optigames.find_named(files, known["exes"], known["folder"]) if known["exes"] else None
+        if hit:
+            e = _known_base(appid, known)
+            e.update(folder=hit[0], exe=hit[1])
+            _with_api(e, known["api"], files, names)
+    if e is None:
+        e = _generic_base(appid, name)
+        if known:
+            want = known["exes"][0] if known["exes"] else "its exe"
+            e.update(sources=known["sources"], pick=known["pick"],
+                     notes=(f"OptiScaler's wiki has a page for this game, but {want} was not found in its folder, "
+                            "so the generic setup is used.", *known["notes"]))
+        hit = optigames.pick_exe(files, lst["dirs"])
+        if hit is None:
+            return None, f"Can't tell which file is {name}'s exe, so OXP3 Deck does not install OptiScaler."
+        e.update(folder=hit[0], exe=hit[1], how=hit[2])
+    folder = _real_dir(install, e["folder"])
+    if folder is None or _has_exe(folder, e["exe"]) is None:
+        return None, f"Can't find {e['exe']} in the game's folder."
+    exe_path = os.path.join(folder, _has_exe(folder, e["exe"]))
+    imports = None
+    if e["kind"] == "generic":
+        imports, mentioned = _exe_dlls(exe_path)
+        if e["how"] == "unity":
+            # a Unity <Name>.exe is a stub: UnityPlayer.dll next to it holds the graphics imports
+            up = _has_exe(folder, "UnityPlayer.dll")
+            if up:
+                up_imports, up_mentioned = _exe_dlls(os.path.join(folder, up))
+                if up_imports is not None:
+                    imports = [*(imports or []), *(n for n in up_imports if n not in (imports or []))]
+                if up_mentioned is not None:
+                    mentioned = (mentioned or set()) | up_mentioned
+        api, why = optigames.decide_api(e["folder"], e["exe"], names, imports, mentioned)
+        if api is None:
+            if why in ("DirectX 9", "OpenGL"):
+                return None, f"{name} uses {why}; OptiScaler needs DirectX 11, DirectX 12 or Vulkan."
+            return None, (f"OXP3 Deck can't tell whether {name} uses DirectX 11, DirectX 12 or Vulkan, so it does "
+                          "not install OptiScaler.")
+        e["api_why"] = why
+        _with_api(e, api, files, names)
+        notes = [EXPERIMENTAL, *e["notes"]]
+        if not e["has_upscaler"]:
+            notes.append(NO_UPSCALER)
+        e["notes"] = tuple(notes)
+    e.update(dir=folder, name=name)
+    e["proxy"], e["taken"] = optigames.pick_proxy(e["api"], _names(folder), e["proxies"], imports)
+    return e, None
+
+
+_EXE_DLLS: dict[tuple, tuple] = {}
+
+
+def _exe_dlls(path: str) -> tuple[list[str] | None, set[bytes] | None]:
+    """The exe's imported DLLs, and (when none of them is a graphics API) the API DLL names it mentions; kept per
+    (path, size, mtime)."""
+    try:
+        st = os.stat(path, follow_symlinks=False)
+    except OSError:
+        return None, None
+    key = (path, st.st_size, st.st_mtime_ns)
+    if key not in _EXE_DLLS:
+        imports = pe.imports(path)
+        graphics = ("d3d12.dll", "d3d11.dll", "vulkan-1.dll")
+        mentioned = None if any(n in graphics for n in imports or ()) else pe.mentions(path, optigames.API_DLLS)
+        if len(_EXE_DLLS) > 64:
+            _EXE_DLLS.clear()
+        _EXE_DLLS[key] = (imports, mentioned)
+    return _EXE_DLLS[key]
+
+
+def exe_dir(ctx, appid) -> tuple[str | None, str | None]:
+    """(the resolved exe folder, None) or (None, why), found afresh (resolve(fresh=True))."""
+    e, why = resolve(ctx, appid, fresh=True)
+    return (e["dir"], None) if e else (None, why)
+
+
+def _anticheat(folder: str) -> tuple[str, str] | None:
+    """(the first anti-cheat file or folder SCAN_DEPTH levels under `folder`, which anti-cheat), links not
+    followed; else None."""
     seen = 0
     base = folder.rstrip("/")
     for top, dirs, files, _fd in os.fwalk(folder, follow_symlinks=False):
         depth = 0 if top == base else top[len(base) + 1:].count("/") + 1
         for d in dirs:
             if d.lower() in ANTICHEAT_DIRS:
-                return os.path.join(top, d)
+                return os.path.join(top, d), ANTICHEAT_DIRS[d.lower()]
         for f in files:
             low = f.lower()
-            if any(fnmatch.fnmatchcase(low, p) for p in ANTICHEAT_FILES):
-                return os.path.join(top, f)
+            for pat, what in ANTICHEAT_FILES.items():
+                if fnmatch.fnmatchcase(low, pat):
+                    return os.path.join(top, f), what
         seen += len(dirs) + len(files)
         if depth >= SCAN_DEPTH - 1 or seen > SCAN_MAX:
             dirs[:] = []
     return None
+
+
+def anticheat_why(name: str, install: str, found: tuple[str, str]) -> str:
+    rel = os.path.relpath(found[0], install)
+    tail = "/" if os.path.isdir(found[0]) else ""
+    return (f"{name} uses anti-cheat ({found[1]}: {rel}{tail} found). {GUIDE}: it can stop the game starting or get "
+            "the account banned.")
 
 
 def _names(folder: str) -> set[str]:
@@ -428,42 +737,64 @@ def _no_unpacker(ctx) -> str:
     return f"Needs 7z or bsdtar: {_unpacker_package(ctx)} is not installed."
 
 
+def _taken_why(e: dict) -> str:
+    taken = [f"{p}.dll" for p in e.get("taken") or []]
+    if len(taken) == 1:
+        return f"The game folder already has a {taken[0]} (another mod). Remove it first."
+    names = ", ".join(taken[:-1]) + f" and {taken[-1]}" if len(taken) > 1 else "every name OptiScaler can use"
+    return f"The game folder already has {names} (other mods); OptiScaler needs one of these names free."
+
+
 def check(ctx, appid, *, installing: bool) -> dict:
-    """The refusals of DESIGN.md "OptiScaler → Refusals", in order: {ok, error, why}. installing=False: for Remove,
-    Update and a choice change (the game must not run and the record must exist)."""
+    """The refusals of DESIGN.md "OptiScaler → Refusals" and "OptiScaler for any game", in order: {ok, error, why}.
+    installing=False: for Remove, Update and a choice change (the game must not run and the record must exist)."""
     def no(why: str) -> dict:
         return {"ok": False, "error": why, "why": why}
 
     appid = str(appid or "")
-    e = entry(appid)
-    if e is None or not _APPID.match(appid):
+    if not _APPID.match(appid):
         return no(NO_SETUP)
+    name = _name(ctx, appid)
     if steamlib.running_game(ctx) == appid:
-        return no(f"Quit {e['name']} first.")
+        return no(f"Quit {name} first.")
     g = _game_rec(ctx, appid)
     if not installing:
         if g is None:
-            return no(f"OXP3 Deck has not installed OptiScaler in {e['name']}.")
+            return no(f"OXP3 Deck has not installed OptiScaler in {name}.")
         return {"ok": True, "error": None, "why": None}
     if steamlib.steam_root(ctx) is None and steamlib.flatpak_steam(ctx):
         return no(FLATPAK)             # (before the folder: Flatpak Steam's libraries are not looked at)
-    folder, why = exe_dir(ctx, appid)
-    if folder is None:
-        return no(why)
-    root = _install_root(ctx, folder) or folder
-    if _anticheat(root):
-        return no(ANTICHEAT)
-    if g is not None and g.get("folder") != folder:
-        return no(f"OptiScaler was installed in {g.get('folder')}; remove it there first.")
+    if appid in optigames.ONLINE:
+        return no(f"{name} is an online game. {GUIDE}, so OXP3 Deck does not install it.")
+    if appid in optigames.NOT_OFFERED:
+        return no(f"OptiScaler's wiki documents {name} only with {optigames.NOT_OFFERED[appid][1]}, which OXP3 "
+                  "Deck does not set up.")
     if g is not None:
+        folder = g.get("folder")
+        install = steamlib.app_install_dir(ctx, appid)
+        if not isinstance(folder, str) or not install or not _under(folder, os.path.realpath(install)):
+            return no(f"OptiScaler was installed in {folder}; remove it there first.")
         if g.get("partial"):
             return no("OptiScaler is partly removed from this game: tap Remove or Update.")
-        return no(f"OptiScaler is already installed in {e['name']}.")
-    names = _names(folder)
+        return no(f"OptiScaler is already installed in {name}.")
+    install = steamlib.app_install_dir(ctx, appid)
+    if install and appid not in GAMES:
+        found = _anticheat(os.path.realpath(install))
+        if found:
+            return no(anticheat_why(name, os.path.realpath(install), found))
+    e, why = resolve(ctx, appid, fresh=True)
+    if e is None:
+        return no(why)
+    root = _install_root(ctx, e["dir"]) or e["dir"]
+    # the exe folder too: Unreal games keep BattlEye / EasyAntiCheat in <Game>/Binaries/Win64, below SCAN_DEPTH
+    found = _anticheat(e["dir"]) or (_anticheat(root) if appid in GAMES else None)
+    if found:
+        return no(anticheat_why(name, root, found))
+    names = _names(e["dir"])
     if _foreign(names) or MARK_DIR in names:
         return no(FOREIGN)
-    if f"{e['proxy']}.dll" in names:
-        return no(f"The game folder already has a {e['proxy']}.dll (another mod). Remove it first.")
+    if not e.get("proxy"):
+        return no(_taken_why(e))
     if not package_ok(ctx, e["build"]) and unpacker(ctx) is None:
         return no(_no_unpacker(ctx))
     return {"ok": True, "error": None, "why": None}
@@ -839,21 +1170,31 @@ def set_ini(text: str, changes: dict) -> str:
 
 def _ini_changes(e: dict, choices: dict, glob: dict, layout: str) -> dict:
     ch = {"Plugins_LoadAsiPlugins": "false", "Menu_UseHQFont": "false",
-          "Menu_ShowFps": "true" if glob.get("overlay") else "false"}
+          "Menu_ShowFps": "true" if glob.get("overlay") else "false",
+          # Intel: with the NVIDIA spoof libxess takes DP4a, and Arc shows artifacts (DESIGN.md); every game
+          "Spoofing_Dxgi": "false"}
     if layout == "subfolder":
         ch["Libraries_OptiDllPath"] = ".\\OptiScaler"
     ch.update(e.get("ini") or {})
-    api = e.get("api", "dx12")
-    ch["Upscalers_Dx11Upscaler" if api == "dx11" else "Upscalers_Dx12Upscaler"] = \
-        UPSCALER_INI["dx11" if api == "dx11" else "dx12"][choices["upscaler"]]
-    fg = choices["fg"]
+    api = e.get("api", "dx12") if e.get("api") in UPSCALER_KEY else "dx12"
+    ch[UPSCALER_KEY[api]] = UPSCALER_INI[api][choices["upscaler"]]
+    if e.get("kind") != "tested" and api in ("dx11", "dx12"):
+        # a found API may be wrong (Unreal delay-loads both d3d11 and d3d12): OptiScaler reads only the running
+        # API's key, so both get the choice
+        for other in ("dx11", "dx12"):
+            ch[UPSCALER_KEY[other]] = UPSCALER_INI[other][choices["upscaler"]]
+    fg = choices["fg"] if api == "dx12" else 0
     if fg:
+        opti_fg = choices["fg_input"] == "upscaler"
         ch.update({"FrameGen_Enabled": "true", "FrameGen_FGInput": choices["fg_input"], "FrameGen_FGOutput": "xefg",
                    "XeFG_InterpolationCount": str(fg - 1), "XeFG_ForceBorderless": "true",
-                   "OptiFG_HUDFix": "true" if choices["fg_input"] == "upscaler" else "auto"})
+                   "OptiFG_HUDFix": "true" if opti_fg else "auto",
+                   # OptiFG's auto blocks the Steam overlay and Steam Input: a handheld's controls need them
+                   "Hotfix_DisableOverlays": "false" if opti_fg else "auto"})
     else:
         ch.update({"FrameGen_Enabled": "false", "FrameGen_FGInput": "nofg", "FrameGen_FGOutput": "nofg",
-                   "XeFG_InterpolationCount": "auto", "XeFG_ForceBorderless": "auto", "OptiFG_HUDFix": "auto"})
+                   "XeFG_InterpolationCount": "auto", "XeFG_ForceBorderless": "auto", "OptiFG_HUDFix": "auto",
+                   "Hotfix_DisableOverlays": "auto"})
     return ch
 
 
@@ -864,7 +1205,7 @@ def ini_text(package_ini: str, e: dict, choices: dict, glob: dict, layout: str =
 
 def launch_plan(e: dict, choices: dict) -> dict:
     """What the frontend writes into the launch options (opti.ts applies it; the backend never writes them)."""
-    fg = choices["fg"]
+    fg = choices["fg"] if e.get("api", "dx12") == "dx12" else 0
     return {"set": {"XESS_FG": str(fg)} if fg else {},
             "remove": list(LAUNCH_REMOVE) + ([] if fg else ["XESS_FG"]),
             "dll_override": e["proxy"],
@@ -872,12 +1213,17 @@ def launch_plan(e: dict, choices: dict) -> dict:
             "args": list(e.get("args") or ())}
 
 
-def _next_text(choices: dict) -> str:
-    if choices["fg"] and choices["fg_input"] == "dlssg":
-        return "Start the game, pick DLSS and DLSS frame generation, then restart it once."
-    if choices["fg"] and choices["fg_input"] == "xefg":
-        return "Start the game, pick XeSS and XeSS frame generation, then restart it once."
-    return "Start the game, pick DLSS, then restart it once."
+def _next_text(choices: dict, e: dict | None = None) -> str:
+    if e is None or e.get("kind") == "tested":
+        if choices["fg"] and choices["fg_input"] == "dlssg":
+            return "Start the game, pick DLSS and DLSS frame generation, then restart it once."
+        if choices["fg"] and choices["fg_input"] == "xefg":
+            return "Start the game, pick XeSS and XeSS frame generation, then restart it once."
+        return "Start the game, pick DLSS, then restart it once."
+    pick = e.get("pick") or "DLSS, FSR or XeSS (whichever it has)"
+    fg = {"dlssg": " and DLSS frame generation", "fsrfg": " and FSR frame generation",
+          "xefg": " and XeSS frame generation"}.get(choices["fg_input"], "") if choices["fg"] else ""
+    return f"Start the game, pick {pick}{fg} in its graphics settings, then restart it once."
 
 
 # ---- install -------------------------------------------------------------------------------------------------------
@@ -1003,7 +1349,7 @@ def _put_in(ctx, job, appid: str, e: dict, choices: dict, folder: str, pkg_dir: 
     ini = ini_text(ini_src, e, choices, glob, layout)
     g = {"build": build_id, "folder": folder, "proxy": e["proxy"], "layout": layout, "choices": choices,
          "files": [], "dirs": [], "backups": [], "launch": launch_plan(e, choices), "installed_at": int(time.time()),
-         "partial": True}
+         "partial": True, "kind": e.get("kind", "tested"), "api": e.get("api", "dx12"), "exe": e.get("exe")}
     _put_game(ctx, appid, g)
     rel_folder = os.path.relpath(folder, root)
     _say(job, f"Copying {len(plan) + 1} files into {rel_folder} as {ctx.user}")
@@ -1032,22 +1378,26 @@ def _put_in(ctx, job, appid: str, e: dict, choices: dict, folder: str, pkg_dir: 
     _put_game(ctx, appid, g)
     _say(job, f"OptiScaler is in {rel_folder} as {e['proxy']}.dll")
     return _result(appid, build=build_id, folder=folder, copied=len(g["files"]),
-                   backed_up=[b["rel"] for b in g["backups"]], launch=g["launch"], next=_next_text(choices))
+                   backed_up=[b["rel"] for b in g["backups"]], launch=g["launch"], next=_next_text(choices, e))
 
 
 def install(ctx, settings, job, appid, choices) -> dict:
     """check, fetch, then put the files in (DESIGN.md "Install into the game"). OptiJobResult."""
     appid = str(appid or "")
-    e = entry(appid)
-    choices, why = check_choices(e, choices)
+    why = choices_why(ctx, appid, choices)
     if why:
         return _result(appid, ok=False, error=why)
     c = check(ctx, appid, installing=True)
     if not c["ok"]:
         return _result(appid, ok=False, error=c["error"])
-    folder, why = exe_dir(ctx, appid)
-    if folder is None or not _in_library(ctx, folder):
+    e, why = resolve(ctx, appid, fresh=True)
+    folder = e["dir"] if e else None
+    if e is None or not _in_library(ctx, folder):
         return _result(appid, ok=False, error=why or f"{folder} is not inside a Steam library")
+    choices, why = check_choices(e, choices)
+    if why:
+        return _result(appid, ok=False, error=why)
+    _say(job, _setup_line(e))
     got = fetch(ctx, job, e["build"])
     if not got["ok"]:
         return _result(appid, ok=False, error=got["error"])
@@ -1064,8 +1414,18 @@ def install(ctx, settings, job, appid, choices) -> dict:
             "some files are left in the game folder: see Details"
         return _result(appid, ok=False, error=f"OptiScaler install: {why}; {tail}", folder=folder,
                        kept=undo["kept"], removed=undo["removed"])
+    forget_listing()
     prune_cache(ctx)
     return res
+
+
+def _setup_line(e: dict) -> str:
+    kind = {"tested": "the tested setup", "known": "the setup OptiScaler's wiki documents",
+            "generic": "the generic setup (experimental)"}.get(e.get("kind"), "the generic setup")
+    api = optigames.API_NAMES.get(e.get("api"), e.get("api"))
+    why = f" ({e['api_why']})" if e.get("api_why") and e.get("kind") == "generic" else ""
+    return f"{e['name']}: {kind}; {e.get('exe')} in {e.get('folder') or 'the game folder'}, {api}{why}, " \
+           f"as {e.get('proxy')}.dll"
 
 
 # ---- remove --------------------------------------------------------------------------------------------------------
@@ -1225,6 +1585,7 @@ def remove(ctx, settings, job, appid) -> dict:
     except (OSError, OptiError) as ex:
         return _result(appid, ok=False, error=f"OptiScaler remove: {ex}")
     prune_cache(ctx)
+    forget_listing()
     if not r["ok"]:
         return _result(appid, ok=False, error=r["error"], launch=r["launch"], folder=r["folder"])
     if r["kept"]:
@@ -1239,7 +1600,7 @@ def update(ctx, settings, job, appid) -> dict:
     """remove, then install with the recorded choices, in one job; stops after a failed or partial remove."""
     appid = str(appid or "")
     g = _game_rec(ctx, appid)
-    e = entry(appid)
+    e = resolve(ctx, appid)[0] if g is not None else None
     if g is None or e is None:
         return _result(appid, ok=False, error=check(ctx, appid, installing=False)["error"] or NO_SETUP)
     choices, why = check_choices(e, g.get("choices"))
@@ -1289,8 +1650,11 @@ def set_choices(ctx, appid, choices, settings=None) -> dict:
     """Rewrites only OptiScaler.ini and the record; not a job. OptiInfoRes with the new launch plan (launch) and
     the one before (launch_before)."""
     appid = str(appid or "")
-    e = entry(appid)
-    choices, why = check_choices(e, choices)
+    c = check(ctx, appid, installing=False)
+    if not c["ok"]:
+        return {"ok": False, "error": c["error"], "opti": None}
+    e, why = resolve(ctx, appid)
+    choices, why = check_choices(e, choices) if e else (None, why)
     if why:
         return {"ok": False, "error": why, "opti": None}
     c = check(ctx, appid, installing=False)
@@ -1326,7 +1690,7 @@ def options(ctx, opts) -> dict:
         rec["global"]["overlay"] = opts["overlay"]
         _save(ctx, rec)
         for appid, g in rec["games"].items():
-            e = entry(appid)
+            e = resolve(ctx, appid)[0] if not g.get("partial") else None
             if e is None or g.get("partial"):
                 continue
             if appid == running:
@@ -1362,30 +1726,45 @@ def _game_warnings(ctx, settings, appid: str) -> list[str]:
 
 
 def info(ctx, appid, settings=None) -> dict:
-    """{ok, error, opti: OptiInfo} (DESIGN.md "types.ts and api.ts")."""
+    """{ok, error, opti: OptiInfo} (DESIGN.md "types.ts and api.ts", "OptiScaler for any game")."""
     appid = str(appid or "")
     if not _APPID.match(appid):
         return {"ok": False, "error": "OptiScaler: not a Steam game", "opti": None}
-    e = entry(appid)
     with _LOCK:
         rec = _load(ctx)
     g = rec["games"].get(appid)
+    e, rwhy = resolve(ctx, appid)
     unp = unpacker(ctx)
+    t = entry(appid)
     out = {"appid": appid, "supported": e is not None, "why": None, "state": "none", "build": None,
            "build_wanted": e["build"] if e else None, "update": False, "folder": None, "choices": None,
            "defaults": defaults(e) if e else None, "fg_inputs": list(e["fg_inputs"]) if e else [],
            "launch": None, "launch_new": None, "cached": False, "download_mb": None,
            "unpacker": unp[0] if unp else None, "notes": list(e["notes"]) if e else [], "warnings": [], "kept": [],
            "overlay": rec["global"]["overlay"], "version": None, "backed_up": [],
-           "sources": list(e["sources"]) if e else []}
-    if e is None:
-        out["why"] = NO_SETUP
+           "sources": list(e["sources"]) if e else list(t["sources"]) if t else [],
+           "kind": e.get("kind") if e else (t.get("kind") if t else "generic"),
+           "name": e["name"] if e else _name(ctx, appid), "api": e.get("api") if e else None,
+           "api_why": e.get("api_why") if e else None, "exe": e.get("exe") if e else None,
+           "proxy": e.get("proxy") if e else None, "pick": e.get("pick") if e else None,
+           "fg_ok": bool(e) and e.get("api", "dx12") == "dx12",
+           "upscaler_found": e.get("has_upscaler") if e else None,
+           "fit": e.get("fit") if e else None}
+    if e is None and g is None:
+        out["why"] = check(ctx, appid, installing=True)["why"] or rwhy
+        return {"ok": True, "error": None, "opti": out}
+    if e is None:                      # a record, but its entry cannot be built: Remove still works
+        out["state"] = "partial" if g.get("partial") else "installed"
+        out["folder"] = g.get("folder")
+        out["launch"] = g.get("launch")
+        out["why"] = check(ctx, appid, installing=False)["why"]
         return {"ok": True, "error": None, "opti": out}
     b = BUILDS[e["build"]]
     out["cached"] = package_ok(ctx, e["build"])
     out["download_mb"] = b["size_mb"]
     out["version"] = b["version"]
-    out["launch_new"] = launch_plan(e, defaults(e))
+    if e.get("proxy"):
+        out["launch_new"] = launch_plan(e, defaults(e))
     if g is not None:
         out["state"] = "partial" if g.get("partial") else "installed"
         out["build"] = g.get("build")
@@ -1399,7 +1778,7 @@ def info(ctx, appid, settings=None) -> dict:
                             isinstance(b.get("rel"), str)]
         out["why"] = check(ctx, appid, installing=False)["why"]
     else:
-        folder, _why = exe_dir(ctx, appid)
+        folder = e["dir"]
         out["folder"] = folder
         if folder and (_foreign(_names(folder)) or MARK_DIR in _names(folder)):
             out["state"] = "other"

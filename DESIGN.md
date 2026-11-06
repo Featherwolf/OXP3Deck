@@ -70,7 +70,8 @@ py_modules/oxp3deck/
   xess.py              xess-xmx-linux: state, install/update, uninstall, driver switch, system Protons
   steamlib.py          Steam libraries, app install folders, compat tool of an app, prefixes
   games.py             per-game info: XeSS DLL versions in the game folder, last-run shim logs, advice
-  pe.py                a DLL's file version (VS_FIXEDFILEINFO, the rule tools/proton-hook.py uses)
+  pe.py                a DLL's file version (VS_FIXEDFILEINFO, the rule tools/proton-hook.py uses); an exe's
+                       imported DLLs and the API DLL names it mentions (0.5.1, optiscaler.py)
   powerhw.py           power sysfs only: RAPL (MSR and MMIO), the xe GPU clock range and power profile, EPP (per core
                        type too), turbo, intel_pstate's speed cap and floor, per-core-type caps, the SoC slider, AC,
                        suspend count
@@ -82,7 +83,9 @@ py_modules/oxp3deck/
                        mode (org.scx.Loader), intel_lpmd off during games; extras.json, extras-run.json (0.4)
   optiscaler.py        OptiScaler per game: pinned download, unpack as the user, install into the game's exe folder
                        with backups, OptiScaler.ini, remove that restores exactly, update; optiscaler.json (0.5,
-                       "OptiScaler")
+                       "OptiScaler"); any game through resolve() (0.5.1, "OptiScaler for any game")
+  optigames.py         OptiScaler's known-games table (from its wiki), the games not offered, and the pure rules that
+                       find a game's exe, API and a free proxy name (0.5.1)
 src/                   frontend (TypeScript, @decky/ui)
   api.ts               one `callable` per backend method; backend.ts wraps each so it never rejects
   types.ts             the answers below, as TypeScript types
@@ -2670,12 +2673,12 @@ launch options as for Remove. `prune_cache` runs at the end of install, remove a
 |---|---|
 | the game runs (`steamlib.running_game(ctx) == appid`, and the frontend's `RunningApps`) | "Quit <name> first." |
 | any other job runs | "another task is running" (jobs.py) |
-| not in `GAMES` | "OXP3 Deck has no tested OptiScaler setup for this game yet." |
+| not in `GAMES` | (0.5: "OXP3 Deck has no tested OptiScaler setup for this game yet."; 0.5.1: the known or generic setup, see "OptiScaler for any game") |
 | `exe_dir` is None | "Can't find <exe> in <folder> of the game's folder." (e.g. a DX11-only copy, an old version) |
-| anti-cheat files anywhere 3 levels under the install folder: `EasyAntiCheat/`, `BattlEye/`, `EAAntiCheat*`, `start_protected_game.exe`, `*_BE.exe`, `mhypbase.dll`, `vgk.sys` | "This game has anti-cheat; OptiScaler could get the account banned." (always, even for a table game) |
+| anti-cheat files anywhere 3 levels under the install folder: `EasyAntiCheat/`, `BattlEye/`, `EAAntiCheat*`, `start_protected_game.exe`, `*_BE.exe`, `mhypbase.dll`, `vgk.sys` (0.5.1: more, below) | 0.5.1: "<Game> uses anti-cheat (<which>: <file> found). OptiScaler's guide says not to use it with online games: it can stop the game starting or get the account banned." (always, even for a table game) |
 | Flatpak Steam | "Not supported with Flatpak Steam." |
 | another OptiScaler in the exe folder: `OptiScaler.ini`, `OptiScaler.log`, `OptiScaler.dll`, `OptiScaler/`, `nvngx.ini`, Decky Framegen's `fgmod` marker or `<proxy>.dll.b`, without our record and `state.json` | "Another OptiScaler install is in this game. Remove it with the tool that added it." |
-| `<proxy>.dll` exists and is not ours | "The game folder already has a dxgi.dll (another mod). Remove it first." |
+| `<proxy>.dll` exists and is not ours | "The game folder already has a dxgi.dll (another mod). Remove it first." (0.5.1: only when the setup has one name; otherwise the next free name is taken, below) |
 | no unpacker | "Needs 7z or bsdtar: <package> is not installed." |
 | the record says installed in another folder (the game moved library) | "OptiScaler was installed in <old>; remove it there first." (remove works on the recorded folder) |
 
@@ -2838,7 +2841,8 @@ row with reason `rejected`. A choice change: `opti_set` → re-apply the differe
   2026-11-05, and its games.json is GPL-3.0: neither is copied)"; xess-xmx-linux: its OptiScaler recipe
   (docs/games.md: Dxgi spoofing off, `dxgi=n,b`) and `force_vk_vendor=0` (debugging.md); ETA Prime's video as the
   route's source; Decky Framegen named as the tool whose installs are detected.
-- **README.md**: an "OptiScaler (The Witcher 3)" part: what it does, the checklist, Remove before uninstalling the
+- **README.md**: an "OptiScaler (The Witcher 3)" part (0.5.1: "OptiScaler (any game; tested setup for The Witcher
+  3)"): what it does, the checklist, Remove before uninstalling the
   plugin, "OptiScaler is not part of OXP3 Deck: it is downloaded from its GitHub release when you tap Install."
 
 ### Tests
@@ -2882,3 +2886,147 @@ On the device (owner): install for The Witcher 3; game on DLSS + DLSS frame gene
 OptiScaler's menu shows XeSS and XeFG; fps at 2x against the ~50 fps now; `igdext_xefg.log` (Save XeSS logs) no longer
 says -15; then 3x with the vendor setting; then "XeSS frame generation" as the input; Remove and compare the folder
 and launch options with before.
+
+## OptiScaler for any game (0.5.1)
+
+Owner question: "is optiscaler only implemented for witcher? not all games?" Until 0.5 only The Witcher 3 (292030)
+had a setup. Now every Steam game's row has the OptiScaler part, with one of three setups (`OptiInfo.kind`):
+
+| kind | Which games | Where its facts come from | Defaults |
+|---|---|---|---|
+| `tested` | The Witcher 3 (`optiscaler.GAMES`, unchanged) | the section above | XeSS, XeFG 2x, input DLSSG |
+| `known` | 42 games OptiScaler's wiki documents (`optigames.KNOWN`; 5 of them marked `fit: "poor"`) | the game's wiki page (named in the entry's `sources`) and GameConfigs.cpp | XeSS, frame generation off, the wiki's first FG input |
+| `generic` | any other game: **experimental** | the game's own files (below) | XeSS, frame generation off, input OptiFG (`upscaler`) |
+
+**Why the table is small.** OptiScaler v10 sets most per-game `OptiScaler.ini` defaults itself, keyed by lower-case
+exe name or Unreal project name (`OptiScaler/misc/GameConfigs.cpp`, about 150 exes; only while the ini key is
+`auto`; the pinned nightly has the same table as master `d6b0245`). So `KNOWN` holds install-level facts only: exe
+name(s), folder hint, API, the proxy names the wiki names (in its order), what to pick in the game, the documented
+FG inputs, launch arguments where the wiki asks for them (Hellblade: `-dx12`), notes written for OXP3
+Deck, sources and a confidence mark (`conf`: H checked, M from memory: a wrong appid or folder only means the game
+falls through to the generic setup). It repeats no ini key GameConfigs sets.
+
+**Licences.** The wiki (`288adff`) has no licence file: facts only, with the page as citation, no text copied.
+GameConfigs.cpp is GPL-3.0: facts only (which exes it covers), no code. Nothing from ClawDeck after `07918cc` and
+nothing from its `assets/games.json`.
+
+### Finding the setup (`optiscaler.resolve(ctx, appid, fresh=False)`)
+
+- **Installed** (a record, not `fresh`): the record's `folder`, `proxy`, `api`, `exe` and `kind` (0.5 records have
+  none of the last four: the tested entry's). A choice change, Update and Remove never look at the folder again, so
+  OptiScaler's own `dxgi.dll` there never makes another name look free.
+- **Tested**: as in 0.5 (`_tested_dir`: the fixed folder, its exe, case-insensitive, no links).
+- **The listing** (`_listing`, kept 30 s): `os.fwalk` of `steamapps/common/<game>`, no link followed, 6 levels, at
+  most 40000 entries, `OptiScaler/` and `.oxp3deck-optiscaler/` not entered; only `.exe` files are `lstat`ed (size,
+  regular file).
+- **No `.exe` at all**: "<Game> runs as a Linux game here; OptiScaler needs its Windows version (Proton)."
+- **Known**: `optigames.find_named` (the exe in the hinted folder, else the shallowest copy outside skipped folders).
+  Not found: the generic setup, with the note that the wiki's exe was not found and the wiki's notes and pick kept.
+- **Generic exe** (`optigames.pick_exe`, from the listing): skip folders `_CommonRedist`, `__Installer`, `Redist`,
+  `DirectX`, `Support`, `Engine`, `OptiScaler`, …; skip names matching `SKIP_EXE` (uninstallers, crash reporters,
+  set-ups, launchers, anti-cheat, CEF, helpers, prerequisites; the idea of ClawDeck's MAIN_EXE_SKIP and OptiScaler's
+  Config.h ProcessExclusionList, written here; also editors, servers, tools, benchmarks and config/settings apps).
+  Then, in order: Unreal `…/Binaries/Win64|WinGDK/*-Win64|WinGDK-Shipping.exe`
+  (Win64 first), any exe in `<X>/Binaries/Win64`, Unity `<Name>.exe` next to `<Name>_Data/`, else, among the exes at
+  least a quarter the size of the largest, the shallowest, then the largest (a larger tool deeper down is not the
+  game; a tiny root stub that starts the real exe is left out) (exes of the same name: a `*dx12*` folder, then `x64`/`Win64`, first: Witcher's `bin/x64_dx12` over `bin/x64`).
+  None: "Can't tell which file is <Game>'s exe, so OXP3 Deck does not install OptiScaler."
+- **Generic API** (`optigames.decide_api`), first hit wins: the exe's name (`*_dx11`, `*dx12*`, `*vk`), its folder
+  (`*dx12*`); `d3d12.dll` in the exe's import or delay-import table (`pe.imports`, headers and tables only, by
+  `pread`); a DirectX 12 library anywhere in the game (`D3D12Core.dll`, `amd_fidelityfx_dx12.dll`,
+  `ffx_fsr2_api_dx12_x64.dll`, `sl.interposer.dll`, `libxess_fg.dll`, …); `vulkan-1.dll` imported or a Vulkan
+  FidelityFX library, without `d3d11.dll` imported; then the same names found in the exe's first 32 MB
+  (`pe.mentions`, only when the import tables name no graphics DLL); `d3d11.dll` or a DirectX 11 library. DirectX 9
+  or OpenGL only: "<Game> uses DirectX 9; OptiScaler needs DirectX 11, DirectX 12 or Vulkan." Nothing: "OXP3 Deck
+  can't tell whether <Game> uses DirectX 11, DirectX 12 or Vulkan, so it does not install OptiScaler." A hit means
+  the game can use that API: an Unreal game may run DirectX 11 although it ships DirectX 12 (the notes say to start
+  it in DirectX 12 if it lets you choose). Not used: Steam's binary `appinfo.vdf` launch entries (steamlib reads
+  text VDF only), the Unreal `GameUserSettings.ini` RHI, `/proc/<pid>/maps` at run time.
+- **Unity**: the `<Name>.exe` is a stub that imports `UnityPlayer.dll`; the player's imports (and mentions) next to
+  it are added to the exe's before `decide_api`, so a Unity game on DirectX 11 is found as DirectX 11.
+- **Upscaler hint**: no `nvngx_dlss.dll`, `sl.interposer.dll`, `libxess*.dll`, `amd_fidelityfx_*.dll` or
+  `ffx_fsr2/3*.dll` in the listing: a note, not a refusal (FSR 2 is often linked in): "No DLSS, FSR 2+ or XeSS
+  found; OptiScaler only works when the game offers one of them."
+- **Proxy name** (`optigames.pick_proxy`): the table's names, else by API — DirectX 12 `dxgi, winmm, version,
+  dbghelp, d3d12`; DirectX 11 the same without `d3d12`; Vulkan `winmm, dbghelp, version` (a Vulkan game may never
+  load dxgi.dll; only a table entry whose wiki page names it may: No Man's Sky `dbghelp`, then `dxgi`). The first name the exe folder does not have (case-insensitive); for a generic game the first free
+  name the exe imports is preferred. `OptiScaler.asi` is never used (it needs Ultimate ASI Loader), `wininet` /
+  `winhttp` only from the table. **An existing file is never overwritten**: a taken name is skipped, and with every
+  name taken the install is refused: "The game folder already has dxgi.dll, winmm.dll, version.dll and dbghelp.dll
+  (other mods); OptiScaler needs one of these names free." (The tested setup has only `dxgi`, so its 0.5 refusal
+  stays.) `WINEDLLOVERRIDES` gains `<name>=n,b` (wiki Manual Installation; `setup_linux.sh`).
+
+### Refusals added (`check`, before anything is written or downloaded)
+
+In this order after "Quit <game> first." and Flatpak:
+
+| When | Error |
+|---|---|
+| appid in `optigames.ONLINE` (CS2 730, Dota 2 570, TF2 440, Deadlock 1422450, Path of Exile 2 2694490 and 238960, GTA V Enhanced 3240220 and Legacy 271590, Diablo IV 2344520, Call of Duty 1938090, Overwatch 2 2357570, Marvel Rivals 2767030, Warframe 230410; server-side anti-cheat leaves no files; several appids from memory, check on SteamDB) | "<Game> is an online game. OptiScaler's guide says not to use it with online games, so OXP3 Deck does not install it." |
+| appid in `optigames.NOT_OFFERED` (the wiki's only setup needs another mod: DOOM Eternal OptiPatcher, Indiana Jones Ultimate ASI Loader, Enshrouded a Vulkan low-latency proxy, the RE Engine games REFramework, Persona 3 Reload and Metaphor other mods, FF7 Remake Luma, ELDEN RING the ERSS-FG mod; and the games whose only working input is DLSS, which on Intel shows only with OptiPatcher or the GPU spoof OXP3 Deck keeps off: Palworld 1623730, Ghostrunner 1139900, Avowed 2457220, STAR WARS Jedi: Survivor 1774580) | "OptiScaler's wiki documents <Game> only with <mod>, which OXP3 Deck does not set up." |
+| anti-cheat (table and generic games: before the exe search, on the install folder, `SCAN_DEPTH` 3 levels; then, for every game, on the resolved exe folder, so `<Game>/Binaries/Win64/BattlEye/` or `EasyAntiCheat/` there is found; markers `optigames.ANTICHEAT_DIRS/FILES`: EasyAntiCheat, BattlEye incl. `BEClient*.dll`/`BEService*.exe`, EA AntiCheat, ACE `ace-setup64.exe`/`ace-service64.exe` and `AntiCheatExpert/`, HoYo `mhypbase.dll`/`HoYoKProtect.sys`, GameGuard/, XIGNCODE/ and `x3.xem`, `pbsvc.exe`, `vgk.sys`; the newer ones unverified, a false hit only refuses) | "<Game> uses anti-cheat (<which>: <file> found). OptiScaler's guide says not to use it with online games: it can stop the game starting or get the account banned." |
+| the game not installed | "<Game> is not installed." |
+| native Linux, no exe, unknown API, DirectX 9/OpenGL, every proxy name taken | as above |
+
+The Proton EasyAntiCheat / BattlEye runtimes (appids 1826330, 1161040) are installed globally and say nothing about
+one game, so they are not checked.
+
+### OptiScaler.ini and the launch plan
+
+- `Spoofing_Dxgi=false` for **every** game (was the Witcher entry's key): upstream `auto` spoofs an NVIDIA GPU on
+  Intel, and then libxess takes DP4a instead of XMX (xess-xmx-linux docs/games.md) and Arc can show rainbow
+  artifacts (wiki Known Issues). `Spoofing_StreamlineSpoofing` stays `auto`, so Streamline games still offer DLSS /
+  DLSSG; in other games DLSS can be hidden (the checklist's help says to pick FSR or XeSS).
+- `Hotfix_DisableOverlays=false` while frame generation is on with input `upscaler` (OptiFG), else `auto`:
+  upstream's auto blocks the Steam overlay and Steam Input for OptiFG (OptiScaler.ini [Hotfix]), which a handheld
+  needs. Not measured.
+- The upscaler key by API: `Upscalers_Dx12Upscaler` (`xess` / `ffx`), `Upscalers_Dx11Upscaler` (`xess` / `fsr31`),
+  `Upscalers_VulkanUpscaler` (`xess` / `ffx`, native FidelityFX 2.3/3.1). A known or generic DirectX 11 or 12 setup
+  gets both the Dx11 and the Dx12 key: the found API can be wrong (Unreal delay-loads `d3d11.dll` and `d3d12.dll`,
+  and may run DirectX 11), and OptiScaler reads only the running API's key. The tested setup keeps its one key.
+- Frame generation only for DirectX 12 (DirectX 11 has none in OptiScaler; Vulkan has no XeFG): `check_choices`
+  refuses `fg` > 0 otherwise ("OptiScaler: frame generation needs DirectX 12; <Game> runs in Vulkan"), and the
+  plan never sets `XESS_FG`. With frame generation off any of the four inputs is accepted (kept for later); on, it
+  must be one of the setup's `fg_inputs` (known: the wiki's plus OptiFG; generic DirectX 12: `dlssg`, `fsrfg`,
+  `xefg`, `upscaler`). `fsrfg` is new (OptiScaler's FSR frame-generation input; Lies of P, The Last of Us Part I).
+- Not set: `ProcessFilter_TargetProcessName` (INI_VAL refuses exe names; a launcher next to the exe is a later
+  step), `dxvk.conf` spoofing (Wukong on Linux), `d3dcompiler_47` for RCAS shaders on Linux.
+
+### Record, main.py and the frontend
+
+- The record gains `kind`, `api` and `exe`. `game_info.opti_entry` is `optiscaler.offered(appid)`: true for every
+  Steam game (the row shows the refusal when there is one). main.py's job title uses `optiscaler.game_name` (the
+  appmanifest's name) and the pre-job check `optiscaler.choices_why(ctx, appid, choices)`.
+- `OptiInfo` gains `kind`, `name`, `api`, `api_why`, `exe`, `proxy`, `pick`, `fg_ok`, `upscaler_found`, `fit`; an
+  older backend's answer reads as the tested setup (`opti.setupOf`).
+- OptiControls: the Install row's line is `opti.installLine(info)` ("Runs XeSS and XeSS frame generation in place of
+  the game's DLSS." / "OptiScaler's wiki documents this game. Untested on this device." / "Experimental: replaces
+  the game's DLSS, FSR or XeSS. Untested here."), with its `game.opti` tag as before; the status line says "Not
+  installed · experimental" for a generic game; Details name the setup, exe, API (and what showed it) and file name.
+  Frame generation is greyed with Off only ("Needs a DirectX 12 game.") and "Game setting it replaces" is hidden
+  when `fg_ok` is false. The checklist, its help, the toast and the install dialog take `setupOf(info)`: generic
+  steps say "Upscaling: DLSS, FSR or XeSS, whichever the game offers", known steps use the wiki's pick. The dialog
+  for a known or generic game says which name it goes in as and that no file is replaced, plus the experimental
+  paragraph.
+
+### Tests
+
+- `tests/test_optiscaler.py` `AnyGameTest` (fake game folders with minimal PE images, `make_pe`): an Unreal layout
+  (root stub, `Engine/` crash reporter and D3D12Core, the `-Shipping` exe importing `d3d12.dll`) installs as `dxgi`
+  in `Fake/Binaries/Win64` and Remove leaves the tree exactly as before; a plain layout (`bin/game.exe` importing
+  `d3d11.dll`, an uninstaller, a launcher, `_CommonRedist/`) is DirectX 11, refuses frame generation and writes
+  `Dx11Upscaler`; an existing `dxgi.dll` and `WINMM.dll` give `version`, both untouched, and every name taken is a
+  refusal with nothing written; an `EasyAntiCheat/` folder is refused by name; a Vulkan-only game gets `winmm` and
+  `VulkanUpscaler`, no frame generation; native Linux, DirectX 9, an unreadable exe, helpers only, an online appid
+  and a not-offered appid are refused; Cyberpunk 2077 as a known game (`bin/x64`, not the root's `REDprelauncher.exe`;
+  `wininet` when `dxgi.dll` is taken); a known game whose exe moved falls back to generic; a Unity stub whose `UnityPlayer.dll` imports `d3d11.dll` (DirectX 11, no mock) and
+  one that names `d3d12.dll` (DirectX 12); BattlEye and EasyAntiCheat in `<Game>/Binaries/Win64` refused; an Unreal
+  exe delay-loading both APIs gets both upscaler keys; ELDEN RING, Palworld and Warframe refusal texts.
+- `OptigamesTest`: `pick_exe` (Witcher's `bin/x64_dx12` in any order, Hogwarts' `Phoenix/Binaries/Win64`, a
+  larger `tools/ModEditor.exe` / server / benchmark / config exe never over the game, a tiny root stub left out), `decide_api`,
+  `pick_proxy` (never `d3d12` for DirectX 11; No Man's Sky `dbghelp` first), `pe.imports` / `pe.mentions`, and the table's shape.
+- `tests/js/opti.test.mjs`: `setupOf`, the generic and known checklist lines (≤ 80 characters), no frame-generation
+  text for a Vulkan game, the install lines, the dialog's name and API lines, and the wiring in OptiControls.
+
+On the device (owner), not done: a generic DirectX 12 Unreal game with DLSS, a known game (Cyberpunk 2077), a
+Vulkan game (No Man's Sky), and whether XeSS on Vulkan reaches the XMX cores through xess-xmx-linux.

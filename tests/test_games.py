@@ -351,7 +351,7 @@ class SuggestTest(GameBase):
     def test_optiscaler_fields_for_another_game(self):
         self.w.app("1091500", "Cyberpunk 2077")
         g = self.info("1091500")
-        self.assertEqual((g["opti_entry"], g["opti_installed"]), (False, False))
+        self.assertEqual((g["opti_entry"], g["opti_installed"]), (True, False))      # every game's row has it
 
     def test_fsr_only_needs_20261104(self):
         self.hooked()

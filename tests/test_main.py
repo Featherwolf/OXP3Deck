@@ -253,7 +253,8 @@ class JobsTest(Base):
             go.wait(10)
             return {"ok": True, "error": None}
         why = {"value": None}
-        self.fake("optiscaler", entry=real.entry, check_choices=real.check_choices,
+        self.fake("optiscaler", entry=real.entry, check_choices=real.check_choices, choices_why=real.choices_why,
+                  game_name=real.game_name,
                   check=lambda ctx, appid, installing: {"ok": why["value"] is None, "error": why["value"],
                                                         "why": why["value"]},
                   install=install, set_choices=lambda ctx, appid, choices, settings: {"ok": True, "opti": None},

@@ -9,9 +9,9 @@ import { blockedBy, started, useAction } from "../actions";
 import { get_setting, opti_info, opti_install, opti_options, opti_remove, opti_set, opti_update, set_setting } from "../backend";
 import { EFFECTS } from "../effects";
 import {
-  CHECKLIST_HELP, checklist, checklistLine, choiceLabels, confirmInstall, confirmRemove, DEFAULT_CHOICES, FGS, fitLog, INPUTS,
-  LOG_KEY, OptiConfirm, OptiLog, OptiLogEntry, pendingEntry, planLines, readChoices, readLog, readyToast, statusLine,
-  syncPlan, UPSCALERS, warningRows,
+  API_LABELS, checklist, checklistHelp, checklistLine, choiceLabels, confirmInstall, confirmRemove, DEFAULT_CHOICES, FGS, fgPossible,
+  fitLog, INPUTS, installLine, LOG_KEY, OptiConfirm, OptiLog, OptiLogEntry, pendingEntry, planLines, readChoices, readLog, readyToast,
+  setupOf, statusLine, syncPlan, upscalerIni, UPSCALERS, warningRows,
 } from "../opti";
 import { getLaunchOptions, isRunning, isSteamApp, RunningApp, setLaunchOptions } from "../steam";
 import { afterJob, notePending, put, useCurrentJob, useResource } from "../store";
@@ -113,7 +113,11 @@ export const OptiRows: FC<{ app: RunningApp; quick?: boolean; running: boolean; 
   const quit = running ? `Quit ${app.name} first.` : null;
   const why = quit ?? (optiJob ? "Wait until the OptiScaler task has finished." : null);
   const choices = installed ? readChoices(info?.choices) ?? pick : pick;
+  const setup = setupOf(info);
+  const fgOk = fgPossible(setup) && info?.fg_ok !== false;
   const inputs = INPUTS.filter((i) => !info?.fg_inputs?.length || info.fg_inputs.includes(i.data));
+  const fgs = fgOk ? FGS : FGS.filter((f) => f.data === 0);
+  const proxy = info?.proxy ?? "dxgi";
 
   /** After a job or a choice change: the launch options to the new plan; a pending row while the game runs. */
   const syncLaunch = async (want: LaunchPlan | null, id: string, what: string, okToast?: string) => {
@@ -153,7 +157,7 @@ export const OptiRows: FC<{ app: RunningApp; quick?: boolean; running: boolean; 
       if (kind === "remove") syncLaunch(null, "game.opti_remove", "OptiScaler removed");
       else if (out.launch) {
         syncLaunch(out.launch, kind === "install" ? "game.opti" : "game.opti_update", kind === "install" ? "OptiScaler" : "OptiScaler update",
-          kind === "install" ? readyToast(app.name, choices.fg_input, choices.fg) : undefined);
+          kind === "install" ? readyToast(app.name, choices.fg_input, choices.fg, setup) : undefined);
       }
     });
     return null;
@@ -189,6 +193,9 @@ export const OptiRows: FC<{ app: RunningApp; quick?: boolean; running: boolean; 
   });
 
   if (!isSteamApp(appid) || !game?.opti_entry) return null;
+  const kindLine = setup.kind === "tested" ? "OXP3 Deck's tested setup for this game."
+    : setup.kind === "known" ? `Set up as OptiScaler's wiki documents this game${info?.fit === "poor" ? " (with limits on this device)" : ""}; not tested on this device.`
+    : "Experimental: no one has tested OptiScaler with this game here. OXP3 Deck found the game's exe, its graphics API and a free file name from the game's files; the steps in the game are the generic ones.";
   if (res.data && !res.data.ok) return <Problem what="OptiScaler" error={res.data.error} />;
 
   const lab = choiceLabels(choices);
@@ -197,7 +204,9 @@ export const OptiRows: FC<{ app: RunningApp; quick?: boolean; running: boolean; 
   const statusD: DetailsSpec = {
     title: "OptiScaler",
     body: paragraphs([
-      "OptiScaler sits between the game and its upscaler: when the game asks for DLSS (or XeSS), it runs XeSS or FSR 3.1 instead, and XeSS frame generation (XeFG) in place of the game's frame generation. It drives Xe Low Latency itself, so the game's own latency switch no longer decides.",
+      "OptiScaler sits between the game and its upscaler: when the game asks for DLSS, FSR or XeSS, it runs XeSS or FSR 3.1 instead, and (in DirectX 12 games) XeSS frame generation (XeFG) in place of the game's frame generation. It drives Xe Low Latency itself, so the game's own latency switch no longer decides.",
+      kindLine,
+      !fgOk && info ? `This game runs in ${API_LABELS[setup.api]}: OptiScaler replaces its upscaler only; frame generation needs DirectX 12.` : null,
       info?.state === "other" ? "Another tool (Decky Framegen or a manual copy) has put OptiScaler into this game. Remove it with that tool; OXP3 Deck does not touch it." : null,
       info?.state === "partial" ? `Not everything could be removed. Left in the game's folder: ${(info.kept ?? []).join("; ") || "see the list below"}.` : null,
       info?.update ? `A newer pinned build is available: ${info.build_wanted}. Update keeps your choices.` : null,
@@ -207,6 +216,9 @@ export const OptiRows: FC<{ app: RunningApp; quick?: boolean; running: boolean; 
     lines: [
       ...(info?.build ? [`Build: ${info.build}`] : info?.build_wanted ? [`Build to install: ${info.build_wanted}`] : []),
       ...(info?.folder ? [`Folder: ${info.folder}`] : []),
+      ...(info?.exe ? [`Exe: ${info.exe}`] : []),
+      ...(info?.api ? [`API: ${API_LABELS[setup.api]}${info.api_why ? ` (${info.api_why})` : ""}`] : []),
+      ...(info?.proxy ? [`File name: ${info.proxy}.dll`] : []),
       ...(info?.backed_up?.length ? [`Backed up: ${info.backed_up.join(", ")}`] : []),
       ...(info?.kept?.length ? info.kept.map((k) => `Kept: ${k}`) : []),
       ...sources.map((s) => `Source: ${s}`),
@@ -216,7 +228,8 @@ export const OptiRows: FC<{ app: RunningApp; quick?: boolean; running: boolean; 
   const installD: DetailsSpec = {
     title: "Install OptiScaler for this game",
     body: paragraphs([
-      `Downloads OptiScaler (${info?.cached ? "already downloaded" : `about ${Math.round(info?.download_mb ?? 69)} MB`}) once, then puts it into the game's folder as your user. Install stops if the folder already has a dxgi.dll or another OptiScaler; the game's own files are not touched.`,
+      `Downloads OptiScaler (${info?.cached ? "already downloaded" : `about ${Math.round(info?.download_mb ?? 69)} MB`}) once, then puts it into the game's folder as your user, as ${proxy}.dll. ${setup.kind === "tested" ? `Install stops if the folder already has a ${proxy}.dll or another OptiScaler` : "OXP3 Deck takes a file name the folder does not have, so no game or mod file is replaced; install stops if another OptiScaler is there"}; the game's own files are not touched.`,
+      kindLine,
       "The steps: download and check it, unpack it with 7z or bsdtar, copy the files in, write OptiScaler.ini, then the launch options. Remove puts everything back.",
       `Takes effect: Restart the game. ${quit ?? ""}`,
       info?.why && !quit ? `Not possible now: ${info.why}` : null,
@@ -231,16 +244,17 @@ export const OptiRows: FC<{ app: RunningApp; quick?: boolean; running: boolean; 
   const upD: DetailsSpec = {
     title: "Upscaler",
     body: paragraphs([
-      "What OptiScaler runs when the game asks for DLSS (or XeSS). XeSS uses the XMX cores with XeSS fast mode; FSR 3.1 runs on any GPU.",
+      "What OptiScaler runs when the game asks for DLSS, FSR or XeSS. XeSS uses the XMX cores with XeSS fast mode; FSR 3.1 runs on any GPU.",
       installed ? "Changing it rewrites OptiScaler.ini in the game's folder." : "Used when you tap Install.",
       "Takes effect: Restart the game.",
     ]),
-    lines: [`Upscalers Dx12Upscaler=${choices.upscaler === "fsr31" ? "ffx" : "xess"}`], linesTitle: "Technical:",
+    lines: [upscalerIni(setup.api, choices.upscaler)], linesTitle: "Technical:",
   };
   const fgD: DetailsSpec = {
     title: "Frame generation",
     body: paragraphs([
       "XeSS frame generation (XeFG) from OptiScaler, in place of the game's frame generation. Turn the game's frame generation on too (the setting below says which).",
+      fgOk ? null : `Not for this game: it runs in ${API_LABELS[setup.api]}, and OptiScaler's frame generation needs DirectX 12.`,
       "3x and 4x also set the GPU vendor for DXVK, so XeFG does not fall back to 2x; this is not tested on this device yet.",
       "A frame limit caps the generated frames too. XeFG needs a borderless window, not exclusive fullscreen.",
       "Frame generation can crash some games; if a game crashes, turn it off.",
@@ -257,15 +271,17 @@ export const OptiRows: FC<{ app: RunningApp; quick?: boolean; running: boolean; 
     title: "Game setting it replaces",
     body: paragraphs([
       "DLSS frame generation (default, the setup from ETA Prime's video): pick DLSS and DLSS frame generation in the game; OptiScaler runs XeSS and XeFG in their place.",
+      "FSR frame generation: pick FSR 3.1 (or what the game offers) and its frame generation in the game.",
       "XeSS frame generation: pick XeSS and XeSS frame generation in the game. The game's own Xe Low Latency then stays in charge, so it may hit the same \"latency reduction is not enabled\" refusal as without OptiScaler.",
-      "None: OptiScaler makes the frames from the upscaler's input itself (OptiFG). Keep the game's gamma at its default; the HUD fix is on.",
+      "None: OptiScaler makes the frames from the upscaler's input itself (OptiFG). Keep the game's gamma at its default; the HUD fix is on, and the Steam overlay and Steam Input stay on.",
+      setup.kind === "tested" ? null : "Only the choices OptiScaler's wiki documents for this game are listed (all four for a game it does not document).",
       "Takes effect: Restart the game.",
     ]),
     lines: [`FrameGen FGInput=${choices.fg_input}`], linesTitle: "Technical:",
   };
   const listD: DetailsSpec = {
     title: "In the game, once",
-    body: paragraphs([...checklist(choices.fg_input, choices.fg), ...CHECKLIST_HELP]),
+    body: paragraphs([...checklist(choices.fg_input, choices.fg, setup), ...checklistHelp(setup)]),
   };
   const overlayD: DetailsSpec = {
     title: "Show OptiScaler's FPS counter",
@@ -293,7 +309,7 @@ export const OptiRows: FC<{ app: RunningApp; quick?: boolean; running: boolean; 
       {!installed && info?.state !== "other" && (
         <WithDetails details={installD}>
           <ButtonItem layout="below" disabled={!!act.busy || !info || !!why || !!info.why} onClick={install}
-            description={explainWhen("Runs XeSS and XeSS frame generation in place of the game's DLSS.", EFFECTS["game.opti"], why ?? info?.why ?? null)}>
+            description={explainWhen(installLine(info), EFFECTS["game.opti"], why ?? info?.why ?? null)}>
             {act.busy === "install" ? "Starting…" : label("Install OptiScaler for this game", installD)}
           </ButtonItem>
         </WithDetails>
@@ -308,11 +324,11 @@ export const OptiRows: FC<{ app: RunningApp; quick?: boolean; running: boolean; 
           </WithDetails>
           <WithDetails details={fgD}>
             <DropdownItem key={`opti-fg-${appid}-${choices.fg}`} {...below} label={label("Frame generation", fgD)} menuLabel="OptiScaler frame generation"
-              disabled={!!act.busy || !info || !!why} rgOptions={FGS} selectedOption={choices.fg}
+              disabled={!!act.busy || !info || !!why || !fgOk} rgOptions={fgs} selectedOption={fgOk ? choices.fg : 0}
               onChange={(o) => choose({ fg: o.data }, "game.opti_fg", "OptiScaler frame generation")}
-              description={explainWhen(choices.fg ? "Also turn on the game's frame generation." : "No generated frames.", EFFECTS["game.opti_fg"], why)} />
+              description={explainWhen(!fgOk ? "Needs a DirectX 12 game." : choices.fg ? "Also turn on the game's frame generation." : "No generated frames.", EFFECTS["game.opti_fg"], why)} />
           </WithDetails>
-          {!quick && (
+          {!quick && fgOk && (
             <WithDetails details={inputD}>
               <DropdownItem key={`opti-in-${appid}-${choices.fg_input}`} {...below} label={label("Game setting it replaces", inputD)}
                 menuLabel="Game setting it replaces" disabled={!!act.busy || !info || !!why} rgOptions={inputs} selectedOption={choices.fg_input}
@@ -322,7 +338,7 @@ export const OptiRows: FC<{ app: RunningApp; quick?: boolean; running: boolean; 
           )}
         </>
       )}
-      {installed && <Note label="In the game, once" details={listD}>{checklistLine(choices.fg_input, choices.fg)}</Note>}
+      {installed && <Note label="In the game, once" details={listD}>{checklistLine(choices.fg_input, choices.fg, setup)}</Note>}
       {!quick && installed && (
         <WithDetails details={overlayD}>
           <ToggleField label={label("Show OptiScaler's FPS counter", overlayD)} checked={!!info?.overlay} bottomSeparator="none"
