@@ -2516,6 +2516,28 @@ itself when its XeFG is the output (its `OptiScaler.ini`, `[fakenvapi] LowLatenc
 uses XeLL"), so the game's own latency-reduction switch no longer decides; that is the reason to try it. **Unverified
 on the device**: the owner tests the steps below; nothing in this section is measured yet.
 
+**Correction (owner report, v0.4.3): the input is `xefg`, not `dlssg`.** With OptiScaler in the game, DLSS upscaling
+can be picked but "every other dlss option is greyed out" (DLSS frame generation, Reflex). OptiScaler's wiki page says
+why: "Game still uses Streamline 1, which means DLSSG via SL FG inputs are not supported!". Its FG-Settings are
+"OptiFG -> XeFG + HUDfix active with limit 1 + Resource Blocking enabled", with default gamma/brightness, and
+GameConfigs.cpp gives `witcher3.exe` the `XeFGCameraMotionFill` quirk ("MVs with XeFG inputs don't include camera
+motion"), made for OptiScaler taking over the game's own XeSS frame generation. So the Witcher 3 entry offers
+`fg_inputs: ("xefg", "upscaler")` and defaults to `xefg` everywhere (backend `defaults`, its automatic setup, the
+frontend's `DEFAULT_CHOICES`): in the game XeSS upscaling and XeSS frame generation, borderless; the ini gets
+`FrameGen_FGInput=xefg`, `FrameGen_FGOutput=xefg`. The fallback is OptiFG (`upscaler`): XeSS or DLSS upscaling in the
+game with its frame generation off, gamma and brightness at their defaults; the ini then also gets
+`OptiFG_HUDFix=true`, and from the entry's `optifg_ini` `OptiFG_HUDLimit=1` and `OptiFG_ResourceBlocking=true` (the
+wiki's "Resource Blocking", `[OptiFG] ResourceBlocking`: "Block rarely used resources from using as hudless"). Those
+two keys go back to `auto` with any other input. A record that still holds `dlssg` reads as no choices, with
+`choices_stale: true` in OptiInfo; its OptiScaler.ini keeps `FGInput=dlssg` until something rewrites it. An install the
+automatic setup made (`origin: "auto"`) whose choices are still the old automatic ones (`auto.before`: XeSS, 2x,
+`dlssg`) and that nobody changed by hand (no `picked`, which `set_choices` now sets; the game still Automatic: a change
+on the game page makes it Manual) is moved to the new automatic choices by `optiscaler.migrate_auto` on the game's
+next plan (switch on, game not running); `PLAN_VERSION` 2 makes the library scan plan it again. Any other install
+(installed by hand, or its choices changed by hand) is left as it is: the game page shows the defaults with a "Write
+these choices" button that writes them. The sections below keep the original 0.5 plan where they describe it; the code follows
+this paragraph.
+
 ### Which OptiScaler
 
 - **Pinned: OptiScaler v10 nightly `nightly-20261105`** (optiscaler/OptiScaler-nightly), asset
@@ -2553,10 +2575,14 @@ GAMES = {
         "build": "v10-20261105",
         "ini": {"Spoofing_Dxgi": "false"},        # OptiScaler GameConfigs.cpp (master 611-620) and 0.9.4 Quirks.h:396;
                                                   # xess-xmx-linux docs/games.md: with the NVIDIA spoof libxess takes DP4a
-        "fg_inputs": ("dlssg", "xefg", "upscaler"),   # SL1 DLSSG (v10), the game's XeFG (v10), OptiFG
-        "fg_input": "dlssg",                      # ETA Prime's route: the game on DLSS + DLSS frame generation
+        "fg_inputs": ("xefg", "upscaler"),        # the game's XeFG (v10, XeFGCameraMotionFill), OptiFG; no dlssg:
+        "fg_input": "xefg",                       # Streamline 1, "DLSSG via SL FG inputs are not supported" (wiki)
+        "optifg_ini": {"OptiFG_HUDLimit": "1", "OptiFG_ResourceBlocking": "true"},   # wiki FG-Settings, OptiFG only
         "args": ("-dx12",),                       # wiki: run in DirectX 12 (and launchopts.DX12_ARGS)
-        "notes": ("DLSS upscaling can flicker: pick XeSS in the game if it does (wiki, Known Issues).",
+        "notes": ("In the game pick XeSS upscaling and XeSS frame generation (DLSS frame generation stays greyed: "
+                  "the game uses Streamline 1).",
+                  "If XeSS frame generation still adds no fps, set the input to OptiFG ...; default gamma/brightness.",
+                  "DLSS upscaling can flicker: pick XeSS in the game if it does (wiki, Known Issues).",
                   "XeFG needs a borderless window, not exclusive fullscreen (OptiScaler 0.9.0 notes)."),
         "sources": ("github.com/optiscaler/OptiScaler/wiki/The-Witcher-3-Wild-Hunt",
                     "OptiScaler master OptiScaler/GameConfigs.cpp (witcher3.exe)",
@@ -2632,7 +2658,9 @@ Functions (every public one returns `{ok, error, ...}`, never raises; paths chec
 - Choices: `Upscalers_Dx12Upscaler` = `xess` | `fsr31` (`Dx11Upscaler` for an entry with `api: "dx11"`);
   frame generation off: `FrameGen_Enabled=false`, `FrameGen_FGOutput=nofg`; on (N = 2..4): `FrameGen_Enabled=true`,
   `FrameGen_FGInput=<fg_input>`, `FrameGen_FGOutput=xefg`, `XeFG_InterpolationCount=N-1` (1 = 2x, 2 = 3x, 3 = 4x).
-  With input `upscaler` (OptiFG) also `OptiFG_HUDFix=true` (wiki: HUDfix limit 1, Resource Blocking; default gamma).
+  With input `upscaler` (OptiFG) also `OptiFG_HUDFix=true`, plus the entry's `optifg_ini` (The Witcher 3:
+  `OptiFG_HUDLimit=1`, `OptiFG_ResourceBlocking=true`, the wiki's "HUDfix limit 1, Resource Blocking"; default
+  gamma/brightness in the game); with any other input those keys are `auto`.
 - OptiScaler may save its own ini from its in-game menu; `set_choices` edits the file in the game folder (not the
   package's) so those keys are kept, and the record's sha256 of the ini is not used for removal.
 
@@ -2759,7 +2787,7 @@ bool` (cheap: the record and the table). Job results:
 type OptiJobResult = { ok, error, appid: string, build: string|null, folder: string|null,
   copied: number, backed_up: string[], removed: number, kept: string[],   // kept: files left, with why
   launch: LaunchPlan | null,       // install/update: apply it; remove: undo it
-  next: string | null }            // "Start the game, pick DLSS and DLSS frame generation, then restart it once."
+  next: string | null }            // "Start the game, pick XeSS and XeSS frame generation in a borderless window, then restart it once."
 ```
 
 ### types.ts and api.ts
@@ -2818,8 +2846,8 @@ Section "OptiScaler" after the XeSS options:
 | Confirm | title "Install OptiScaler?" | "Downloads OptiScaler (about 69 MB) and puts it in <game>'s folder. Remove puts everything back." | `confirmLine` | `lines`: the folder, the files to back up, the launch-option change |
 | Upscaler | "Upscaler" (dropdown) | "XeSS" / "FSR 3.1" · "What runs when the game asks for DLSS." | Restart the game | XeSS on the XMX cores needs XeSS fast mode; FSR 3.1 runs on any GPU; Technical: Upscalers Dx12Upscaler |
 | Frame generation | "Frame generation" (dropdown) | "Off" / "XeFG 2x" / "XeFG 3x" / "XeFG 4x" · "Also turn on the game's frame generation." | Restart the game | 3x/4x add the GPU vendor setting (DXVK_CONFIG), untested here; a frame limit caps generated frames; borderless only; `FG_CRASH_LINE`; Technical: FGInput, FGOutput=xefg, InterpolationCount, XESS_FG |
-| FG input (Games tab only) | "Game setting it replaces" (dropdown) | "DLSS frame generation" / "XeSS frame generation" / "None: OptiScaler makes its own" | Restart the game | what each needs in the game; DLSS FG is the default (ETA Prime's setup); XeSS FG keeps the game's own XeLL (OptiScaler's ini), so may hit the same -15; OptiFG needs default gamma and HUD fix |
-| Checklist | "In the game, once" ⓘ | from `checklist`, e.g. "Pick DLSS and DLSS frame generation, then restart the game." | — | numbered: 1. Start the game (it starts in DirectX 12). 2. Graphics: Display mode Borderless. 3. Upscaling: DLSS (any quality). 4. Frame Generation: DLSS Frame Generation on. 5. Quit and start the game again, once. 6. Check: OptiScaler's menu (Insert on a keyboard) shows XeSS and FG Output XeFG. If DLSS is greyed out: pick "XeSS frame generation" above and in the game. If it flickers: XeSS in the game (wiki). |
+| FG input (Games tab only) | "Game setting it replaces" (dropdown) | "XeSS frame generation" / "None: OptiScaler makes its own" (The Witcher 3; other games their wiki inputs, DLSS frame generation among them) | Restart the game | what each needs in the game; for The Witcher 3 XeSS FG is the default (FGInput=xefg, FGOutput=xefg; DLSS FG stays greyed, Streamline 1); OptiFG: XeSS or DLSS upscaling, default gamma and brightness, HUD fix (The Witcher 3: HUD limit 1, resource blocking) |
+| Checklist | "In the game, once" ⓘ | from `checklist`, e.g. "Pick XeSS and XeSS frame generation, then restart the game." | — | numbered: 1. Start the game (it starts in DirectX 12). 2. Graphics: Display mode Borderless. 3. Upscaling: XeSS (any quality). 4. Frame Generation: XeSS Frame Generation on. 5. Quit and start the game again, once. 6. Check: OptiScaler's menu (Insert on a keyboard) shows XeSS and FG Output XeFG. OptiFG instead: 3. Upscaling: XeSS or DLSS; 4. Frame Generation off in the game; Gamma and brightness at their defaults. Help: DLSS frame generation and Reflex stay greyed (Streamline 1); if XeSS FG adds no fps, OptiFG; if it flickers: XeSS in the game (wiki). |
 | Overlay (Games tab) | "Show OptiScaler's FPS counter" | "For checking frame generation works." | Restart the game | global, every OptiScaler game |
 | Update | "Update OptiScaler to <build>" | "Keeps your choices." / greyed `why` | Restart the game | remove + install in one task |
 | Remove | "Remove OptiScaler" | "Puts the game's files and launch options back." / greyed `why` | Restart the game | what is deleted and restored; kept files and why |
@@ -2828,8 +2856,8 @@ Section "OptiScaler" after the XeSS options:
 
 Flow: confirm → `opti_install` → JobView under the button → on `done` (`afterJob`): `applyPlan` on the current launch
 options → `setLaunchOptions` (never while the game runs: then "Will be added when you quit <name>", applied by the
-same quit hook as the automatic launch options) → `ui_opti_log` → toast "OptiScaler ready for <name>: pick DLSS
-and DLSS frame generation in the game." → `notePending(game.opti)`. A refused write leaves the Copy launch options
+same quit hook as the automatic launch options) → `ui_opti_log` → toast "OptiScaler ready for <name>: pick XeSS
+and XeSS frame generation in the game." → `notePending(game.opti)`. A refused write leaves the Copy launch options
 row with reason `rejected`. A choice change: `opti_set` → re-apply the difference of the plans. Remove: job → on done
 `undoPlan`. All OptiScaler controls are greyed while the game runs ("Quit <game> first.") and while an opti job runs.
 
@@ -2889,10 +2917,10 @@ row with reason `rejected`. A choice change: `opti_set` → re-apply the differe
   `remove` keys for an OptiScaler game; texts ≤ 80 chars without variable names; `pages.test.mjs`: every opti control
   has `explainWhen(` with a `game.opti*` tag and a running check before `setLaunchOptions(`.
 
-On the device (owner): install for The Witcher 3; game on DLSS + DLSS frame generation, borderless, restart once;
-OptiScaler's menu shows XeSS and XeFG; fps at 2x against the ~50 fps now; `igdext_xefg.log` (Save XeSS logs) no longer
-says -15; then 3x with the vendor setting; then "XeSS frame generation" as the input; Remove and compare the folder
-and launch options with before.
+On the device (owner): install for The Witcher 3; game on XeSS + XeSS frame generation (DLSS frame generation is
+greyed there: Streamline 1), borderless, restart once; OptiScaler's menu shows XeSS and XeFG; fps at 2x against the
+~50 fps now; then 3x with the vendor setting; then "None: OptiScaler makes its own" (OptiFG) as the input with XeSS or
+DLSS and default gamma; Remove and compare the folder and launch options with before.
 
 ## OptiScaler for any game (0.5.1)
 
@@ -2901,7 +2929,7 @@ had a setup. Now every Steam game's row has the OptiScaler part, with one of thr
 
 | kind | Which games | Where its facts come from | Defaults |
 |---|---|---|---|
-| `tested` | The Witcher 3 (`optiscaler.GAMES`, unchanged) | the section above | XeSS, XeFG 2x, input DLSSG |
+| `tested` | The Witcher 3 (`optiscaler.GAMES`, unchanged) | the section above | XeSS, XeFG 2x, input XeFG (`xefg`) |
 | `known` | 42 games OptiScaler's wiki documents (`optigames.KNOWN`; 5 of them marked `fit: "poor"`) | the game's wiki page (named in the entry's `sources`) and GameConfigs.cpp | XeSS, frame generation off, the wiki's first FG input |
 | `generic` | any other game: **experimental** | the game's own files (below) | XeSS, frame generation off, input OptiFG (`upscaler`) |
 
@@ -3085,15 +3113,15 @@ is moved.
   planned move to a hooked Proton counts as `compat_tool_hook: true`).
 
 **Table additions** (backend):
-- `optiscaler.GAMES["292030"]["auto"] = {"choices": {"upscaler": "xess", "fg": 2, "fg_input": "dlssg"}, "why":
+- `optiscaler.GAMES["292030"]["auto"] = {"choices": {"upscaler": "xess", "fg": 2, "fg_input": "xefg"}, "why":
   "XeSS frame generation adds no fps here; OptiScaler's XeFG is the known way.", "short": "for frame generation"}`
-  (source: KNOWN_ISSUES 292030 `fg_no_gain`, ETA Prime's route). `optigames._k(..., auto=None)`: no KNOWN entry has it
+  (source: KNOWN_ISSUES 292030 `fg_no_gain`; the input per the wiki, see "Correction" under "OptiScaler (0.5)"). `optigames._k(..., auto=None)`: no KNOWN entry has it
   now (none is tested on this device); a later entry gets it only with a source.
 - `games.KNOWN_ISSUES` entries gain `auto_drop: tuple[ManagedKey]` (taken out automatically, a key known to crash)
   and `auto_never: tuple[ManagedKey]` (never added automatically). 2246340: `auto_drop ("XESS_FG", "FSR", "FSR_FG")`,
   `auto_never ("XESS", "FSR")` (its detail: XESS=latest swaps files too). 292030: `auto_drop ("FSR", "FSR_FG")`,
   `auto_never ("FSR",)`. Both fields default to `()`; `known_issues()` copies them.
-- `autosetup.PLAN_VERSION = 1`: raised whenever these tables change, so the library scan looks at seen games again.
+- `autosetup.PLAN_VERSION = 2` (2: the Witcher 3 automatic choices moved to `xefg`): raised whenever these tables change, so the library scan looks at seen games again.
 
 ### The Proton move
 
@@ -3401,7 +3429,7 @@ KNOWN_ISSUES fields; `GameInfo.suggest` unchanged (the plan filters it).
   `xess.detect` patched): classes (Witcher and MH Wilds known, a plain game unknown, EasyAntiCheat folder / an ONLINE
   appid skipped with nothing planned, not even Proton); first sight Manual from `ui_autolaunch` false, from an
   OptiScaler record without origin, from `facts.hand`; `hand` ignored after `auto_mode("auto")`; Witcher on
-  GE-Proton11-11: plan = OptiScaler (xess, 2, dlssg), no Proton move, no XESS=latest (OptiScaler drops it); MH Wilds on
+  GE-Proton11-11: plan = OptiScaler (xess, 2, xefg), no Proton move, no XESS=latest (OptiScaler drops it); MH Wilds on
   GE-Proton11-11: launch remove XESS_FG / FSR / FSR_FG, no XESS add, no OptiScaler; an unknown game with XeSS 1.3 on
   proton-cachyos: Proton → GE-Proton11-11 (newest hooked, numeric order: 11-11 over 10-25 over 9-27; an unhooked
   newer one skipped) and XESS=latest computed against it; FSR only as an offer; Experimental when no hooked GE; a

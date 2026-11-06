@@ -10,7 +10,7 @@ import { get_setting, opti_info, opti_install, opti_options, opti_remove, opti_s
 import { EFFECTS } from "../effects";
 import {
   API_LABELS, checklist, checklistHelp, checklistLine, choiceLabels, confirmInstall, confirmRemove, DEFAULT_CHOICES, FGS, fgPossible,
-  fitLog, INPUTS, installLine, LOG_KEY, OptiConfirm, OptiLog, OptiLogEntry, pendingEntry, planLines, readChoices, readLog, readyToast,
+  fitLog, INPUTS, installLine, optiFgIni, LOG_KEY, OptiConfirm, OptiLog, OptiLogEntry, pendingEntry, planLines, readChoices, readLog, readyToast,
   setupOf, statusLine, syncPlan, upscalerIni, UPSCALERS, warningRows,
 } from "../opti";
 import { getLaunchOptions, isRunning, isSteamApp, RunningApp, setLaunchOptions } from "../steam";
@@ -265,7 +265,8 @@ export const OptiRows: FC<{ app: RunningApp; quick?: boolean; running: boolean; 
       "Takes effect: Restart the game.",
     ]),
     lines: [
-      `FrameGen FGInput=${choices.fg_input} FGOutput=${choices.fg ? "xefg" : "nofg"}${choices.fg ? ` XeFG InterpolationCount=${choices.fg - 1}` : ""}`,
+      `FrameGen FGInput=${choices.fg ? choices.fg_input : "nofg"} FGOutput=${choices.fg ? "xefg" : "nofg"}${choices.fg ? ` XeFG InterpolationCount=${choices.fg - 1}` : ""}`,
+      ...(choices.fg && choices.fg_input === "upscaler" ? [optiFgIni(info?.optifg_ini)] : []),
       ...(choices.fg ? [`XESS_FG=${choices.fg}`] : []),
       ...(choices.fg > 2 ? ["DXVK_CONFIG: dxgi.customVendorId = 8086"] : []),
     ],
@@ -274,10 +275,10 @@ export const OptiRows: FC<{ app: RunningApp; quick?: boolean; running: boolean; 
   const inputD: DetailsSpec = {
     title: "Game setting it replaces",
     body: paragraphs([
-      "DLSS frame generation (default, the setup from ETA Prime's video): pick DLSS and DLSS frame generation in the game; OptiScaler runs XeSS and XeFG in their place.",
+      "DLSS frame generation: pick DLSS and DLSS frame generation in the game; OptiScaler runs XeSS and XeFG in their place. Only for games whose DLSS frame generation OptiScaler can take (not Streamline 1 games such as The Witcher 3, where it stays greyed out).",
       "FSR frame generation: pick FSR 3.1 (or what the game offers) and its frame generation in the game.",
-      "XeSS frame generation: pick XeSS and XeSS frame generation in the game. The game's own Xe Low Latency then stays in charge, so it may hit the same \"latency reduction is not enabled\" refusal as without OptiScaler.",
-      "None: OptiScaler makes the frames from the upscaler's input itself (OptiFG). Keep the game's gamma at its default; the HUD fix is on, and the Steam overlay and Steam Input stay on.",
+      `XeSS frame generation${setup.kind === "tested" ? " (default here)" : ""}: pick XeSS and XeSS frame generation in the game, in a borderless window; OptiScaler takes the game's XeSS frame generation over and runs its own XeFG (FGInput=xefg, FGOutput=xefg).`,
+      `None: OptiScaler makes the frames from the upscaler's input itself (OptiFG). Pick ${setup.kind === "tested" ? "XeSS or DLSS" : "the upscaler"} in the game with its frame generation off, and keep the game's gamma and brightness at their defaults; the HUD fix is on${info?.optifg_ini && Object.keys(info.optifg_ini).length ? " (with the HUD limit and resource blocking OptiScaler's wiki gives for this game)" : ""}, and the Steam overlay and Steam Input stay on.`,
       setup.kind === "tested" ? null : "Only the choices OptiScaler's wiki documents for this game are listed (all four for a game it does not document).",
       "Takes effect: Restart the game.",
     ]),
@@ -341,6 +342,12 @@ export const OptiRows: FC<{ app: RunningApp; quick?: boolean; running: boolean; 
             </WithDetails>
           )}
         </>
+      )}
+      {installed && info?.choices_stale && (
+        <ButtonItem layout="below" disabled={!!act.busy || !!why} onClick={() => choose({}, "game.opti_input", "Write these choices")}
+          description={explainWhen("Its saved choices are no longer offered here; OptiScaler.ini still has them. This writes the ones shown.", EFFECTS["game.opti_input"], why)}>
+          {act.busy === "Write these choices" ? "Writing…" : "Write these choices"}
+        </ButtonItem>
       )}
       {installed && <Note label="In the game, once" details={listD}>{checklistLine(choices.fg_input, choices.fg, setup)}</Note>}
       {!quick && installed && (

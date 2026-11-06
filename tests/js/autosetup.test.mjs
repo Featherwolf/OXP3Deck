@@ -132,7 +132,7 @@ test("summaryLine, changeRow, toastText, rollbackText: plain words, at most 80 c
   assert.equal(a.changeRow(OPTI).label, "OptiScaler installed");
   assert.equal(a.changeRow(LAUNCH).label, "Launch options: XESS=latest -dx12");
   assert.equal(a.toastText("The Witcher 3", [OPTI, LAUNCH]), "Set up The Witcher 3: OptiScaler, newer XeSS, DirectX 12. Applies at its next start.");
-  assert.match(a.toastText("The Witcher 3", [OPTI], { upscaler: "xess", fg: 2, fg_input: "dlssg" }), /Applies at its next start\. .*DLSS/);
+  assert.match(a.toastText("The Witcher 3", [OPTI], { upscaler: "xess", fg: 2, fg_input: "xefg" }), /Applies at its next start\. Pick XeSS and XeSS frame generation/);
   assert.equal(a.rollbackText(OPTI, "The Witcher 3"), "The Witcher 3 closed within a minute after OptiScaler.");
   const long = "A Game With A Really Very Extremely Long Name That Goes On And On: The Sequel Edition";
   const texts = [a.summaryLine(GAME([OPTI, LAUNCH, PROTON])), a.changeRow(PROTON).label, a.changeRow(LAUNCH).line, a.rollbackText(LAUNCH, long),
@@ -326,7 +326,7 @@ test("the pass: Proton move recorded with what was there before; launch change r
 });
 
 test("the pass: OptiScaler's job, then its launch plan, then the launch keys without the ones OptiScaler drops", async () => {
-  const { d, log, st } = fakes(plan({ name: "The Witcher 3", opti: { choices: { upscaler: "xess", fg: 2, fg_input: "dlssg" }, why: "XeFG.", short: "for frame generation" },
+  const { d, log, st } = fakes(plan({ name: "The Witcher 3", opti: { choices: { upscaler: "xess", fg: 2, fg_input: "xefg" }, why: "XeFG.", short: "for frame generation" },
     launch: { plan: LP({ set: { XESS: "latest" }, remove: ["FSR"] }), why: "w", short: "s" } }), { text: "FSR=xess %command%" });
   const r = await a.runPass(d, W3, "", "exit");
   const order = log.filter((l) => /^(opti|wait|syncOpti|set|record)/.test(l));

@@ -219,7 +219,7 @@ class Base(unittest.TestCase):
         return expected_sha256
 
     def choices(self, **kw):
-        c = {"upscaler": "xess", "fg": 2, "fg_input": "dlssg"}
+        c = {"upscaler": "xess", "fg": 2, "fg_input": "xefg"}       # The Witcher 3's default input
         c.update(kw)
         return c
 
@@ -281,7 +281,8 @@ class ExeDirTest(Base):
 class RefusalTest(Base):
     def refused(self, why, appid=WITCHER):
         before = snapshot(self.tmp.name)
-        res = optiscaler.install(self.ctx, None, self.job, appid, self.choices())
+        res = optiscaler.install(self.ctx, None, self.job, appid,
+                                 self.choices(**({} if appid == WITCHER else {"fg_input": "dlssg"})))
         self.assertFalse(res["ok"])
         self.assertEqual(res["error"], why)
         self.assertEqual(optiscaler.check(self.ctx, appid, installing=True)["why"], why)
@@ -544,7 +545,8 @@ class InstallTest(Base):
                 mock.patch.object(userexec, "chown_tree", side_effect=AssertionError("no chown_tree")):
             res = self.install()
         self.assertTrue(res["ok"], res)
-        self.assertEqual(res["next"], "Start the game, pick DLSS and DLSS frame generation, then restart it once.")
+        self.assertEqual(res["next"], "Start the game, pick XeSS and XeSS frame generation in a borderless window, "
+                                      "then restart it once.")
         self.assertEqual(res["launch"], {"set": {"XESS_FG": "2"}, "remove": ["XESS", "FSR", "FSR_FG",
                                                                                  "force_vk_vendor"],
                                          "dll_override": "dxgi", "dxvk_config": None, "args": ["-dx12"]})
@@ -590,7 +592,7 @@ class InstallTest(Base):
         self.assertTrue(self.install(fg=4)["ok"])
         text = self.ini()
         self.assertIn("\r\n", text)
-        for line in ("Dx12Upscaler=xess", "Enabled=true", "FGInput=dlssg", "FGOutput=xefg", "InterpolationCount=3",
+        for line in ("Dx12Upscaler=xess", "Enabled=true", "FGInput=xefg", "FGOutput=xefg", "InterpolationCount=3",
                      "ForceBorderless=true", "OptiDllPath=.\\OptiScaler", "Dxgi=false", "LoadAsiPlugins=false",
                      "UseHQFont=false", "ShowFps=false", "Dx11Upscaler=auto", "HUDFix=auto"):
             self.assertIn(line + "\r\n", text)
@@ -834,12 +836,63 @@ class AutoTest(Base):
 
     def test_the_witchers_entry_has_its_automatic_setup(self):
         auto = optiscaler.entry(WITCHER)["auto"]
-        self.assertEqual(auto["choices"], {"upscaler": "xess", "fg": 2, "fg_input": "dlssg"})
+        self.assertEqual(auto["choices"], {"upscaler": "xess", "fg": 2, "fg_input": "xefg"})
         self.assertEqual(optiscaler.check_choices(optiscaler.entry(WITCHER), auto["choices"])[1], None)
         self.assertLessEqual(len(auto["why"]), 200)
         self.assertLessEqual(len(auto["short"]), 40)
         for appid in optigames.KNOWN:
             self.assertIsNone(optiscaler.entry(appid)["auto"], appid)     # none tested on this device
+
+    def old_install(self, origin: str, **extra):
+        """An install from 0.4.3 before the correction: choices and OptiScaler.ini on the dlssg input."""
+        res = optiscaler.install(self.ctx, None, self.job, WITCHER, self.choices(), auto=origin == "auto",
+                                 origin=origin)
+        self.assertTrue(res["ok"], res)
+        rec = self.record()
+        rec["games"][WITCHER]["choices"] = self.choices(fg_input="dlssg")
+        rec["games"][WITCHER].update(extra)
+        with open(os.path.join(self.ctx.settings_dir, "optiscaler.json"), "w") as f:
+            json.dump(rec, f)
+        p = os.path.join(self.folder, "OptiScaler.ini")
+        text = self.ini().replace("FGInput=xefg", "FGInput=dlssg")
+        os.chmod(p, 0o644)
+        with open(p, "w") as f:
+            f.write(text)
+        self.assertIn("FGInput=dlssg", self.ini())
+
+    def test_an_old_automatic_install_moves_to_the_new_choices(self):
+        self.old_install("auto")
+        info = optiscaler.info(self.ctx, WITCHER)["opti"]
+        self.assertEqual((info["choices"], info["choices_stale"]), (None, True))
+        with mock.patch.object(steamlib, "running_game", return_value=WITCHER):
+            self.assertFalse(optiscaler.migrate_auto(self.ctx, WITCHER))         # not while it runs
+        self.assertIn("FGInput=dlssg", self.ini())
+        self.assertTrue(optiscaler.migrate_auto(self.ctx, WITCHER))
+        self.assertIn("FGInput=xefg", self.ini())
+        self.assertNotIn("FGInput=dlssg", self.ini())
+        g = self.record()["games"][WITCHER]
+        self.assertEqual((g["choices"], g["origin"]), (self.choices(), "auto"))
+        info = optiscaler.info(self.ctx, WITCHER)["opti"]
+        self.assertEqual((info["choices"], info["choices_stale"]), (self.choices(), False))
+        self.assertFalse(optiscaler.migrate_auto(self.ctx, WITCHER))             # once
+
+    def test_choices_picked_by_hand_are_not_moved(self):
+        for origin, extra in (("user", {}), ("auto", {"picked": True}),
+                              ("auto", {"choices": self.choices(fg=3, fg_input="dlssg")})):
+            with self.subTest(origin=origin, extra=extra):
+                self.old_install(origin, **extra)
+                before = self.record()["games"][WITCHER]
+                self.assertFalse(optiscaler.migrate_auto(self.ctx, WITCHER))
+                self.assertIn("FGInput=dlssg", self.ini())
+                self.assertEqual(self.record()["games"][WITCHER], before)
+                self.assertTrue(optiscaler.info(self.ctx, WITCHER)["opti"]["choices_stale"])
+                self.assertTrue(self.remove()["ok"])
+
+    def test_set_choices_marks_them_picked(self):
+        self.old_install("auto")
+        res = optiscaler.set_choices(self.ctx, WITCHER, self.choices(fg=0))
+        self.assertTrue(res["ok"], res)
+        self.assertIs(self.record()["games"][WITCHER]["picked"], True)
 
     def test_anticheat(self):
         self.assertIsNone(optiscaler.anticheat(self.ctx, WITCHER))
@@ -1145,7 +1198,7 @@ class AnyGameTest(Base):
         write(os.path.join(game, "bin/x64/dxgi.dll"), b"another mod")
         e, _why = optiscaler.resolve(self.ctx, "1091500", fresh=True)
         self.assertEqual(e["proxy"], "wininet")
-        res = self.run_install("1091500", fg=2)
+        res = self.run_install("1091500", fg=2, fg_input="dlssg")     # Cyberpunk 2077's documented input
         self.assertTrue(res["ok"], res)
         self.assertEqual(res["launch"]["dll_override"], "wininet")
         self.assertIn("pick XeSS and DLSS frame generation", res["next"])
@@ -1308,25 +1361,37 @@ class PureTest(unittest.TestCase):
 
     def test_ini_choices(self):
         def keys(**c):
-            ch = {"upscaler": "xess", "fg": 2, "fg_input": "dlssg"}
+            ch = {"upscaler": "xess", "fg": 2, "fg_input": "xefg"}
             ch.update(c)
             return optiscaler._ini_changes(self.E, ch, {"overlay": False}, "subfolder")
         self.assertEqual(keys()["XeFG_InterpolationCount"], "1")
         self.assertEqual(keys(fg=4)["XeFG_InterpolationCount"], "3")
         off = keys(fg=0)
         self.assertEqual((off["FrameGen_Enabled"], off["FrameGen_FGOutput"]), ("false", "nofg"))
-        self.assertEqual(keys(fg_input="upscaler")["OptiFG_HUDFix"], "true")
-        self.assertEqual(keys(fg_input="xefg")["FrameGen_FGInput"], "xefg")
+        self.assertEqual((keys()["FrameGen_FGInput"], keys()["FrameGen_FGOutput"]), ("xefg", "xefg"))
+        self.assertEqual((keys()["OptiFG_HUDFix"], keys()["OptiFG_HUDLimit"], keys()["OptiFG_ResourceBlocking"]),
+                         ("auto", "auto", "auto"))
+        # OptiFG as the wiki's FG-Settings say: HUDfix with limit 1 and Resource Blocking
+        opti = keys(fg_input="upscaler")
+        self.assertEqual((opti["FrameGen_FGInput"], opti["FrameGen_FGOutput"], opti["OptiFG_HUDFix"],
+                          opti["OptiFG_HUDLimit"], opti["OptiFG_ResourceBlocking"], opti["Hotfix_DisableOverlays"]),
+                         ("upscaler", "xefg", "true", "1", "true", "false"))
+        self.assertEqual(keys(fg=0, fg_input="upscaler")["OptiFG_HUDLimit"], "auto")
+        # another game's OptiFG gets no HUDLimit or ResourceBlocking key
+        other = optiscaler._ini_changes(dict(self.E, optifg_ini={}, kind="known"), {"upscaler": "xess", "fg": 2,
+                                        "fg_input": "upscaler"}, {"overlay": False}, "subfolder")
+        self.assertNotIn("OptiFG_HUDLimit", other)
+        self.assertNotIn("OptiFG_ResourceBlocking", other)
         self.assertEqual(keys()["Spoofing_Dxgi"], "false")
         self.assertEqual(keys(upscaler="fsr31")["Upscalers_Dx12Upscaler"], "ffx")
-        dx11 = optiscaler._ini_changes(dict(self.E, api="dx11"), {"upscaler": "fsr31", "fg": 0, "fg_input": "dlssg"},
+        dx11 = optiscaler._ini_changes(dict(self.E, api="dx11"), {"upscaler": "fsr31", "fg": 0, "fg_input": "xefg"},
                                        {"overlay": True}, "flat")
         self.assertEqual((dx11["Upscalers_Dx11Upscaler"], dx11["Menu_ShowFps"]), ("fsr31", "true"))
         self.assertNotIn("Libraries_OptiDllPath", dx11)
 
     def test_launch_plan(self):
         def plan(fg):
-            return optiscaler.launch_plan(self.E, {"upscaler": "xess", "fg": fg, "fg_input": "dlssg"})
+            return optiscaler.launch_plan(self.E, {"upscaler": "xess", "fg": fg, "fg_input": "xefg"})
         self.assertEqual(plan(0), {"set": {}, "remove": ["XESS", "FSR", "FSR_FG", "force_vk_vendor", "XESS_FG"],
                                    "dll_override": "dxgi", "dxvk_config": None, "args": ["-dx12"]})
         self.assertEqual(plan(2)["set"], {"XESS_FG": "2"})
@@ -1339,7 +1404,9 @@ class PureTest(unittest.TestCase):
         self.assertEqual(b["sha256"], "e26810c76451666da0bcc40be62722e7b4a5d36c550036830b98f5eb69e0648c")
         self.assertEqual(b["size_max"], 96 << 20)
         self.assertTrue(b["url"].startswith("https://") and b["url"].endswith(b["asset"]))
-        self.assertEqual((self.E["folder"], self.E["proxy"], self.E["fg_input"]), ("bin/x64_dx12", "dxgi", "dlssg"))
+        self.assertEqual((self.E["folder"], self.E["proxy"], self.E["fg_input"]), ("bin/x64_dx12", "dxgi", "xefg"))
+        self.assertEqual(self.E["fg_inputs"], ("xefg", "upscaler"))       # Streamline 1: no dlssg (wiki Notes)
+        self.assertIn("dlssg", optiscaler.check_choices(self.E, {"upscaler": "xess", "fg": 2, "fg_input": "dlssg"})[1])
         for g in optiscaler.GAMES.values():
             self.assertTrue(g["sources"])            # every entry names its sources
             self.assertIn(g["build"], optiscaler.BUILDS)

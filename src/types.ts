@@ -227,6 +227,8 @@ export type OptiInfo = {
   fg_ok?: boolean;                                      // frame generation possible (DirectX 12 only)
   upscaler_found?: boolean | null;                      // a DLSS, FSR 2+ or XeSS library was seen in the game
   fit?: "good" | "poor" | null;                         // known: the wiki's setup fits this device less well
+  optifg_ini?: Record<string, string>;                  // the game's own OptiFG keys ({"OptiFG_HUDLimit": "1"})
+  choices_stale?: boolean;                              // installed, but its saved choices are no longer offered
 };
 export type OptiInfoRes = Res & { opti: OptiInfo | null };
 export type OptiJobResult = Res & {

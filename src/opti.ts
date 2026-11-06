@@ -271,7 +271,9 @@ export const INPUTS: { data: OptiFgInput; label: string }[] = [
   { data: "xefg", label: "XeSS frame generation" },
   { data: "upscaler", label: "None: OptiScaler makes its own" },
 ];
-export const DEFAULT_CHOICES: OptiChoices = { upscaler: "xess", fg: 2, fg_input: "dlssg" };
+/** The tested setup's (The Witcher 3's) defaults, as optiscaler.defaults: the game's own XeSS frame generation taken
+ * over (FGInput=xefg). Not dlssg: the game uses Streamline 1, so its DLSS frame generation stays greyed out. */
+export const DEFAULT_CHOICES: OptiChoices = { upscaler: "xess", fg: 2, fg_input: "xefg" };
 
 /** The labels of a set of choices. */
 export const choiceLabels = (c: OptiChoices) => ({
@@ -314,7 +316,7 @@ const inGame = (input: OptiFgInput, setup: OptiSetup = TESTED): { upscale: strin
     : input === "xefg" ? "XeSS Frame Generation" : null;
   if (setup.kind !== "tested") return { upscale: setup.pick ?? GENERIC_PICK, fg };
   return input === "dlssg" ? { upscale: "DLSS", fg } : input === "xefg" ? { upscale: "XeSS", fg }
-    : input === "fsrfg" ? { upscale: "FSR", fg } : { upscale: "DLSS", fg: null };
+    : input === "fsrfg" ? { upscale: "FSR", fg } : { upscale: "XeSS or DLSS", fg: null };
 };
 const lowerFg = (fg: string) => fg.replace("Frame Generation", "frame generation");
 
@@ -323,6 +325,7 @@ export const checklistLine = (input: OptiFgInput, fg: OptiFg, setup: OptiSetup =
   const g = inGame(input, setup);
   const on = !!fg && !!g.fg && fgPossible(setup);
   if (setup.kind === "tested") {
+    if (input === "upscaler" && fg && fgPossible(setup)) return "Pick XeSS or DLSS, game FG off, default gamma/brightness, then restart.";
     if (!on) return `Pick ${g.upscale} in the game, then restart it once.`;
     return input === "dlssg" ? "Pick DLSS and DLSS frame generation, then restart the game."
       : "Pick XeSS and XeSS frame generation, then restart the game.";
@@ -346,6 +349,7 @@ export const checklist = (input: OptiFgInput, fg: OptiFg, setup: OptiSetup = TES
   steps.push(setup.kind === "generic" ? `Upscaling: ${g.upscale}, whichever the game offers (any quality).` : `Upscaling: ${g.upscale} (any quality).`);
   if (fgOn && g.fg) steps.push(`Frame Generation: ${g.fg} on.`);
   else if (fgOn) steps.push("Frame Generation: off in the game; OptiScaler makes the frames itself.");
+  if (fgOn && input === "upscaler" && setup.kind === "tested") steps.push("Gamma and brightness: leave them at their defaults (OptiScaler's HUD fix needs them; OptiScaler's wiki).");
   steps.push("Quit and start the game again, once.");
   steps.push(fgOn ? "Check: OptiScaler's menu (Insert on a keyboard) shows XeSS and FG Output XeFG."
     : "Check: OptiScaler's menu (Insert on a keyboard) shows the upscaler you picked.");
@@ -354,7 +358,8 @@ export const checklist = (input: OptiFgInput, fg: OptiFg, setup: OptiSetup = TES
 
 /** What to do when the checklist does not work (the Details' last paragraph). */
 export const CHECKLIST_HELP = [
-  "If DLSS is greyed out in the game: pick \"XeSS frame generation\" as the game setting it replaces (Games tab) and XeSS in the game.",
+  "DLSS upscaling works in this game, but DLSS frame generation and Reflex stay greyed out: the game uses Streamline 1, whose DLSS frame generation OptiScaler cannot take over (OptiScaler's wiki), and OXP3 Deck keeps OptiScaler's NVIDIA GPU spoof off on Intel. Pick XeSS and XeSS frame generation; OptiScaler takes that over.",
+  "If XeSS frame generation still adds no fps: pick \"None: OptiScaler makes its own\" as the game setting it replaces (Games tab), XeSS or DLSS in the game, and keep gamma and brightness at their defaults.",
   "If the picture flickers with DLSS: pick XeSS in the game (OptiScaler's wiki, Known Issues).",
 ];
 /** The same for a known or generic setup. */
@@ -372,6 +377,11 @@ export const installLine = (info: OptiInfo | null | undefined): string => {
     : "OptiScaler's wiki documents this game. Untested on this device.";
   return "Experimental: replaces the game's DLSS, FSR or XeSS. Untested here.";
 };
+
+/** The [OptiFG] keys OptiFG (input "upscaler") writes, for Details: HUDFix=true, then the game's own (GAMES optifg_ini). */
+export const optiFgIni = (extra: Record<string, string> | null | undefined): string =>
+  ["OptiFG HUDFix=true", ...Object.entries(extra ?? {}).filter(([k, v]) => typeof v === "string" && k.startsWith("OptiFG_"))
+    .map(([k, v]) => `${k.slice("OptiFG_".length)}=${v}`)].join(" ");
 
 /** The ini key and value the Upscaler choice writes, for Details. */
 export const upscalerIni = (api: OptiApi, up: OptiUpscaler): string =>

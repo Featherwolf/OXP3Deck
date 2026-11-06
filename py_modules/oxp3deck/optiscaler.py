@@ -74,9 +74,15 @@ GAMES = {
         # uses Streamline 1, and "DLSSG via SL FG inputs are not supported" (wiki Notes); its DLSS-FG stays greyed.
         "fg_inputs": ("xefg", "upscaler"),
         "fg_input": "xefg",
+        # OptiFG (input "upscaler") as the wiki's FG-Settings say: HUDfix with limit 1 and Resource Blocking (the
+        # [OptiFG] HUDLimit and ResourceBlocking keys); HUDFix=true is set for every OptiFG game (_ini_changes)
+        "optifg_ini": {"OptiFG_HUDLimit": "1", "OptiFG_ResourceBlocking": "true"},
         "args": ("-dx12",),                       # wiki: run in DirectX 12 (and launchopts.DX12_ARGS)
-        "notes": ("In the game pick XeSS upscaling and XeSS frame generation (DLSS frame generation stays greyed: the game uses Streamline 1).",
-                  "If XeSS frame generation still adds no fps, set the input to OptiFG (frame generation from the upscaler) and keep the game's gamma and brightness at their defaults (wiki).",
+        "notes": ("In the game pick XeSS upscaling and XeSS frame generation (DLSS frame generation stays greyed: "
+                  "the game uses Streamline 1).",
+                  "If XeSS frame generation still adds no fps, set the input to OptiFG (frame generation from the "
+                  "upscaler), pick XeSS or DLSS upscaling with the game's frame generation off, and keep the game's "
+                  "gamma and brightness at their defaults (wiki).",
                   "DLSS upscaling can flicker: pick XeSS in the game if it does (wiki, Known Issues).",
                   "XeFG needs a borderless window, not exclusive fullscreen (OptiScaler 0.9.0 notes)."),
         "sources": ("github.com/optiscaler/OptiScaler/wiki/The-Witcher-3-Wild-Hunt",
@@ -86,7 +92,10 @@ GAMES = {
         # adds no fps through the launch options); OptiScaler takes the game's XeFG over (input xefg, output XeFG)
         "auto": {"choices": {"upscaler": "xess", "fg": 2, "fg_input": "xefg"},
                  "why": "XeSS frame generation adds no fps here; OptiScaler's XeFG is the known way.",
-                 "short": "for frame generation"},
+                 "short": "for frame generation",
+                 # what 0.4.3 before the correction installed automatically: such an install moves to "choices"
+                 # (migrate_auto) unless the user changed OptiScaler's choices by hand
+                 "before": ({"upscaler": "xess", "fg": 2, "fg_input": "dlssg"},)},
     },
 }
 
@@ -1245,9 +1254,13 @@ def _ini_changes(e: dict, choices: dict, glob: dict, layout: str) -> dict:
                    # OptiFG's auto blocks the Steam overlay and Steam Input: a handheld's controls need them
                    "Hotfix_DisableOverlays": "false" if opti_fg else "auto"})
     else:
+        opti_fg = False
         ch.update({"FrameGen_Enabled": "false", "FrameGen_FGInput": "nofg", "FrameGen_FGOutput": "nofg",
                    "XeFG_InterpolationCount": "auto", "XeFG_ForceBorderless": "auto", "OptiFG_HUDFix": "auto",
                    "Hotfix_DisableOverlays": "auto"})
+    # the game's own OptiFG keys (GAMES optifg_ini) only with OptiFG; otherwise back to auto, as a rewrite keeps keys
+    for k, v in (e.get("optifg_ini") or {}).items():
+        ch[k] = v if opti_fg else "auto"
     return ch
 
 
@@ -1271,8 +1284,11 @@ def _next_text(choices: dict, e: dict | None = None) -> str:
         if choices["fg"] and choices["fg_input"] == "dlssg":
             return "Start the game, pick DLSS and DLSS frame generation, then restart it once."
         if choices["fg"] and choices["fg_input"] == "xefg":
-            return "Start the game, pick XeSS and XeSS frame generation, then restart it once."
-        return "Start the game, pick DLSS, then restart it once."
+            return "Start the game, pick XeSS and XeSS frame generation in a borderless window, then restart it once."
+        if choices["fg"] and choices["fg_input"] == "upscaler":
+            return "Start the game, pick XeSS or DLSS (frame generation off in the game, gamma and brightness at " \
+                   "their defaults), then restart it once."
+        return "Start the game, pick XeSS or DLSS, then restart it once."
     pick = e.get("pick") or "DLSS, FSR or XeSS (whichever it has)"
     fg = {"dlssg": " and DLSS frame generation", "fsrfg": " and FSR frame generation",
           "xefg": " and XeSS frame generation"}.get(choices["fg_input"], "") if choices["fg"] else ""
@@ -1765,10 +1781,40 @@ def set_choices(ctx, appid, choices, settings=None) -> dict:
             return {"ok": False, "error": f"OptiScaler: {getattr(ex, 'strerror', None) or ex}", "opti": None}
         g["choices"] = choices
         g["launch"] = launch_plan(e, choices)
+        g["picked"] = True                   # by hand: migrate_auto leaves these choices alone
         _put_game(ctx, appid, g)
     res = info(ctx, appid, settings)
     res["launch_before"] = before
     return res
+
+
+def migrate_auto(ctx, appid) -> bool:
+    """An automatic install (origin "auto") still holding choices an older OXP3 Deck picked automatically (GAMES
+    auto "before") that the user never changed by hand (no "picked"): OptiScaler.ini and the record get the table's
+    automatic choices. Not while the game runs. True when it rewrote; errors are logged (the next plan tries again)."""
+    appid = str(appid or "")
+    auto = (entry(appid) or {}).get("auto") or {}
+    if not auto.get("before") or steamlib.running_game(ctx) == appid:
+        return False
+    try:
+        with _LOCK:
+            g = _game_rec(ctx, appid)
+            if g is None or g.get("partial") or g.get("origin") != "auto" or g.get("picked") or \
+                    g.get("choices") not in auto["before"]:
+                return False
+            e, _why = resolve(ctx, appid)
+            choices, why = check_choices(e, auto["choices"]) if e else (None, _why)
+            if why or not check(ctx, appid, installing=False)["ok"]:
+                return False
+            _rewrite_ini(ctx, appid, g, e, choices, dict(_load(ctx)["global"]))
+            g["choices"] = choices
+            g["launch"] = launch_plan(e, choices)
+            _put_game(ctx, appid, g)
+        log.info("optiscaler: %s: automatic choices moved to %s", appid, choices)
+        return True
+    except Exception:
+        log.exception("optiscaler: migrate_auto %s", appid)
+        return False
 
 
 def options(ctx, opts) -> dict:
@@ -1841,7 +1887,8 @@ def info(ctx, appid, settings=None) -> dict:
            "proxy": e.get("proxy") if e else None, "pick": e.get("pick") if e else None,
            "fg_ok": bool(e) and e.get("api", "dx12") == "dx12",
            "upscaler_found": e.get("has_upscaler") if e else None,
-           "fit": e.get("fit") if e else None}
+           "fit": e.get("fit") if e else None,
+           "optifg_ini": dict(e.get("optifg_ini") or {}) if e else {}, "choices_stale": False}
     if e is None and g is None:
         out["why"] = check(ctx, appid, installing=True)["why"] or rwhy
         return {"ok": True, "error": None, "opti": out}
@@ -1864,6 +1911,8 @@ def info(ctx, appid, settings=None) -> dict:
         out["folder"] = g.get("folder")
         choices, _why = check_choices(e, g.get("choices"))
         out["choices"] = choices
+        # the record's choices are no longer offered (The Witcher 3's old dlssg): OptiScaler.ini still has them
+        out["choices_stale"] = choices is None and not g.get("partial")
         out["launch"] = g.get("launch")
         out["kept"] = [k for k in g.get("kept") or [] if isinstance(k, str)]
         out["backed_up"] = [b["rel"] for b in g.get("backups") or [] if isinstance(b, dict) and

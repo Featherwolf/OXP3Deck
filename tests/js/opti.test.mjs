@@ -158,32 +158,50 @@ test("readLog / fitLog: well-formed entries only, newest 20, under 4 KB", () => 
 // ---- choices, checklist, texts ------------------------------------------------------------------------------------
 
 test("checklist: the numbered steps for each game setting", () => {
-  const d = o.checklist("dlssg", 2);
+  // The Witcher 3 (the tested setup): its own XeSS frame generation is the default input (Streamline 1: no dlssg)
+  const d = o.checklist(o.DEFAULT_CHOICES.fg_input, o.DEFAULT_CHOICES.fg);
+  assert.equal(o.DEFAULT_CHOICES.fg_input, "xefg");
   assert.equal(d.length, 6);
   assert.match(d[0], /^1\. Start the game/);
   assert.match(d[1], /Borderless/);
-  assert.match(d[2], /Upscaling: DLSS/);
-  assert.match(d[3], /DLSS Frame Generation on/);
+  assert.match(d[2], /Upscaling: XeSS/);
+  assert.match(d[3], /XeSS Frame Generation on/);
   assert.match(d[4], /again, once/);
   assert.match(d[5], /OptiScaler's menu .*XeFG/);
   assert.match(o.checklist("xefg", 3).join(" "), /XeSS Frame Generation on/);
-  assert.match(o.checklist("upscaler", 2).join(" "), /off in the game; OptiScaler makes the frames/);
-  assert.doesNotMatch(o.checklist("dlssg", 0).join(" "), /Frame Generation/);
-  assert.equal(o.checklistLine("dlssg", 2), "Pick DLSS and DLSS frame generation, then restart the game.");
+  // OptiFG: XeSS or DLSS upscaling, the game's frame generation off, gamma and brightness at their defaults
+  const of = o.checklist("upscaler", 2).join(" ");
+  assert.match(of, /Upscaling: XeSS or DLSS/);
+  assert.match(of, /off in the game; OptiScaler makes the frames/);
+  assert.match(of, /Gamma and brightness: leave them at their defaults/);
+  assert.doesNotMatch(o.checklist("xefg", 2).join(" "), /Gamma/);
+  assert.doesNotMatch(o.checklist("xefg", 0).join(" "), /Frame Generation/);
   assert.equal(o.checklistLine("xefg", 4), "Pick XeSS and XeSS frame generation, then restart the game.");
-  assert.match(o.CHECKLIST_HELP.join(" "), /greyed out/);
+  assert.equal(o.checklistLine("upscaler", 2), "Pick XeSS or DLSS, game FG off, default gamma/brightness, then restart.");
+  assert.equal(o.checklistLine("upscaler", 0), "Pick XeSS or DLSS in the game, then restart it once.");
+  assert.match(o.CHECKLIST_HELP.join(" "), /greyed out: the game uses Streamline 1/);
+  assert.match(o.CHECKLIST_HELP.join(" "), /gamma and brightness at their defaults/);
+  // dlssg where OptiScaler's wiki documents it (a known game such as Cyberpunk 2077)
+  const known = { kind: "known", api: "dx12", pick: "XeSS" };
+  const k = o.checklist("dlssg", 2, known);
+  assert.match(k[2], /Upscaling: XeSS/);
+  assert.match(k[3], /DLSS Frame Generation on/);
+  assert.equal(o.checklistLine("dlssg", 2, known), "Pick XeSS and DLSS frame generation, then restart the game.");
+  assert.doesNotMatch(o.checklist("dlssg", 0, known).join(" "), /Frame Generation/);
+  assert.equal(o.optiFgIni({ OptiFG_HUDLimit: "1", OptiFG_ResourceBlocking: "true" }), "OptiFG HUDFix=true HUDLimit=1 ResourceBlocking=true");
+  assert.equal(o.optiFgIni(undefined), "OptiFG HUDFix=true");
 });
 
 test("labels, statusLine and readChoices", () => {
   assert.deepEqual(o.choiceLabels({ upscaler: "fsr31", fg: 3, fg_input: "xefg" }), { upscaler: "FSR 3.1", fg: "XeFG 3x", input: "XeSS frame generation" });
-  const info = { state: "installed", update: false, choices: { upscaler: "xess", fg: 2, fg_input: "dlssg" } };
+  const info = { state: "installed", update: false, choices: { upscaler: "xess", fg: 2, fg_input: "xefg" } };
   assert.equal(o.statusLine(info), "XeSS · frame generation 2x");
   assert.equal(o.statusLine({ ...info, update: true }), "Update available");
   assert.equal(o.statusLine({ ...info, state: "none" }), "Not installed");
   assert.equal(o.statusLine({ ...info, state: "other" }), "Another OptiScaler is installed");
   assert.equal(o.statusLine({ ...info, state: "partial" }), "Partly removed: open Details");
   assert.equal(o.readChoices({ upscaler: "xess", fg: 5, fg_input: "dlssg" }), null);
-  assert.deepEqual(o.readChoices(o.DEFAULT_CHOICES), { upscaler: "xess", fg: 2, fg_input: "dlssg" });
+  assert.deepEqual(o.readChoices(o.DEFAULT_CHOICES), { upscaler: "xess", fg: 2, fg_input: "xefg" });
 });
 
 test("one-liners are short and name no variables; dialogs say when they take effect", () => {
@@ -193,7 +211,7 @@ test("one-liners are short and name no variables; dialogs say when they take eff
     ...["none", "installed", "partial", "other"].map((state) => o.statusLine({ state, update: false, choices: o.DEFAULT_CHOICES })),
     ...o.optiWarnings({ compat_tool_shimmed: false, compat_tool: "proton-cachyos", prefix_checks: { hides_wine: true } }, false).map((w) => w.line),
   ];
-  assert.doesNotMatch(o.readyToast("The Witcher 3", "dlssg", 2), VAR);
+  assert.doesNotMatch(o.readyToast("The Witcher 3", "xefg", 2), VAR);
   for (const l of lines) {
     assert.ok(l.length <= MAX_LINE, l);
     assert.doesNotMatch(l, VAR, l);

@@ -93,8 +93,8 @@ of 20261104), with its licence in `tests/fixtures/xess/LICENSE`.
 [OptiScaler](https://github.com/optiscaler/OptiScaler) by cdozdil and the OptiScaler contributors (GPL-3.0) takes
 a game's DLSS, XeSS or FSR calls and runs another upscaler and frame generation in their place. OXP3 Deck downloads a
 pinned OptiScaler build from its GitHub release when you tap Install, and puts it into the game's folder: for The
-Witcher 3 with its tested setup (the game set to DLSS and DLSS frame generation, OptiScaler running XeSS and XeSS
-frame generation), for the games OptiScaler's wiki documents as the wiki says, and for any other game with a generic,
+Witcher 3 with its tested setup (the game set to XeSS and XeSS frame generation, OptiScaler taking that over with
+its own XeSS and XeSS frame generation), for the games OptiScaler's wiki documents as the wiki says, and for any other game with a generic,
 experimental setup.
 OptiScaler is not part of OXP3 Deck and is never run by it ([THIRD_PARTY_NOTICES.md](THIRD_PARTY_NOTICES.md) says
 what is downloaded and where it goes).
@@ -103,8 +103,9 @@ Sources of the games table in `optiscaler.py` (facts, no code): OptiScaler's wik
 [The Witcher 3: Wild Hunt](https://github.com/optiscaler/OptiScaler/wiki/The-Witcher-3-Wild-Hunt) (the
 `bin/x64_dx12` folder, `dxgi.dll`, DirectX 12, the known issues), its `OptiScaler/GameConfigs.cpp` and
 `OptiScaler.ini` (Dxgi spoofing off for `witcher3.exe`; the ini keys and values OXP3 Deck sets) and its release
-notes. The route itself (DLSS and DLSS frame generation in the game, XeSS and XeFG from OptiScaler, on the same
-chip) comes from ETA Prime's video of ClawDeck on SteamOS. xess-xmx-linux's `docs/games.md` gave its OptiScaler
+notes; the wiki page also gives the frame generation input (the game's XeSS frame generation, since it uses
+Streamline 1, or OptiFG with HUDfix limit 1 and Resource Blocking). That OptiScaler's XeSS and XeFG help on the same
+chip comes from ETA Prime's video of ClawDeck on SteamOS. xess-xmx-linux's `docs/games.md` gave its OptiScaler
 recipe (Dxgi spoofing off, `WINEDLLOVERRIDES=dxgi=n,b`) and its `docs/debugging.md` the need for `force_vk_vendor=0`
 in The Witcher 3.
 

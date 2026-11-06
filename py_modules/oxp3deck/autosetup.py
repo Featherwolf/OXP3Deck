@@ -24,7 +24,7 @@ from . import context, games, optigames, optiscaler, steamlib, xess
 log = logging.getLogger("oxp3deck")
 
 VERSION = 1
-PLAN_VERSION = 1          # raised whenever the tables (below, games, optigames) change: seen games are planned again
+PLAN_VERSION = 2          # raised whenever the tables (below, games, optigames) change: seen games are planned again
 STATE_NAME = "auto.json"
 READ_MAX = 1 << 20
 MAX_GAMES = 400
@@ -683,6 +683,10 @@ def plan(ctx, settings, appid, facts) -> dict:
                 _save(ctx, st)
             g = copy.deepcopy(g)
             on = st["on"]
+        # an automatic OptiScaler install on choices the table has since replaced gets the new ones (not by hand)
+        if on and g["mode"] == "auto" and opti_rec is not None and opti_rec.get("origin") == "auto" and \
+                optiscaler.migrate_auto(ctx, a):
+            opti_rec = optiscaler.game_record(ctx, a)
         return {"ok": True, "error": None, "plan": _build_plan(ctx, settings, a, g, f, opti_rec, on)}
     return _safe("plan", go)
 

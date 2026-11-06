@@ -198,7 +198,7 @@ class PlanTest(AutoBase):
     def test_witcher_on_ge_proton_11_11(self):
         self.on()
         p = self.plan(WITCHER)
-        self.assertEqual(p["opti"]["choices"], {"upscaler": "xess", "fg": 2, "fg_input": "dlssg"})
+        self.assertEqual(p["opti"]["choices"], {"upscaler": "xess", "fg": 2, "fg_input": "xefg"})
         self.assertEqual(p["opti"]["short"], "for frame generation")
         self.assertIsNone(p["proton"])
         self.assertIsNone(p["proton_note"])
@@ -320,7 +320,7 @@ class PlanTest(AutoBase):
         self.plan(WITCHER)
         with mock.patch.object(optiscaler, "game_record", return_value={"build": "v10-20261105", "origin": "auto",
                                                                         "choices": {"upscaler": "xess", "fg": 2,
-                                                                                    "fg_input": "dlssg"}}):
+                                                                                    "fg_input": "xefg"}}):
             self.assertTrue(autosetup.opti_done(self.ctx, WITCHER, {"ok": True})["ok"])
             p = self.plan(WITCHER)
             self.assertIsNone(p["opti"])
@@ -330,6 +330,27 @@ class PlanTest(AutoBase):
                                                                            "for frame generation"))
         p = self.plan(WITCHER)                                      # the record is gone
         self.assertEqual((p["mode"], p["mode_why"]), ("manual", "OptiScaler was removed outside OXP3 Deck."))
+
+
+    def test_plan_moves_an_old_automatic_install_only_when_automatic(self):
+        self.on()
+        self.plan(WITCHER)
+        old = {"build": "v10-20261105", "origin": "auto", "choices": {"upscaler": "xess", "fg": 2,
+                                                                      "fg_input": "dlssg"}}
+        for rec, mode, called in ((old, "auto", True), (dict(old, origin="user"), "auto", False),
+                                  (old, "manual", False), (None, "auto", False)):
+            with self.subTest(rec=rec, mode=mode):
+                autosetup.set_mode(self.ctx, WITCHER, mode)
+                with mock.patch.object(optiscaler, "game_record", return_value=rec), \
+                        mock.patch.object(optiscaler, "migrate_auto", return_value=False) as m:
+                    self.plan(WITCHER)
+                self.assertEqual(m.called, called)
+        autosetup.enable(self.ctx, False)
+        with mock.patch.object(optiscaler, "game_record", return_value=old), \
+                mock.patch.object(optiscaler, "migrate_auto", return_value=False) as m:
+            autosetup.set_mode(self.ctx, WITCHER, "auto")
+            self.plan(WITCHER)
+        self.assertFalse(m.called)                                  # the switch off: nothing changes
 
 
 class RecordTest(AutoBase):
@@ -440,7 +461,7 @@ class UndoTest(AutoBase):
         self.on()
         self.plan(WITCHER)
         rec = {"build": "v10-20261105", "origin": "auto", "choices": {"upscaler": "xess", "fg": 2,
-                                                                      "fg_input": "dlssg"}}
+                                                                      "fg_input": "xefg"}}
         with mock.patch.object(optiscaler, "game_record", return_value=rec):
             autosetup.opti_done(self.ctx, WITCHER, {"ok": True})
             cid = self.agame(WITCHER)["changes"][-1]["id"]
@@ -462,7 +483,7 @@ class UndoTest(AutoBase):
             seen["args"] = (appid, choices, auto, origin)
             return {"ok": True, "error": None}
         rec = {"build": "v10-20261105", "origin": "auto", "choices": {"upscaler": "xess", "fg": 2,
-                                                                      "fg_input": "dlssg"}}
+                                                                      "fg_input": "xefg"}}
         self.assertIsNone(autosetup.opti_precheck(self.ctx, self.settings, WITCHER))
         with mock.patch.object(optiscaler, "install", install), \
                 mock.patch.object(optiscaler, "game_record", return_value=rec):
@@ -648,7 +669,7 @@ class ReviewFixTest(AutoBase):
                                       "launch": {"set": {"XESS": "latest"}, "dropped": {"FSR": "xess"}, "args": []}})
         with mock.patch.object(optiscaler, "game_record", return_value={"build": "v10-20261105", "origin": "auto",
                                                                         "choices": {"upscaler": "xess", "fg": 2,
-                                                                                    "fg_input": "dlssg"}}):
+                                                                                    "fg_input": "xefg"}}):
             g = autosetup.opti_done(self.ctx, WITCHER, {"ok": True}, True)["game"]
         states = {c["id"]: c["state"] for c in g["changes"]}
         self.assertEqual(states[xc["id"]], "superseded")

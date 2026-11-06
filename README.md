@@ -316,7 +316,7 @@ next start. No re-login is needed.
   the game is not running: a few seconds after you quit it, when you open its settings, or when a library scan
   (20 s after loading, then every 10 minutes while no game runs, at most 8 games each time) first sees it.
   - Games it knows (its OptiScaler tables, its known issues, the DirectX 12 list) get their best known setup:
-    OptiScaler where the table says it helps (The Witcher 3: XeSS with XeFG 2x through DLSS frame generation),
+    OptiScaler where the table says it helps (The Witcher 3: XeSS with XeFG 2x through the game's XeSS frame generation),
     `-dx12`, `XESS=latest` where the game needs it, and launch options known to crash the game taken out (Monster
     Hunter Wilds: `XESS_FG`, `FSR`, `FSR_FG`). Other games only get what can only help (`XESS=latest` for old XeSS);
     OptiScaler and `FSR=xess` are offered ("Also possible: …", **Use it**), never applied by themselves.
@@ -355,9 +355,14 @@ It only works in games that already offer DLSS 2+, FSR 2+ or XeSS. There are thr
 which one a game gets:
 
 - **The Witcher 3: the tested setup.** Its own XeSS frame generation does not start on this device ("Latency
-  reduction is not enabled"); the game is set to DLSS and DLSS frame generation and OptiScaler runs XeSS and XeFG in
-  their place. This is the setup from ETA Prime's video on the same chip; **it is not tested on the ONEXPLAYER 3
-  with this plugin yet**.
+  reduction is not enabled"); the game is set to XeSS and XeSS frame generation and OptiScaler takes that over with
+  its own XeSS and XeFG (`FGInput=xefg`, `FGOutput=xefg`). DLSS frame generation (and Reflex) stays greyed out in
+  this game even with OptiScaler: the game uses Streamline 1, whose DLSS frame generation OptiScaler cannot take
+  (OptiScaler's wiki). The fallback is OptiFG ("None: OptiScaler makes its own"): XeSS or DLSS upscaling, the game's
+  frame generation off, gamma and brightness at their defaults; OXP3 Deck then sets `HUDFix=true`, `HUDLimit=1` and
+  `ResourceBlocking=true` as the wiki says. An install from an earlier 0.4.3 still on DLSS frame generation: one the
+  automatic setup made and nobody changed is moved to XeSS frame generation on its next automatic check; any other
+  shows **Write these choices** on the game page. **Not tested on the ONEXPLAYER 3 with this plugin yet**.
 - **About 40 games OptiScaler's wiki documents** (Cyberpunk 2077, Black Myth: Wukong, Hogwarts Legacy, the Spider-Man,
   Horizon and Last of Us ports, …): the exe folder, the file name and what to pick in the game follow the game's wiki
   page. Not tested on this device.
@@ -386,10 +391,10 @@ Intel; the cost is that some games then hide DLSS, so pick FSR or XeSS in them.
    The Witcher 3, a dxgi.dll); the game's own files are not touched.
 2. Pick the **Upscaler** (XeSS, or FSR 3.1) and, in DirectX 12 games, **Frame generation** (Off, XeFG 2x, 3x or 4x;
    The Witcher 3 starts at 2x, every other game at Off). On the Games tab, **Game setting it replaces** chooses which
-   of the game's settings OptiScaler takes over (for The Witcher 3 DLSS frame generation by default; XeSS frame
-   generation if DLSS is greyed out in the game).
+   of the game's settings OptiScaler takes over (for The Witcher 3 XeSS frame generation by default; OptiFG if
+   that still adds no fps).
 3. **In the game, once** (its Details have the steps). The Witcher 3: start the game; Display mode Borderless;
-   Upscaling DLSS; Frame Generation DLSS Frame Generation on; quit and start it again once; OptiScaler's menu (Insert
+   Upscaling XeSS; Frame Generation XeSS Frame Generation on; quit and start it again once; OptiScaler's menu (Insert
    on a keyboard) should show XeSS and FG Output XeFG. Other games: pick what the row says (or DLSS, FSR or XeSS),
    restart once, check OptiScaler's menu. **Show OptiScaler's FPS counter** (Games tab) helps check it works.
 
