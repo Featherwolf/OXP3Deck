@@ -69,17 +69,22 @@ GAMES = {
         "build": "v10-20261105",
         "ini": {"Spoofing_Dxgi": "false"},        # OptiScaler GameConfigs.cpp (master) and 0.9.4 Quirks.h;
                                                   # xess-xmx-linux games.md: NVIDIA spoof -> libxess on DP4a
-        "fg_inputs": ("dlssg", "xefg", "upscaler"),   # SL1 DLSSG (v10), the game's XeFG (v10), OptiFG
-        "fg_input": "dlssg",                      # ETA Prime's route: the game on DLSS + DLSS frame generation
+        # The game's own XeFG first (FGInput=xefg: OptiScaler takes over its XeSS frame generation, with the
+        # witcher3.exe XeFGCameraMotionFill quirk made for exactly this input), then OptiFG. Not dlssg: the game
+        # uses Streamline 1, and "DLSSG via SL FG inputs are not supported" (wiki Notes); its DLSS-FG stays greyed.
+        "fg_inputs": ("xefg", "upscaler"),
+        "fg_input": "xefg",
         "args": ("-dx12",),                       # wiki: run in DirectX 12 (and launchopts.DX12_ARGS)
-        "notes": ("DLSS upscaling can flicker: pick XeSS in the game if it does (wiki, Known Issues).",
+        "notes": ("In the game pick XeSS upscaling and XeSS frame generation (DLSS frame generation stays greyed: the game uses Streamline 1).",
+                  "If XeSS frame generation still adds no fps, set the input to OptiFG (frame generation from the upscaler) and keep the game's gamma and brightness at their defaults (wiki).",
+                  "DLSS upscaling can flicker: pick XeSS in the game if it does (wiki, Known Issues).",
                   "XeFG needs a borderless window, not exclusive fullscreen (OptiScaler 0.9.0 notes)."),
         "sources": ("github.com/optiscaler/OptiScaler/wiki/The-Witcher-3-Wild-Hunt",
                     "OptiScaler master OptiScaler/GameConfigs.cpp (witcher3.exe)",
                     "ClawDeck assets/games.json witcher3.exe entry, read only as a pointer"),
         # Automatic setup (DESIGN.md "Automatic setup"): games.KNOWN_ISSUES 292030 fg_no_gain (XeSS frame generation
-        # adds no fps through the launch options) and ETA Prime's route (DLSS frame generation as the input, XeFG out)
-        "auto": {"choices": {"upscaler": "xess", "fg": 2, "fg_input": "dlssg"},
+        # adds no fps through the launch options); OptiScaler takes the game's XeFG over (input xefg, output XeFG)
+        "auto": {"choices": {"upscaler": "xess", "fg": 2, "fg_input": "xefg"},
                  "why": "XeSS frame generation adds no fps here; OptiScaler's XeFG is the known way.",
                  "short": "for frame generation"},
     },
