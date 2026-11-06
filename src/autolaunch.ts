@@ -75,12 +75,14 @@ export const tokensText = (added: Partial<Record<ManagedKey, string>> | AutoSugg
  * that would have to be re-quoted to put %command% in front of them (that would rewrite the user's text).
  */
 export type Plan = { text: string; added: AutoSuggest[]; args: AutoArg[] };
-export const plan = (text: string, suggest: AutoSuggest[], rec: AutoRecord | undefined, args: AutoArg[] = []): Plan => {
+export const plan = (text: string, suggest: AutoSuggest[], rec: AutoRecord | undefined, args: AutoArg[] = [],
+  skip: readonly ManagedKey[] = []): Plan => {
   const s = text ?? "";
   const p = parse(s);
   const none: Plan = { text: s, added: [], args: [] };
   if (p.typo) return none;
-  const keys = planKeys(s, p, suggest, rec);
+  // skip: keys OptiScaler takes out of the launch options while it is in the game (opti.ts OPTI_DROPPED / its plan)
+  const keys = planKeys(s, p, (suggest ?? []).filter((a) => !skip.includes(a?.key)), rec);
   // then the game arguments, appended after the rest (setArg keeps the text as it is)
   const argsDone = new Set(rec?.argsDone ?? []);
   let out = keys.text;

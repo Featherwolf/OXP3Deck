@@ -80,6 +80,9 @@ py_modules/oxp3deck/
                        read only, deltas between two samples (0.4)
   extras.py            battery charge limit and charge behaviour, fan mode (kernel 7.4+, ONEXPLAYER 3 only), scx_lavd
                        mode (org.scx.Loader), intel_lpmd off during games; extras.json, extras-run.json (0.4)
+  optiscaler.py        OptiScaler per game: pinned download, unpack as the user, install into the game's exe folder
+                       with backups, OptiScaler.ini, remove that restores exactly, update; optiscaler.json (0.5,
+                       "OptiScaler")
 src/                   frontend (TypeScript, @decky/ui)
   api.ts               one `callable` per backend method; backend.ts wraps each so it never rejects
   types.ts             the answers below, as TypeScript types
@@ -93,6 +96,8 @@ src/                   frontend (TypeScript, @decky/ui)
   effects.ts           "When it takes effect": the tags, the tag of every setting, pending texts (pure, node-tested)
   autolaunch.ts        automatic launch options: what to add, the record, Undo (pure, node-tested)
   copyopts.ts          "Copy launch options": the line to paste by hand, why, its texts (pure, node-tested)
+  opti.ts              OptiScaler's launch-option plan applied and undone, its choices, checklist and texts (pure,
+                       node-tested; 0.5)
   clipboard.ts         copy text in Steam's CEF: execCommand / navigator.clipboard chain (framework-free, node-tested)
   live.ts              the live readouts' line and Details texts (pure, node-tested)
   conflicts.ts         the conflicts' friendly names, one-liners, Details and Fix / Undo dialogs (pure, node-tested)
@@ -2210,6 +2215,7 @@ after a change that is not immediate, in a pending row.
 | `game.auto`, `game.auto_undo`, `auto.global` | automatic launch options | Restart the game |
 | `game.copy` | Copy launch options (pasted by hand) | Restart the game |
 | `game.dx12` | Start in DirectX 12 | Restart the game |
+| `game.opti`, `game.opti_upscaler`, `game.opti_fg`, `game.opti_input`, `game.opti_remove`, `game.opti_update` | OptiScaler (0.5) | Restart the game (greyed "Quit <game> first." while it runs) |
 | `kernel.try`, `kernel.keep` | Kernel | Reboot |
 | `oxp3.install` | Install / Update fixes tool | Now |
 | `reboot` | Reboot to finish | Now |
@@ -2488,3 +2494,391 @@ paused while a game runs (`GetState` OFF) and back.
 Interfaces between them are exactly the signatures above: builder 2 may stub `power.active` / `power.refresh` /
 `readouts.sample` in its tests until builder 1's land; builder 1 reads `extras.lpmd_paused` lazily (missing →
 False). DESIGN.md belongs to the integrator; a builder writes "(Built: …)" notes into its own sections only.
+
+## OptiScaler (0.5)
+
+Owner request: "try adding optiscaler". The Witcher 3 (292030) never gets XeSS frame generation through its own XeSS
+path on the owner's device (GE-Proton11-11, xess-xmx-linux 20261104; XESS=latest, IGDEXT_GTGEN=1300,
+force_vk_vendor=-1 and XELL_FORCE_CROSS_VENDOR=1 tried): about 50 fps, and XeFG answers "Latency reduction is not
+enabled" (-15) every frame. ETA Prime's video (same chip, SteamOS) ran it through ClawDeck's OptiScaler: the game set
+to DLSS and DLSS frame generation, OptiScaler running XeSS upscaling and XeFG in their place. OptiScaler drives XeLL
+itself when its XeFG is the output (its `OptiScaler.ini`, `[fakenvapi] LowLatencyOutput`: "OptiScaler's XeFG always
+uses XeLL"), so the game's own latency-reduction switch no longer decides; that is the reason to try it. **Unverified
+on the device**: the owner tests the steps below; nothing in this section is measured yet.
+
+### Which OptiScaler
+
+- **Pinned: OptiScaler v10 nightly `nightly-20261105`** (optiscaler/OptiScaler-nightly), asset
+  `OptiScaler_v10.0.0-pre1_20261105.7z`, sha256 `e26810c76451666da0bcc40be62722e7b4a5d36c550036830b98f5eb69e0648c`,
+  about 69 MB, built from master (its notes list 380b9c67, 5bf6d19d, d217b093).
+- **Not 0.9.4**, which ClawDeck and Decky Framegen pin: OptiScaler's wiki page for the game says "Game still uses
+  Streamline 1, which means DLSSG via SL FG inputs are not supported!", and everything the game needs is on master
+  only: Streamline 1 DLSSG input (7ce71e7, d1dd0c8, 22f7e86, 8e28c7c, b971c82; the v10 notes name The Witcher 3),
+  `CreateSLOnThe2ndDevice` (4dab1f0), the XeFG input with Witcher-specific handling (90fc27d), XeLL or Reflex picked
+  for its DLSSG (cfcc4a9), `XeFGCameraMotionFill` (78929fc). 0.9.4 would only offer OptiFG (upscaler input).
+- No OptiPatcher (Witcher 3 is not in its GameSupport.md; it is for Unreal games) and no separate fakenvapi (v10 has
+  it built in, `[fakenvapi] UseFakenvapi`). `Plugins_LoadAsiPlugins=false`.
+- A nightly can be deleted upstream. Then the download fails with "This OptiScaler build is no longer published:
+  update OXP3 Deck." A package already in the cache keeps working (install and update use it, no download).
+- `BUILDS` in optiscaler.py: `{id: {version, url, sha256, size_max, layout: "subfolder"}}`; one entry now
+  (`"v10-20261105"`). A new pin is a plugin update; the per-game state then shows an update (below).
+
+### Module `py_modules/oxp3deck/optiscaler.py`
+
+Written for OXP3 Deck. It follows ClawDeck's approach (download once, put into a game with a manifest and backups,
+take out again) as of ClawDeck commit `07918cc` (2026-11-05), the last MIT one; **no code from later ClawDeck
+commits** (AGPLv3 since 47559f4) and **nothing from its `assets/games.json`** (GPL-3.0, derived from OptiScaler).
+
+**Games table** `GAMES` (hand-written, one entry per tested game, each with its sources in a comment; a game is
+added only with a source):
+
+```python
+GAMES = {
+    "292030": {                                   # The Witcher 3: Wild Hunt
+        "name": "The Witcher 3",
+        "exe": "witcher3.exe",
+        "folder": "bin/x64_dx12",                 # wiki: install in "The Witcher 3\bin\x64_dx12"; bin/x64 is DX11
+        "proxy": "dxgi",                          # wiki Filename: dxgi.dll
+        "api": "dx12",
+        "build": "v10-20261105",
+        "ini": {"Spoofing_Dxgi": "false"},        # OptiScaler GameConfigs.cpp (master 611-620) and 0.9.4 Quirks.h:396;
+                                                  # xess-xmx-linux docs/games.md: with the NVIDIA spoof libxess takes DP4a
+        "fg_inputs": ("dlssg", "xefg", "upscaler"),   # SL1 DLSSG (v10), the game's XeFG (v10), OptiFG
+        "fg_input": "dlssg",                      # ETA Prime's route: the game on DLSS + DLSS frame generation
+        "args": ("-dx12",),                       # wiki: run in DirectX 12 (and launchopts.DX12_ARGS)
+        "notes": ("DLSS upscaling can flicker: pick XeSS in the game if it does (wiki, Known Issues).",
+                  "XeFG needs a borderless window, not exclusive fullscreen (OptiScaler 0.9.0 notes)."),
+        "sources": ("github.com/optiscaler/OptiScaler/wiki/The-Witcher-3-Wild-Hunt",
+                    "OptiScaler master OptiScaler/GameConfigs.cpp (witcher3.exe)",
+                    "ClawDeck assets/games.json witcher3.exe entry, read only as a pointer"),
+    },
+}
+```
+
+Functions (every public one returns `{ok, error, ...}`, never raises; paths checked with `userexec.open_dir`):
+
+| Function | Does |
+|---|---|
+| `entry(appid)` | the `GAMES` entry or None |
+| `exe_dir(ctx, appid)` | `steamlib.app_install_dir` + the entry's `folder`, case-insensitively, each part a real folder (not a link) inside the install folder, holding the entry's `exe` as a regular file; else None with the reason |
+| `check(ctx, appid, *, installing)` | the refusals below, in order; `{ok, error, why: str|null}` |
+| `fetch(ctx, job, build_id)` | the package into the cache (below); nothing when `package_ok` |
+| `package_ok(ctx, build_id)` | the cache folder exists and its `.oxp3deck-package.json` (root-written list of every file's rel, size, sha256) matches the files (size only, sha256 at install) |
+| `install(ctx, settings, job, appid, choices)` | `check`, `fetch`, then put the files in (below); result `OptiJobResult` |
+| `set_choices(ctx, appid, choices, settings=None)` | rewrites only `OptiScaler.ini` and the record; not a job; `OptiInfoRes` with a new `launch` plan (and the warnings, from `settings`) |
+| `remove(ctx, settings, job, appid)` | puts everything back (below); result `OptiJobResult` |
+| `update(ctx, settings, job, appid)` | `fetch`, `remove`, then `install` with the recorded choices, in one job; stops after a failed download or remove |
+| `info(ctx, appid)` | `OptiInfo` (state per game, below) |
+| `installed_for(ctx, appid) -> bool` | the record says installed (games.py uses it, no folder scan) |
+| `ini_text(package_ini, entry, choices, glob) -> str` | pure: the package's own `OptiScaler.ini` with our keys set |
+| `set_ini(text, changes) -> str` | pure: `{"Section_Key": value}` set in place (section names compared without `-` and `.`; a missing key added at the end of its section, a missing section appended); keys and values checked by `INI_KEY` / `INI_VAL` (`true|false|auto|-?[0-9]+(\.[0-9]+)?|[a-z0-9_]{1,16}|\.\\OptiScaler`) |
+| `launch_plan(entry, choices) -> LaunchPlan` | pure: what the frontend writes (below) |
+| `prune_cache(ctx)` | removes, as the user, cache folders of builds no record uses and no longer in `BUILDS` |
+
+**Download and unpack** (`fetch`, a job step):
+1. Refuse when no unpacker: `7z`, `7za`, `7zz` or `bsdtar` from `/usr/bin` (the archive is 7z with BCJ2; stdlib Python
+   cannot read it, and nothing is installed for it). The error names the package to install (CachyOS: `7zip`;
+   Bazzite: `p7zip` is not in the image, so `bsdtar` from libarchive, or `rpm-ostree install p7zip`).
+2. `downloads.download(url, <mkdtemp>/<asset>, expected_sha256=..., max_bytes=size_max)` (96 MB cap) into a root-only
+   `tempfile.mkdtemp(dir=TMP_PARENT)`, as xess.py does. A sha256 mismatch deletes it and fails.
+3. List it **as the user** (`userexec.run`, timeout 120 s): `7z l -slt -ba <archive>` (or `bsdtar -tvf`). Refuse
+   absolute names, `..`, backslashes, links (7z `Attributes` with `l`, bsdtar `l` mode), devices, more than 2000
+   entries or more than 400 MB unpacked; there must be one `OptiScaler.dll` and one `OptiScaler.ini`, at the top or
+   in one top folder (`root`).
+4. `os.chmod(tmp, 0o755)` (still only root writes there), `user_mkdirs(~/.local/share/oxp3deck/optiscaler)`, unpack
+   as the user into `<build_id>.new` (`7z x -y -o<dir> <archive>`, or `bsdtar -xf <archive> -C <dir>`; clean env, no
+   `LD_LIBRARY_PATH`), then walk the result with `os.fwalk` (no links followed) and check it against the listing
+   (same names, no links, sizes within the cap). Then `.oxp3deck-package.json` with every file's sha256
+   (`write_new`), `rename` `<build_id>.new` to `<build_id>` as the user, remove the mkdtemp. Nothing downloaded is
+   ever run: only the host's 7z or bsdtar, as the user.
+
+**Install into the game** (`install`, after `check`):
+- **Layout "subfolder"** (v10, as OptiScaler's own v10 notes and ClawDeck's Capcom setup): in the exe folder only
+  `<proxy>.dll` (OptiScaler.dll) and `OptiScaler.ini`; every other package file under `OptiScaler/`
+  (`Libraries_OptiDllPath=.\OptiScaler`). Skipped: `setup_linux.sh`, `setup_windows.bat`, any `.bat`, names starting
+  `!!`, and `Licenses/` (they stay in the cache). The game's own `libxess*.dll` / `libxell.dll` are **not touched**.
+- **As the user**: folders by `userexec.user_mkdirs`; files by a new `userexec.copy_new(ctx, src, dest, mode=0o644)`
+  (write_new's rules, O_EXCL | O_NOFOLLOW, owned by the user, streamed in 1 MB blocks with a running sha256, which
+  must equal the package list's: a cache file changed since unpacking fails the install); the ini by `write_new`.
+  Never `chown_tree` on the game folder, never a root-owned file in it.
+- **Backups**: a file that is in the way (any name we write, compared case-insensitively, as Wine does) is renamed,
+  never copied, into `<exe folder>/.oxp3deck-optiscaler/backup/<rel>` with `os.rename(..., src_dir_fd, dst_dir_fd)`
+  on `open_dir` descriptors (a rename keeps the user's owner); its size and sha256 go into the record first. A
+  `<proxy>.dll` that is not ours is not backed up: it is a refusal (another mod, e.g. ReShade).
+- **The record** (root's, the source of truth): `DECKY_PLUGIN_SETTINGS_DIR/optiscaler.json` via
+  `context.write_atomic`: `{version: 1, global: {overlay: bool}, games: {appid: OptiRecord}}`, with `OptiRecord =
+  {build, folder (realpath), proxy, layout, choices, files: [{rel, size, sha256}], dirs: [rel], backups: [{rel,
+  size, sha256}], launch: LaunchPlan, installed_at}`, written after every step (a job cut short leaves a record
+  `partial: true` that `remove` finishes). In the game folder only `.oxp3deck-optiscaler/state.json` (user-owned,
+  `{tool: "oxp3deck", build, appid}`): it marks the install as ours for the foreign-install check and is never used to
+  decide what to delete.
+- Steps logged as job lines ("Copying 41 files into bin/x64_dx12 as <user>", "Backed up: dxgi.dll"); a failure after
+  the first file runs `remove` on what the record holds so far and says so.
+
+**OptiScaler.ini** (`ini_text`, on the package's own ini, so every other key keeps upstream's `auto`):
+- Global, always: `Libraries_OptiDllPath=.\OptiScaler`, `Plugins_LoadAsiPlugins=false`, `Menu_UseHQFont=false`
+  (ClawDeck's base value), and `XeFG_ForceBorderless=true` while XeFG is on (XeFG refuses exclusive fullscreen). The user's global option: `Menu_ShowFps=true` with `glob.overlay` (default off).
+- Per game: the entry's `ini` (`Spoofing_Dxgi=false`).
+- Choices: `Upscalers_Dx12Upscaler` = `xess` | `fsr31` (`Dx11Upscaler` for an entry with `api: "dx11"`);
+  frame generation off: `FrameGen_Enabled=false`, `FrameGen_FGOutput=nofg`; on (N = 2..4): `FrameGen_Enabled=true`,
+  `FrameGen_FGInput=<fg_input>`, `FrameGen_FGOutput=xefg`, `XeFG_InterpolationCount=N-1` (1 = 2x, 2 = 3x, 3 = 4x).
+  With input `upscaler` (OptiFG) also `OptiFG_HUDFix=true` (wiki: HUDfix limit 1, Resource Blocking; default gamma).
+- OptiScaler may save its own ini from its in-game menu; `set_choices` edits the file in the game folder (not the
+  package's) so those keys are kept, and the record's sha256 of the ini is not used for removal.
+
+**LaunchPlan** (pure `launch_plan`; the backend never writes launch options, the frontend applies it with
+`opti.ts`):
+
+```python
+{"set": {"XESS_FG": "2"},           # the XeFG multiplier: xess-xmx-linux's ControlLib.dll answers XeSS-FG's
+                                    # multi-frame query with it (ClawDeck's compose() sets it the same way)
+ "remove": ["XESS", "FSR", "FSR_FG", "force_vk_vendor"],   # see "With xess-xmx-linux" (XESS_FG too when FG is off)
+ "dll_override": "dxgi",            # WINEDLLOVERRIDES gains "dxgi=n,b" (OptiScaler's setup_linux.sh prints it)
+ "dxvk_config": "dxgi.customVendorId = 8086" | None,   # only for 3x/4x (below)
+ "args": ["-dx12"]}
+```
+
+**Remove** (`remove`, also the first half of `update`), from the record only:
+1. `check` (game not running). When the recorded folder no longer exists (game uninstalled or moved), nothing is
+   left to take out: the record is deleted and the answer is `ok: true` with the record's `launch` plan, so the
+   frontend undoes the launch options and Install works again. A folder that exists outside a Steam library is still
+   refused.
+2. Each recorded file: removed (`os.unlink` with an `open_dir` descriptor) when its size and sha256 still match;
+   a changed one is kept and listed (`kept`), except `OptiScaler.ini`, which is always removed.
+3. Run-time files OptiScaler makes, by fixed names only: `OptiScaler.log`, `OptiScaler*.log`, `D3D12_Optiscaler/`
+   (removed as the user, `rm -rf --` on that exact path, only when it is a real folder), and anything left in
+   `OptiScaler/` (`rm -rf` as the user; it is ours by the record's `dirs`).
+4. Each backup renamed back when its sha256 still matches and nothing is at the original name; otherwise left in
+   `.oxp3deck-optiscaler/backup/` and listed (`kept`).
+5. Recorded `dirs` removed when empty, then `.oxp3deck-optiscaler/` when empty.
+6. The record is deleted only with nothing kept; otherwise it stays with `partial: true` and Details say what is
+   left and where. The result carries the record's `launch` plan so the frontend can undo it.
+- A Steam "Verify integrity" does not remove OptiScaler (extra files stay) but may restore a file we backed up; step 4
+  then keeps the backup and says so.
+- `_uninstall` undoes nothing (Rules): removing the plugin leaves OptiScaler in the games. README: remove it from each
+  game first. The record survives plugin updates (settings folder).
+
+**Update**: `info` shows `update: true` when the record's `build` is not the entry's `build` (a new pin), or the
+record is `partial`. `update` = `fetch` of the new pin (first, so a failed download leaves the old build in place) +
+`remove` + `install` with the recorded choices; the launch plan is re-applied by the frontend (differences only).
+When an update fails after its remove, the frontend re-reads `opti_info` and, with the state "none", undoes the
+launch options as for Remove. `prune_cache` runs at the end of install, remove and update.
+
+**Refusals** (`check`; `ok: false` with one sentence, no job started):
+
+| When | Error |
+|---|---|
+| the game runs (`steamlib.running_game(ctx) == appid`, and the frontend's `RunningApps`) | "Quit <name> first." |
+| any other job runs | "another task is running" (jobs.py) |
+| not in `GAMES` | "OXP3 Deck has no tested OptiScaler setup for this game yet." |
+| `exe_dir` is None | "Can't find <exe> in <folder> of the game's folder." (e.g. a DX11-only copy, an old version) |
+| anti-cheat files anywhere 3 levels under the install folder: `EasyAntiCheat/`, `BattlEye/`, `EAAntiCheat*`, `start_protected_game.exe`, `*_BE.exe`, `mhypbase.dll`, `vgk.sys` | "This game has anti-cheat; OptiScaler could get the account banned." (always, even for a table game) |
+| Flatpak Steam | "Not supported with Flatpak Steam." |
+| another OptiScaler in the exe folder: `OptiScaler.ini`, `OptiScaler.log`, `OptiScaler.dll`, `OptiScaler/`, `nvngx.ini`, Decky Framegen's `fgmod` marker or `<proxy>.dll.b`, without our record and `state.json` | "Another OptiScaler install is in this game. Remove it with the tool that added it." |
+| `<proxy>.dll` exists and is not ours | "The game folder already has a dxgi.dll (another mod). Remove it first." |
+| no unpacker | "Needs 7z or bsdtar: <package> is not installed." |
+| the record says installed in another folder (the game moved library) | "OptiScaler was installed in <old>; remove it there first." (remove works on the recorded folder) |
+
+Not refused, only a row: xess-xmx-linux not installed, or the game's Proton without the shim
+(`compat_tool_shimmed` false): "OptiScaler's XeSS will run in the slower mode."; a system Proton named *cachyos*
+(`hides_wine`, XeLL may refuse the GPU there): "Use Proton Experimental or GE-Proton for this game."
+
+(Built, backend, 0.5: as above, with these differences. The FSR 3.1 choice writes `Dx12Upscaler=ffx`, since v10
+names FidelityFX for DirectX 12 "ffx" and only reads an old "fsr31" as ffx (OptiTypes.cpp); DirectX 11 keeps
+"fsr31". Frame generation Off also writes `FGInput=nofg`, and puts `InterpolationCount`, `ForceBorderless` and
+`HUDFix` back to `auto`. The Flatpak refusal comes before the exe folder, because Flatpak Steam's libraries are never
+read. Root unlinks and renames only files and folders the user owns, and only inside a Steam library's
+`steamapps/common/<game>`, so an edited record cannot delete anything the user could not delete. The sha256 of the
+package list is kept in the record (`packages`), so the user-owned cache cannot change it unnoticed, and `copy_new`
+refuses a source with more than one link. `userexec.user_mkdirs` gained `within=` for a library outside the home.
+OptiInfo also has `launch_new`, `warnings`, `version`, `backed_up` and `sources`; `opti_set` adds `launch_before`;
+`opti_options` answers `{overlay, updated, not_while_running}` with `opti: null`. Update stops when Remove kept a
+file. A "flat" layout is also handled, used only by the backup tests.)
+
+### With xess-xmx-linux
+
+- **The shim stays needed.** XeSS upscaling and XeFG from OptiScaler's own libraries still reach the GPU through the
+  Proton's `igdext64.dll` shim and `ControlLib.dll`; nothing per prefix is copied (xess.py's Proton shim covers it).
+  `force_vk_vendor=0` from install.sh stays (xess-xmx-linux debugging.md: The Witcher 3 needs it).
+- **Launch options dropped** while OptiScaler is in the game (`remove` in the plan; the old values are kept in
+  `ui_opti_log[appid].dropped` and put back by Remove when the key is still absent):
+  - `XESS` (`latest` or `dp4a`): `XESS=latest` swaps the game folder's libxess / libxess_fg / libxell for links while
+    the game runs (proton-hook.py), pointless with OptiScaler's own set and wrong with a flat layout; `dp4a` turns
+    XMX off. **`XESS=latest` is not needed.**
+  - `FSR`, `FSR_FG`: `FSR_FG=inject` puts its own `dxgi.dll` link next to the game and would move OptiScaler's aside;
+    `FSR=xess` replaces FidelityFX DLLs OptiScaler may load.
+  - `force_vk_vendor` (`-1`, the plugin's Compatibility mode): hides the Intel GPU, so XeSS takes DP4a.
+- **Set**: `XESS_FG=N` while OptiScaler's frame generation is N x (removed when Off); for 3x/4x also
+  `DXVK_CONFIG="dxgi.customVendorId = 8086"`: Proton 11's DXVK hides the Intel GPU once a game loads XeSS, XeFG then
+  takes its cross-vendor path and caps at 2x; DXVK's own vendor id wins over that (ClawDeck launchenv.py, measured on
+  a Claw 8 EX with CONTROL; not measured here). Only with OptiScaler's own XeSS set: a game's old XeSS-FG 1.1 crashes
+  with it (xess-xmx-linux docs/games.md, Cyberpunk 2077).
+- **Kept**: `MESA`, `XESS_LOG` (the XeFG log the `fg_refused` check reads still works), `-dx12`, the user's own text.
+- **GameControls while OptiScaler is installed**: "XeSS version", "FSR → XeSS", "Compatibility mode" and "Frame
+  generation" (the xess one) are greyed with "Set by OptiScaler for this game."; Witcher 3's known-issue row (XeLL 1.2)
+  keeps its line but its "What to try" moves behind "Without OptiScaler:" in Details.
+- **Automatic launch options**: games.py `_suggest` returns nothing for a game with `optiscaler.installed_for`
+  (`XESS=latest` / `FSR=xess` would be dropped again); `autolaunch.plan` also skips every key in the plan's `remove`
+  while `GameInfo.opti_installed`. The OptiScaler keys are never "automatic": they are written only by Install,
+  a choice change, Update and Remove, each a user action, so `NEVER_AUTO` (XESS_FG) is not broken.
+  `autolaunch.autoArgs` already adds `-dx12` for 292030 when frame generation is configured; `fgConfigured` also
+  counts `XESS_FG` written by OptiScaler, which is intended.
+- **Copy launch options**: `copyLine` applies the plan too (`opti.applyPlan`), so a game whose options Steam refused
+  can be fixed by pasting.
+
+### main.py
+
+```python
+optiscaler = _load("optiscaler")       # with the others
+
+async def opti_info(self, appid)                 # optiscaler.info(ctx, appid)                     -> OptiInfoRes
+async def opti_install(self, appid, choices)     # job "opti-install", title "OptiScaler for <name>" -> JobStart
+                                                 #   precheck: optiscaler.check(ctx, appid, installing=True)
+async def opti_set(self, appid, choices)         # optiscaler.set_choices(ctx, appid, choices)      -> OptiInfoRes
+async def opti_remove(self, appid)               # job "opti-remove"                                 -> JobStart
+async def opti_update(self, appid)               # job "opti-update"                                 -> JobStart
+async def opti_options(self, opts)               # {overlay: bool}: global; rewrites each installed game's ini
+                                                 #   whose game is not running                       -> OptiInfoRes
+```
+
+`choices` is checked against the entry (`upscaler in ("xess", "fsr31")`, `fg in (0, 2, 3, 4)`, `fg_input in
+entry.fg_inputs`); anything else: `ok: false`, no job. `game_info` gains `opti_installed: bool` and `opti_entry:
+bool` (cheap: the record and the table). Job results:
+
+```ts
+type OptiJobResult = { ok, error, appid: string, build: string|null, folder: string|null,
+  copied: number, backed_up: string[], removed: number, kept: string[],   // kept: files left, with why
+  launch: LaunchPlan | null,       // install/update: apply it; remove: undo it
+  next: string | null }            // "Start the game, pick DLSS and DLSS frame generation, then restart it once."
+```
+
+### types.ts and api.ts
+
+```ts
+export type OptiUpscaler = "xess" | "fsr31";
+export type OptiFgInput = "dlssg" | "xefg" | "upscaler";
+export type OptiChoices = { upscaler: OptiUpscaler; fg: 0 | 2 | 3 | 4; fg_input: OptiFgInput };
+export type LaunchPlan = { set: Partial<Record<ManagedKey, string>>; remove: ManagedKey[];
+                           dll_override: string | null; dxvk_config: string | null; args: string[] };
+export type OptiInfo = {
+  appid: string; supported: boolean;                    // in the table
+  why: string | null;                                   // check()'s refusal, null when install would start
+  state: "none" | "installed" | "partial" | "other";    // other: another tool's OptiScaler
+  build: string | null; build_wanted: string | null; update: boolean;
+  folder: string | null;                                // exe folder, shown in Details only
+  choices: OptiChoices | null; defaults: OptiChoices | null; fg_inputs: OptiFgInput[];
+  launch: LaunchPlan | null;                            // what the record says should be in the launch options
+  cached: boolean; download_mb: number | null;          // the package is in the cache / the size to fetch
+  unpacker: string | null;                              // "7z" / "bsdtar" / null
+  notes: string[]; kept: string[]; overlay: boolean;
+};
+export type OptiInfoRes = Res & { opti: OptiInfo | null };
+export type OptiJobResult = { /* as above */ };
+// GameInfo gains: opti_installed?: boolean; opti_entry?: boolean
+```
+
+```ts
+export const opti_info = callable<[appid: string], OptiInfoRes>("opti_info");
+export const opti_install = callable<[appid: string, choices: OptiChoices], JobRes>("opti_install");
+export const opti_set = callable<[appid: string, choices: OptiChoices], OptiInfoRes>("opti_set");
+export const opti_remove = callable<[appid: string], JobRes>("opti_remove");
+export const opti_update = callable<[appid: string], JobRes>("opti_update");
+export const opti_options = callable<[opts: { overlay: boolean }], OptiInfoRes>("opti_options");
+```
+
+`backend.ts` wraps them (`{ok: false, error, opti: null}` / `{..., job: null}`). `store.ts`:
+`useResource("opti-info:<appid>", ...)`, reloaded when an opti job ends.
+
+**`src/opti.ts`** (pure, node-tested): `applyPlan(text, plan) -> {text, dropped}` (through `setManaged`, `setArg`
+and two new launchopts helpers: `setListEntry(text, "WINEDLLOVERRIDES", "dxgi=n,b", on, ";")` and
+`setListEntry(text, "DXVK_CONFIG", "dxgi.customVendorId = 8086", on, ";")`, which add or take out one entry of an
+existing variable, or add/remove the whole variable when it holds only ours, quoted as a literal shell word);
+`undoPlan(text, plan, rec)` (takes out only what is still as written, puts `dropped` back where the key is absent);
+`checklist(entry input, fg) -> string[]`; `choiceLabels`; `confirmInstall(info, name)`, `confirmRemove`; all texts ≤ 80
+chars up front. `ui_opti_log` (≤ 4 KB, newest 20 games): `{[appid]: {plan, dropped, at}}`.
+
+### UI (GameControls, quick panel "This game" and the Games tab; only for a table game, `opti_entry`)
+
+Section "OptiScaler" after the XeSS options:
+
+| Row | Label | One line (up front) | Tag | → Details |
+|---|---|---|---|---|
+| Status | "OptiScaler" ✓/✗ ⓘ | "Not installed" / "XeSS · frame generation 2x" / "Update available" / "Another OptiScaler is installed" / "Partly removed: open Details" | — | build, folder (bin/x64_dx12), what was backed up and kept, the sources, OptiScaler's licence (GPL-3.0, downloaded from its GitHub at install, not shipped with OXP3 Deck) |
+| Install | "Install OptiScaler for this game" ⓘ (button) | "Runs XeSS and XeSS frame generation in place of the game's DLSS." / greyed: `why` ("Quit <game> first.") | Restart the game | download size (or "already downloaded"), the steps of the job, the launch options it changes ("Adds to launch options: …", "Removes: XESS=latest, FSR=xess"), Remove restores everything |
+| Confirm | title "Install OptiScaler?" | "Downloads OptiScaler (about 69 MB) and puts it in <game>'s folder. Remove puts everything back." | `confirmLine` | `lines`: the folder, the files to back up, the launch-option change |
+| Upscaler | "Upscaler" (dropdown) | "XeSS" / "FSR 3.1" · "What runs when the game asks for DLSS." | Restart the game | XeSS on the XMX cores needs XeSS fast mode; FSR 3.1 runs on any GPU; Technical: Upscalers Dx12Upscaler |
+| Frame generation | "Frame generation" (dropdown) | "Off" / "XeFG 2x" / "XeFG 3x" / "XeFG 4x" · "Also turn on the game's frame generation." | Restart the game | 3x/4x add the GPU vendor setting (DXVK_CONFIG), untested here; a frame limit caps generated frames; borderless only; `FG_CRASH_LINE`; Technical: FGInput, FGOutput=xefg, InterpolationCount, XESS_FG |
+| FG input (Games tab only) | "Game setting it replaces" (dropdown) | "DLSS frame generation" / "XeSS frame generation" / "None: OptiScaler makes its own" | Restart the game | what each needs in the game; DLSS FG is the default (ETA Prime's setup); XeSS FG keeps the game's own XeLL (OptiScaler's ini), so may hit the same -15; OptiFG needs default gamma and HUD fix |
+| Checklist | "In the game, once" ⓘ | from `checklist`, e.g. "Pick DLSS and DLSS frame generation, then restart the game." | — | numbered: 1. Start the game (it starts in DirectX 12). 2. Graphics: Display mode Borderless. 3. Upscaling: DLSS (any quality). 4. Frame Generation: DLSS Frame Generation on. 5. Quit and start the game again, once. 6. Check: OptiScaler's menu (Insert on a keyboard) shows XeSS and FG Output XeFG. If DLSS is greyed out: pick "XeSS frame generation" above and in the game. If it flickers: XeSS in the game (wiki). |
+| Overlay (Games tab) | "Show OptiScaler's FPS counter" | "For checking frame generation works." | Restart the game | global, every OptiScaler game |
+| Update | "Update OptiScaler to <build>" | "Keeps your choices." / greyed `why` | Restart the game | remove + install in one task |
+| Remove | "Remove OptiScaler" | "Puts the game's files and launch options back." / greyed `why` | Restart the game | what is deleted and restored; kept files and why |
+| Pending | "Restart <game> to apply" | — | — | — |
+| Warnings | as in Refusals ("not refused, only a row") | | | |
+
+Flow: confirm → `opti_install` → JobView under the button → on `done` (`afterJob`): `applyPlan` on the current launch
+options → `setLaunchOptions` (never while the game runs: then "Will be added when you quit <name>", applied by the
+same quit hook as the automatic launch options) → `ui_opti_log` → toast "OptiScaler ready for <name>: pick DLSS
+and DLSS frame generation in the game." → `notePending(game.opti)`. A refused write leaves the Copy launch options
+row with reason `rejected`. A choice change: `opti_set` → re-apply the difference of the plans. Remove: job → on done
+`undoPlan`. All OptiScaler controls are greyed while the game runs ("Quit <game> first.") and while an opti job runs.
+
+### Credits and notices
+
+- **THIRD_PARTY_NOTICES.md**: no new row "In the plugin zip" (nothing of OptiScaler is shipped). A paragraph under
+  a new "Downloaded at run time, not redistributed" heading: OptiScaler (GPL-3.0, optiscaler/OptiScaler and
+  optiscaler/OptiScaler-nightly; its archive brings its own `Licenses/` folder, e.g. Intel's XeSS licence, kept in
+  the cache at `~/.local/share/oxp3deck/optiscaler/<build>/`), downloaded from its GitHub release by the user's
+  request, pinned by sha256, unchanged; OptiPatcher (MIT) and fakenvapi (MIT) are not downloaded. The ClawDeck
+  section's MIT notice stays as is and covers the approach; no ClawDeck code is added.
+- **CREDITS.md**: an "OptiScaler" section (cdozdil and the OptiScaler contributors, GPL-3.0; what it does here; the
+  wiki page and GameConfigs.cpp as sources of the table's facts); ClawDeck: "Also following ClawDeck's approach,
+  without its code: OptiScaler per game with a manifest and backups, the subfolder layout, XESS_FG with OptiScaler's
+  XeFG and the DXVK vendor id for 3x/4x (as of commit 07918cc and its later notes; ClawDeck is AGPLv3 since
+  2026-11-05, and its games.json is GPL-3.0: neither is copied)"; xess-xmx-linux: its OptiScaler recipe
+  (docs/games.md: Dxgi spoofing off, `dxgi=n,b`) and `force_vk_vendor=0` (debugging.md); ETA Prime's video as the
+  route's source; Decky Framegen named as the tool whose installs are detected.
+- **README.md**: an "OptiScaler (The Witcher 3)" part: what it does, the checklist, Remove before uninstalling the
+  plugin, "OptiScaler is not part of OXP3 Deck: it is downloaded from its GitHub release when you tap Install."
+
+### Tests
+
+- **`tests/test_optiscaler.py`** (fake root, fake Steam library with `The Witcher 3/bin/x64/witcher3.exe` and
+  `bin/x64_dx12/witcher3.exe`, a fake package folder; `userexec.run` replaced by a recorder that runs `mkdir`, `rm`,
+  `rename` itself and answers a canned `7z l -slt` listing; no 7z needed):
+  - `exe_dir` picks `bin/x64_dx12`, never `bin/x64`, whatever the walk order; case differences; a link in the path
+    refused; exe missing → None with the reason.
+  - each refusal in the table above, with nothing written (folder bytes compared before and after).
+  - fetch: sha256 mismatch → no package, temp gone; size cap; listings with `..`, an absolute name, a link, too many
+    entries, no `OptiScaler.dll` → refused before unpacking; unpacked tree differs from the listing → refused; a
+    cached package is reused (no download call); `argv` of list and unpack runs as the user (`runuser -u`).
+  - install round trip: subfolder layout (proxy + ini at the top, the rest in `OptiScaler/`), every file owned by the
+    user (fchown recorded; no `chown_tree` call), `copy_new` used for each, the game's own `libxess.dll` untouched;
+    an existing file in the way is renamed into the backup and back by remove, with identical bytes and mtime; remove
+    leaves the folder exactly as before (a tree listing with sizes and sha256); OptiScaler.log and
+    `D3D12_Optiscaler/` removed; a DLL changed after install is kept and reported, record `partial`; a backup
+    whose original name is taken again is kept; a failure halfway rolls back.
+  - ini: the keys for each choice (2x → InterpolationCount=1, 4x → 3, off → nofg), `Spoofing_Dxgi=false`, a key the
+    menu saved is kept by `set_choices`, unknown section appended, bad key/value refused.
+  - `launch_plan`: remove list, `XESS_FG` only with FG, `dxvk_config` only for 3x/4x, `dll_override` "dxgi",
+    `args` `-dx12`.
+  - update: a record on an older build → `update: true`; update keeps choices; a failed remove stops it.
+  - foreign install: Decky Framegen's marker, a `dxgi.dll.b`, an `OptiScaler.ini` without our record → `state:
+    "other"`, install refused, remove refused.
+  - `prune_cache` keeps builds a record uses.
+- **test_games**: `opti_installed` and `opti_entry`; no `suggest` for a game with OptiScaler.
+- **test_main**: `CALLS` gains `"opti_info": ("292030",)`, `"opti_install": ("292030", {...})`, `"opti_set": (...)`,
+  `"opti_remove": ("292030",)`, `"opti_update": ("292030",)`, `"opti_options": ({"overlay": True},)`; bad choices
+  refused without a job; the signature test covers `_mod("optiscaler")`.
+- **test_userexec**: `copy_new` (replaces a planted link, O_EXCL, user owner, sha256 returned, a too-short source).
+- **test_package**: `optiscaler.py` in the zip; no `.7z`, `.dll` or `OptiScaler` file in the zip.
+- **node** `tests/js/opti.test.mjs`: `applyPlan` / `undoPlan` byte for byte (user's own WINEDLLOVERRIDES and
+  DXVK_CONFIG entries kept, ours added once and taken out, a variable holding only ours removed, `dropped` restored
+  only when absent, a user change after install kept); `copyLine` with a plan; `autolaunch.plan` skips the plan's
+  `remove` keys for an OptiScaler game; texts ≤ 80 chars without variable names; `pages.test.mjs`: every opti control
+  has `explainWhen(` with a `game.opti*` tag and a running check before `setLaunchOptions(`.
+
+On the device (owner): install for The Witcher 3; game on DLSS + DLSS frame generation, borderless, restart once;
+OptiScaler's menu shows XeSS and XeFG; fps at 2x against the ~50 fps now; `igdext_xefg.log` (Save XeSS logs) no longer
+says -15; then 3x with the vendor setting; then "XeSS frame generation" as the input; Remove and compare the folder
+and launch options with before.

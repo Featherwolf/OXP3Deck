@@ -336,6 +336,23 @@ class SuggestTest(GameBase):
         self.dll("bin/libxell.dll", (1, 3, 2, 10))
         self.assertEqual(self.info()["suggest"], [])
 
+    def test_nothing_for_a_game_with_optiscaler(self):
+        """OptiScaler's launch plan drops XESS and FSR again: the automatic launch options add nothing for it."""
+        from oxp3deck import optiscaler
+        self.hooked()
+        self.dll("bin/libxess.dll", (1, 3, 1, 0))
+        g = self.info()
+        self.assertEqual((g["opti_entry"], g["opti_installed"]), (True, False))
+        self.assertEqual([s["key"] for s in g["suggest"]], ["XESS"])
+        optiscaler._put_game(self.ctx, WITCHER, {"build": "v10-20261105", "folder": self.game, "files": []})
+        g = self.info()
+        self.assertEqual((g["opti_entry"], g["opti_installed"], g["suggest"]), (True, True, []))
+
+    def test_optiscaler_fields_for_another_game(self):
+        self.w.app("1091500", "Cyberpunk 2077")
+        g = self.info("1091500")
+        self.assertEqual((g["opti_entry"], g["opti_installed"]), (False, False))
+
     def test_fsr_only_needs_20261104(self):
         self.hooked()
         self.dll("Game/amd_fidelityfx_dx12.dll", (1, 0, 0, 0))

@@ -252,9 +252,9 @@ test("automatic launch options never write while that game runs", () => {
     const fnStart = Math.max(s.lastIndexOf("export const autoApply", m.index), s.lastIndexOf("const doUndo", m.index));
     assert.ok(before.length && s.slice(fnStart, m.index).includes("isRunning(appid)"), "in the same function");
   }
-  // only AutoLaunch.tsx and GameControls (the user's own picks) write launch options
+  // only AutoLaunch.tsx, GameControls (the user's own picks) and OptiControls (OptiScaler's plan) write launch options
   const writers = allSources().filter((n) => !["steam.ts"].includes(n) && /\bsetLaunchOptions\(/.test(src(n)));
-  assert.deepEqual(writers.sort(), ["components/AutoLaunch.tsx", "components/GameControls.tsx"]);
+  assert.deepEqual(writers.sort(), ["components/AutoLaunch.tsx", "components/GameControls.tsx", "components/OptiControls.tsx"]);
   assert.match(src("index.tsx"), /const stopAuto = watchGameExits\(\);/);
   assert.match(src("index.tsx"), /stopAuto\(\);/);
 });

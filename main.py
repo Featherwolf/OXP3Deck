@@ -50,6 +50,7 @@ games = _load("games")
 power = _load("power")              # (powerhw is imported by power)
 readouts = _load("readouts")
 extras = _load("extras")
+optiscaler = _load("optiscaler")
 
 OXP3_VENDOR = "ONE-NETBOOK"          # oxp3_tool/detect.py OXP3_SYS_VENDOR / OXP3_PRODUCT_NAME
 OXP3_PRODUCT = "ONEXPLAYER 3"
@@ -498,6 +499,62 @@ class Plugin:
 
     async def game_info(self, appid):
         return await self._call("game_info", lambda: _mod("games").game_info(self.ctx, self.settings, str(appid)))
+
+    # ---- OptiScaler per game (DESIGN.md "OptiScaler (0.5)") ---------------------------------------------------------
+
+    def _not_during_opti_job(self) -> None:
+        running = self.jobs.running()
+        if running is not None and running.kind.startswith("opti"):
+            raise Unavailable(f"{running.title} is running; try again when it has ended")
+
+    def _opti_title(self, verb: str, appid) -> str:
+        e = _mod("optiscaler").entry(str(appid))
+        return f"{verb} for {e['name'] if e else appid}"
+
+    def _opti_precheck(self, appid, choices=None, installing=False):
+        """Why the job cannot start, or None: bad choices and the refusals are answered before any job."""
+        o = _mod("optiscaler")
+        if choices is not None:
+            _c, why = o.check_choices(o.entry(str(appid)), choices)
+            if why:
+                return why
+        return o.check(self.ctx, str(appid), installing=installing)["why"]
+
+    async def opti_info(self, appid):
+        return await self._call("opti_info", lambda: _mod("optiscaler").info(self.ctx, appid, self.settings))
+
+    async def opti_install(self, appid, choices):
+        return await self._start("opti_install", "opti-install", self._opti_title_safe("OptiScaler", appid),
+                                 lambda job: _mod("optiscaler").install(self.ctx, self.settings, job, appid, choices),
+                                 lambda: self._opti_precheck(appid, choices, installing=True))
+
+    async def opti_set(self, appid, choices):
+        def go():
+            self._not_during_opti_job()
+            return _mod("optiscaler").set_choices(self.ctx, appid, choices, self.settings)
+        return await self._call("opti_set", go)
+
+    async def opti_remove(self, appid):
+        return await self._start("opti_remove", "opti-remove", self._opti_title_safe("Remove OptiScaler", appid),
+                                 lambda job: _mod("optiscaler").remove(self.ctx, self.settings, job, appid),
+                                 lambda: self._opti_precheck(appid))
+
+    async def opti_update(self, appid):
+        return await self._start("opti_update", "opti-update", self._opti_title_safe("Update OptiScaler", appid),
+                                 lambda job: _mod("optiscaler").update(self.ctx, self.settings, job, appid),
+                                 lambda: self._opti_precheck(appid))
+
+    async def opti_options(self, opts):
+        def go():
+            self._not_during_opti_job()
+            return _mod("optiscaler").options(self.ctx, opts)
+        return await self._call("opti_options", go)
+
+    def _opti_title_safe(self, verb: str, appid) -> str:
+        try:
+            return self._opti_title(verb, appid)
+        except Exception:
+            return f"{verb} for {appid}"
 
     # ---- power (not jobs: no job ever blocks these) ----------------------------------------------------------------
 

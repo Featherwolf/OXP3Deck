@@ -1,4 +1,5 @@
 import dataclasses
+import hashlib
 import os
 import stat
 import subprocess
@@ -257,6 +258,69 @@ class WriteNewTest(unittest.TestCase):
             userexec.open_dir("relative")
 
 
+class CopyNewTest(unittest.TestCase):
+    def setUp(self):
+        self.tmp = tempfile.TemporaryDirectory()
+        self.addCleanup(self.tmp.cleanup)
+        self.c = stub_decky.make_ctx(self.tmp.name)
+        self.dir = os.path.join(self.c.home, "game")
+        os.makedirs(self.dir)
+        self.src = os.path.join(self.c.home, "pkg", "OptiScaler.dll")
+        os.makedirs(os.path.dirname(self.src))
+        with open(self.src, "wb") as f:
+            f.write(b"MZ" + b"x" * (3 << 20))
+        self.sha = hashlib.sha256(b"MZ" + b"x" * (3 << 20)).hexdigest()
+
+    def test_copies_with_owner_mode_and_sha256(self):
+        dest = os.path.join(self.dir, "dxgi.dll")
+        self.assertEqual(userexec.copy_new(self.c, self.src, dest, expect_sha256=self.sha,
+                                           expect_size=(3 << 20) + 2), self.sha)
+        st = os.lstat(dest)
+        self.assertEqual((stat.S_IMODE(st.st_mode), st.st_size), (0o644, (3 << 20) + 2))
+        if ROOT:
+            self.assertEqual((st.st_uid, st.st_gid), (1000, 1000))
+
+    def test_a_planted_link_at_dest_is_replaced(self):
+        outside = os.path.join(self.tmp.name, "outside")
+        with open(outside, "w") as f:
+            f.write("keep")
+        dest = os.path.join(self.dir, "dxgi.dll")
+        os.symlink(outside, dest)
+        userexec.copy_new(self.c, self.src, dest)
+        self.assertFalse(os.path.islink(dest))
+        with open(outside) as f:
+            self.assertEqual(f.read(), "keep")
+
+    def test_a_source_that_differs_leaves_nothing(self):
+        dest = os.path.join(self.dir, "dxgi.dll")
+        for kw in ({"expect_sha256": "0" * 64}, {"expect_size": 10}, {"expect_size": (4 << 20)}):
+            with self.subTest(kw=kw), self.assertRaises(OSError):
+                userexec.copy_new(self.c, self.src, dest, **kw)
+            self.assertFalse(os.path.lexists(dest))
+
+    def test_links_as_source_are_refused(self):
+        link = os.path.join(self.c.home, "pkg", "link.dll")
+        os.symlink(self.src, link)
+        with self.assertRaises(OSError):
+            userexec.copy_new(self.c, link, os.path.join(self.dir, "a.dll"))
+        hard = os.path.join(self.c.home, "pkg", "hard.dll")
+        os.link(self.src, hard)
+        with self.assertRaises(PermissionError):
+            userexec.copy_new(self.c, hard, os.path.join(self.dir, "b.dll"))
+        os.mkfifo(os.path.join(self.c.home, "pkg", "fifo"))
+        with self.assertRaises(OSError):
+            userexec.copy_new(self.c, os.path.join(self.c.home, "pkg", "fifo"), os.path.join(self.dir, "c.dll"))
+        self.assertEqual(os.listdir(self.dir), [])
+
+    def test_a_user_owned_link_in_the_source_folders_is_refused(self):
+        os.symlink(os.path.join(self.c.home, "pkg"), os.path.join(self.c.home, "pkglink"))
+        if ROOT:
+            os.lchown(os.path.join(self.c.home, "pkglink"), 1000, 1000)
+            with self.assertRaises(PermissionError):
+                userexec.copy_new(self.c, os.path.join(self.c.home, "pkglink", "OptiScaler.dll"),
+                                  os.path.join(self.dir, "a.dll"))
+
+
 @unittest.skipUnless(ROOT, "chown needs root")
 class ChownTreeTest(unittest.TestCase):
     def test_tree_and_links(self):
@@ -324,6 +388,16 @@ class UserMkdirsTest(unittest.TestCase):
         with self.assertRaises(PermissionError):
             userexec.user_mkdirs(self.c, os.path.join(self.c.home, "etc", "x"))
         self.assertEqual(self.fake.calls, [])
+
+    def test_within_another_folder(self):
+        lib = os.path.join(self.tmp.name, "media", "SD", "steamapps", "common", "Game")
+        os.makedirs(lib)
+        userexec.user_mkdirs(self.c, os.path.join(lib, "bin", "OptiScaler"), within=lib)
+        self.assertEqual(self.fake.calls[0][0][-1], os.path.join(lib, "bin", "OptiScaler"))
+        with self.assertRaises(PermissionError):
+            userexec.user_mkdirs(self.c, os.path.join(self.tmp.name, "media", "x"), within=lib)
+        with self.assertRaises(PermissionError):
+            userexec.user_mkdirs(self.c, os.path.join(lib, "x"))              # the home's rule without `within`
 
     def test_failure_raises(self):
         self.fake.result = sysexec.Result(1, "", "mkdir: cannot create directory: Permission denied\n")

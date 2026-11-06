@@ -11,6 +11,7 @@ Root writes in the user's folders never go through a symlink the user could have
 from __future__ import annotations
 
 import errno
+import hashlib
 import os
 import re
 import secrets
@@ -120,6 +121,72 @@ def write_new(ctx, path: str, data: bytes, mode: int = 0o644) -> None:
         os.close(dfd)
 
 
+def copy_new(ctx, src: str, dest: str, mode: int = 0o644, *, expect_sha256: str | None = None,
+             expect_size: int | None = None) -> str:
+    """Copy `src` to a new `dest` owned by the user, with write_new's rules (whatever is at dest, a file or a
+    planted link, is removed first; created exclusively, no link followed; the folders above both are opened with
+    open_dir). The source must be a regular file with one link (not a hard link to a file the user could not
+    read). Streamed in 1 MB blocks with a running sha256, which is returned; with expect_sha256 / expect_size a
+    source that differs fails and leaves nothing at dest. Raises OSError."""
+    sfolder, sname = os.path.split(os.path.abspath(src))
+    sdfd = open_dir(sfolder)
+    try:
+        sfd = os.open(sname, os.O_RDONLY | os.O_NOFOLLOW | os.O_NONBLOCK | os.O_CLOEXEC, dir_fd=sdfd)
+    finally:
+        os.close(sdfd)
+    try:
+        st = os.fstat(sfd)
+        if not stat.S_ISREG(st.st_mode):
+            raise OSError(errno.EINVAL, "not a regular file", src)
+        if st.st_nlink != 1:
+            raise PermissionError(errno.EPERM, "the source has more than one link", src)
+        folder, name = os.path.split(os.path.abspath(dest))
+        if not name:
+            raise IsADirectoryError(errno.EISDIR, "no file name", dest)
+        dfd = open_dir(folder)
+        try:
+            try:
+                os.unlink(name, dir_fd=dfd)
+            except FileNotFoundError:
+                pass
+            fd = os.open(name, os.O_WRONLY | os.O_CREAT | os.O_EXCL | os.O_NOFOLLOW | os.O_CLOEXEC, mode,
+                         dir_fd=dfd)
+            ok = False
+            try:
+                h = hashlib.sha256()
+                done = 0
+                with os.fdopen(fd, "wb") as f:
+                    if os.geteuid() == 0:
+                        os.fchown(f.fileno(), ctx.uid, ctx.gid)
+                    os.fchmod(f.fileno(), mode)
+                    while True:
+                        chunk = os.read(sfd, 1 << 20)
+                        if not chunk:
+                            break
+                        done += len(chunk)
+                        if expect_size is not None and done > expect_size:
+                            raise OSError(errno.EFBIG, "the source is longer than expected", src)
+                        h.update(chunk)
+                        f.write(chunk)
+                if expect_size is not None and done != expect_size:
+                    raise OSError(errno.EIO, f"the source has {done} bytes, expected {expect_size}", src)
+                digest = h.hexdigest()
+                if expect_sha256 and digest != expect_sha256.lower():
+                    raise OSError(errno.EIO, "the source's sha256 differs from the expected one", src)
+                ok = True
+                return digest
+            finally:
+                if not ok:
+                    try:
+                        os.unlink(name, dir_fd=dfd)
+                    except OSError:
+                        pass
+        finally:
+            os.close(dfd)
+    finally:
+        os.close(sfd)
+
+
 def chown_tree(ctx, path: str) -> None:
     """Give a file, or a folder and everything in it, to the user. Symlinks are changed themselves (lchown) and
     never followed; os.fwalk works on folder descriptors, so a folder swapped for a link mid-walk is not entered.
@@ -137,13 +204,14 @@ def chown_tree(ctx, path: str) -> None:
                 pass
 
 
-def user_mkdirs(ctx, path: str) -> None:
-    """mkdir -p as the user, so root never creates folders in the user's home. Refuses paths outside the home.
-    Raises OSError."""
+def user_mkdirs(ctx, path: str, within: str | None = None) -> None:
+    """mkdir -p as the user, so root never creates folders in the user's home. Refuses paths outside the home, or
+    outside `within` when given (a game's folder in a Steam library on another drive). Raises OSError."""
     real = os.path.realpath(path)    # a policy check only: mkdir runs with the user's own rights
-    home = os.path.realpath(ctx.home)
+    home = os.path.realpath(within or ctx.home)
     if not (real == home or real.startswith(home.rstrip("/") + "/")):
-        raise PermissionError(errno.EPERM, f"outside the home of {ctx.user}", path)
+        raise PermissionError(errno.EPERM, f"outside {within}" if within else f"outside the home of {ctx.user}",
+                              path)
     if os.path.isdir(path):
         return
     r = run(ctx, ["mkdir", "-p", "--", path], timeout=30)

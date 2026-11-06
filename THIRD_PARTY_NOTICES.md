@@ -28,6 +28,27 @@ their own licences. This file lists them, says where they are and holds their li
 | [xess-xmx-linux](https://github.com/HHHHanasak1/xess-xmx-linux) | `tests/fixtures/xess/`: five of its scripts | MIT |
 | [@decky/api](https://github.com/SteamDeckHomebrew/loader-api) 1.1.3 | `third_party/decky-api-1.1.3/`: its source | LGPL-2.1 |
 
+## Downloaded at run time, not redistributed
+
+Nothing of these is in the plugin zip or the repository. OXP3 Deck downloads them, unchanged, from their own GitHub
+releases only when you ask for them, and checks each download.
+
+- **[OptiScaler](https://github.com/optiscaler/OptiScaler)** (GPL-3.0, by cdozdil and the OptiScaler contributors):
+  when you tap **Install OptiScaler for this game**, `py_modules/oxp3deck/optiscaler.py` downloads the build it pins
+  (`OptiScaler_v10.0.0-pre1_20261105.7z` from the `nightly-20261105` release of
+  [optiscaler/OptiScaler-nightly](https://github.com/optiscaler/OptiScaler-nightly), sha256
+  `e26810c76451666da0bcc40be62722e7b4a5d36c550036830b98f5eb69e0648c`), unpacks it with your system's 7z or bsdtar
+  into `~/.local/share/oxp3deck/optiscaler/<build>/` and copies its files, unchanged, into that game's folder. The
+  archive brings its own `Licenses/` folder (for example Intel's XeSS licence), which stays in that cache folder,
+  with OptiScaler's source at the links above. OXP3 Deck writes only OptiScaler's own settings file
+  (`OptiScaler.ini`) from the archive's copy. OptiPatcher (MIT) and fakenvapi (MIT) are not downloaded (this
+  OptiScaler build has fakenvapi built in).
+- **[xess-xmx-linux](https://github.com/HHHHanasak1/xess-xmx-linux)** (MIT): its release, when you tap Install or
+  Update on the XeSS page (see [CREDITS.md](CREDITS.md)).
+
+The ClawDeck notice below covers the code adapted from ClawDeck. The OptiScaler support follows ClawDeck's approach
+but adds no ClawDeck code (see [CREDITS.md](CREDITS.md)).
+
 ## ClawDeck
 
 Some files of OXP3 Deck are adapted from ClawDeck (https://github.com/IHulkSmashI/ClawDeck). Each of them starts

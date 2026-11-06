@@ -172,7 +172,10 @@ export const managed = (p: Parsed): Partial<Record<ManagedKey, string>> => {
  * literal word (literalArgs). Nothing left but %command%
  * gives "". A "%command" typo is left alone (the string comes back unchanged): fixTypo() is the user's choice.
  */
-export const setManaged = (str: string, changes: Partial<Record<ManagedKey, string | null>>): string => {
+export const setManaged = (str: string, changes: Partial<Record<ManagedKey, string | null>>): string => setVars(str, changes);
+
+/** setManaged for any variable name (WINEDLLOVERRIDES, DXVK_CONFIG for OptiScaler); the same rules. */
+export const setVars = (str: string, changes: Record<string, string | null | undefined>): string => {
   const s = str ?? "";
   const p = parse(s);
   if (p.typo && !p.hasCommand) return s;
@@ -180,8 +183,8 @@ export const setManaged = (str: string, changes: Partial<Record<ManagedKey, stri
   const command = p.hasCommand ? p.command : COMMAND;
   const after = p.hasCommand ? p.after : literalArgs(s);    // all of it: trim() would drop a no-break space
   let changed = false;
-  for (const [key, value] of Object.entries(changes) as [ManagedKey, string | null | undefined][]) {
-    if (value === undefined) continue;
+  for (const [key, value] of Object.entries(changes) as [string, string | null | undefined][]) {
+    if (value === undefined || !/^[A-Za-z_][A-Za-z0-9_]*$/.test(key)) continue;
     if (value === null || value === "") {
       const kept = tokens.filter((t) => t.key !== key);
       if (kept.length !== tokens.length) changed = true;
@@ -332,4 +335,45 @@ export const setArg = (str: string, arg: string, on: boolean): string => {
 export const fgConfigured = (str: string): boolean => {
   const m = managed(parse(str ?? ""));
   return (!!m.XESS_FG && m.XESS_FG !== "0") || !!m.FSR_FG || m.FSR === "xess";
+};
+
+// ---- list variables (OptiScaler: WINEDLLOVERRIDES "dxgi=n,b", DXVK_CONFIG "dxgi.customVendorId = 8086") -------------
+
+/** The value of variable `name` before %command% (the last copy wins, as in a shell), or undefined. */
+export const varValue = (str: string, name: string): string | undefined => {
+  let v: string | undefined;
+  for (const [k, x] of parse(str ?? "").vars) if (k === name) v = x;
+  return v;
+};
+
+/** One entry of a list value compared without spaces ("a = 1" is "a=1"). */
+const entryKey = (e: string): string => e.replace(/\s+/g, "");
+const entries = (v: string, sep: string): string[] => v.split(sep).map((e) => e.trim()).filter(Boolean);
+
+/** Whether variable `name` holds `entry` as one of its `sep`-separated entries. */
+export const hasListEntry = (str: string, name: string, entry: string, sep = ";"): boolean => {
+  const v = varValue(str, name);
+  return v !== undefined && entries(v, sep).some((e) => entryKey(e) === entryKey(entry));
+};
+
+/**
+ * Add (on) or take out (off) one entry of a list variable before %command% (WINEDLLOVERRIDES, DXVK_CONFIG), keeping
+ * the user's other entries in their order: on appends it to an existing value (or adds the variable, quoted as a
+ * literal shell word); off takes out that entry only, and the whole variable when nothing else is left in it. Every
+ * other token stays as written; a "%command" typo is left alone.
+ */
+export const setListEntry = (str: string, name: string, entry: string, on: boolean, sep = ";"): string => {
+  const s = str ?? "";
+  const e = entry.trim();
+  if (!e) return s;
+  const v = varValue(s, name);
+  const list = v === undefined ? [] : entries(v, sep);
+  const has = list.some((x) => entryKey(x) === entryKey(e));
+  if (on) {
+    if (has) return s;
+    return setVars(s, { [name]: [...list, e].join(sep) });
+  }
+  if (!has) return s;
+  const left = list.filter((x) => entryKey(x) !== entryKey(e));
+  return setVars(s, { [name]: left.length ? left.join(sep) : null });
 };

@@ -3,6 +3,8 @@
 // the user's own text with the managed keys set through launchopts.setManaged, never a rewrite of the rest.
 import { autoArgs, plan, planned } from "./autolaunch";
 import { managed, type ManagedKey, MANAGED_KEYS, NEVER_AUTO, parse, setArg, setManaged } from "./launchopts";
+import { applyPlan, OPTI_DROPPED } from "./opti";
+import type { LaunchPlan } from "./types";
 
 export type CopySuggest = { key: ManagedKey; value: string; why?: string };
 
@@ -24,6 +26,7 @@ export type CopyInput = {
   running?: boolean;                  // the game runs now
   appid?: string;                     // for the game's DirectX 12 argument (launchopts DX12_ARGS) with frame generation
   argsDone?: string[];                // arguments added once by the automatic launch options (removed since: not again)
+  opti?: LaunchPlan | null;           // OptiScaler is in the game: its plan is applied to the line too (opti.applyPlan)
 };
 
 export type CopyLine = { line: string; reason: CopyReason; adds: string };
@@ -58,13 +61,18 @@ export const copyLine = (i: CopyInput): CopyLine | null => {
   else if (!i.steam) { base = i.draft; reason = "shortcut"; }
   else if (i.text === null || i.text === undefined) { base = i.draft; reason = "unreadable"; }
   else { base = i.text; reason = "current"; }
-  const add = missing(base, i.suggest ?? [], i.done ?? []);
-  const keyed = add.length ? setManaged(base, Object.fromEntries(add.map((a) => [a.key, a.value]))) : base;
+  // an OptiScaler game: the keys its plan takes out are never suggested, and its plan goes in first
+  const skip: readonly ManagedKey[] = i.opti ? [...OPTI_DROPPED, ...(i.opti.remove ?? [])] : [];
+  const opti = i.opti ? applyPlan(base, i.opti) : null;
+  const start = opti ? opti.text : base;
+  const add = missing(start, (i.suggest ?? []).filter((a) => !skip.includes(a?.key)), i.done ?? []);
+  const keyed = add.length ? setManaged(start, Object.fromEntries(add.map((a) => [a.key, a.value]))) : start;
   // the game's DirectX 12 argument after %command% when frame generation is set (autolaunch.autoArgs), not on a typo
   const args = parse(base).typo ? [] : autoArgs(i.appid ?? "", keyed).filter((a) => !(i.argsDone ?? []).includes(a.arg));
   let line = keyed;
   for (const a of args) line = setArg(line, a.arg, true);
-  const adds = line === base ? "" : [...(keyed === base ? [] : add.map((a) => `${a.key}=${a.value}`)), ...(line === keyed ? [] : args.map((a) => a.arg))].join(" ");
+  const optiAdds = opti && start !== base ? optiText(i.opti as LaunchPlan, opti.args, opti.lists, managed(parse(base))) : [];
+  const adds = line === base ? "" : [...optiAdds, ...(keyed === start ? [] : add.map((a) => `${a.key}=${a.value}`)), ...(line === keyed ? [] : args.map((a) => a.arg))].join(" ");
   // "running" only when the automatic launch options would really add it after the game quits: plan() refuses
   // game arguments without %command% that would need quoting. The record is not needed: `add` already left out `done`.
   if (adds && reason === "current")
@@ -72,6 +80,13 @@ export const copyLine = (i: CopyInput): CopyLine | null => {
   if (!line.trim()) return null;
   return { line, reason, adds };
 };
+
+/** What an OptiScaler plan changed in the line: the keys it set (where they were not so), its entries and arguments. */
+const optiText = (plan: LaunchPlan, args: string[], lists: string[], before: Partial<Record<ManagedKey, string>>): string[] => [
+  ...Object.entries(plan.set ?? {}).filter(([k, v]) => before[k as ManagedKey] !== v).map(([k, v]) => `${k}=${v}`),
+  ...lists.map((n) => (n === "WINEDLLOVERRIDES" ? `${n}=${plan.dll_override}=n,b` : `${n}=${plan.dxvk_config}`)),
+  ...args,
+];
 
 /** The row's label and one line up front (≤ 60 characters). */
 export const copyRow = (c: CopyLine): { label: string; line: string } => {

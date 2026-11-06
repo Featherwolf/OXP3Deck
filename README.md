@@ -329,6 +329,40 @@ next start. No re-login is needed.
   Properties → General → Launch options; it applies when you start the game again. When copying does not work in
   Game Mode, the line shows in a text field to copy with Steam's keyboard.
 
+## OptiScaler (The Witcher 3)
+
+For The Witcher 3 (Steam), whose own XeSS frame generation does not start on this device ("Latency reduction is not
+enabled"), the Games tab and the game's section in Quick Access offer **OptiScaler**. OptiScaler sits between the game
+and its upscaler: the game is set to DLSS and DLSS frame generation, and OptiScaler runs XeSS upscaling and XeSS frame
+generation (XeFG) in their place, driving Xe Low Latency itself. This is the setup from ETA Prime's video on the same
+chip; **it is not tested on the ONEXPLAYER 3 with this plugin yet**.
+
+OptiScaler is not part of OXP3 Deck: it is downloaded from its GitHub release when you tap Install (GPL-3.0, pinned by
+its checksum, about 69 MB, once). XeSS fast mode (xess-xmx-linux) is still needed for XeSS on the XMX cores.
+
+1. Quit the game. Tap **Install OptiScaler for this game** and confirm. The files go into the game's
+   `bin/x64_dx12` folder as your user. Install stops if the folder already has a dxgi.dll or another OptiScaler;
+   the game's own files are not touched.
+2. Pick the **Upscaler** (XeSS, or FSR 3.1) and **Frame generation** (Off, XeFG 2x, 3x or 4x). On the Games tab,
+   **Game setting it replaces** chooses which of the game's settings OptiScaler takes over (DLSS frame generation by
+   default; XeSS frame generation if DLSS is greyed out in the game).
+3. **In the game, once** (its Details have the steps): start the game; Display mode Borderless; Upscaling DLSS;
+   Frame Generation DLSS Frame Generation on; quit and start it again once; OptiScaler's menu (Insert on a keyboard)
+   should show XeSS and FG Output XeFG. **Show OptiScaler's FPS counter** (Games tab) helps check it works.
+
+The launch options change with it, never while the game runs (then a few seconds after you quit it): `XESS=`,
+`FSR=`, `FSR_FG=` and `force_vk_vendor=` come out while OptiScaler is in the game (`XESS=latest` is not needed),
+`XESS_FG=<n>` follows OptiScaler's frame generation, `WINEDLLOVERRIDES` gains `dxgi=n,b`, 3x and 4x add
+`DXVK_CONFIG="dxgi.customVendorId = 8086"`, and `-dx12` is added after `%command%`; your own entries in these
+variables stay. The XeSS options above OptiScaler's are greyed with "Set by OptiScaler for this game." **Copy launch
+options** includes OptiScaler's options too.
+
+**Remove OptiScaler** deletes its files (a file changed since is kept and listed), puts the game's files back and
+gives the launch options back what OptiScaler replaced (exactly the text from before, when you have not changed it
+since). **Update** appears when a new OXP3 Deck pins a newer OptiScaler build and keeps your choices. Uninstalling
+OXP3 Deck does not remove OptiScaler from a game: remove it from each game first. Another OptiScaler (Decky Framegen,
+a manual copy) or a game with anti-cheat is refused.
+
 ## What it never does
 
 - **It changes nothing without a tap.** Fixes, installs, updates and reboots ask first.
@@ -340,7 +374,8 @@ next start. No re-login is needed.
   Decky's ends up in your session.
 - It never stops a running oxp3-tool or xess-xmx-linux script halfway.
 - It installs no system packages. The XeSS page lists tools that are missing, for you to install with pacman.
-- It changes no launch option except the ones in the table above.
+- It changes no launch option except the ones in the table above, and OptiScaler's (`WINEDLLOVERRIDES`,
+  `DXVK_CONFIG` and `-dx12`, only for a game you install OptiScaler into).
 - **Uninstalling or disabling leaves the current power limits, GPU clock range and energy preference until the
   next reboot.** Turn TDP control off first to get the firmware's values back at once (SimpleDeckyTDP cannot reset
   the xe GPU clocks if you go back to it).
@@ -369,8 +404,11 @@ next start. No re-login is needed.
 - **Steam from Flathub** (Flatpak) is not supported by xess-xmx-linux. The XeSS page says so.
 - **The panel shows an error or does not load:** restart Decky with `sudo systemctl restart plugin_loader`, or
   reboot.
-- The plugin keeps its settings in `~/homebrew/settings/OXP3Deck/settings.json` and task logs in
-  `~/homebrew/data/OXP3Deck/jobs/`.
+- **OptiScaler "Needs 7z or bsdtar":** the archive is 7z. On CachyOS install `7zip` (`sudo pacman -S 7zip`); on
+  Bazzite `bsdtar` is usually there, else `rpm-ostree install p7zip` and reboot. Nothing downloaded is ever run.
+- The plugin keeps its settings in `~/homebrew/settings/OXP3Deck/settings.json` (OptiScaler's record of what it put
+  into each game in `optiscaler.json` next to it) and task logs in `~/homebrew/data/OXP3Deck/jobs/`. The downloaded
+  OptiScaler stays in `~/.local/share/oxp3deck/optiscaler/` for the next install.
 
 ## Building from source
 

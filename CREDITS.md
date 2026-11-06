@@ -28,6 +28,12 @@ Also following ClawDeck's approach, without its code: how `xess.py` finds the in
 50-xess-xmx.conf) and reads the driver check and the drivers (~/.cache/xess-xmx/driver-status, lib/mesa-*,
 lib/active).
 
+Also following ClawDeck's approach, without its code: OptiScaler per game with a manifest and backups, the
+subfolder layout, `XESS_FG` with OptiScaler's XeFG and the DXVK vendor id for 3x/4x (`optiscaler.py`, as of ClawDeck
+commit 07918cc and its later notes). ClawDeck is under AGPLv3 since 2026-11-05 (commit 47559f4) and its
+`assets/games.json` is GPL-3.0 (derived from OptiScaler): neither is copied; OXP3 Deck's games table is written by
+hand from OptiScaler's own wiki and source.
+
 Power control (`powerhw.py`, `power.py`) also learned from ClawDeck's Panther Lake measurements on the MSI Claw
 (its `docs/HARDWARE-FINDINGS.md`), without its code: RAPL limits written PL2 before PL1 when raising (§12), only the
 xe render GT (`gt0`) changed and never the media GT (§1, item 3), and thermald rewriting the power limits within
@@ -80,6 +86,25 @@ from the project's GitHub releases and runs the project's own scripts as your us
 `docs/launch-options.md`, partly in its words. The repository's `tests/fixtures/xess/` holds five of its scripts
 unchanged for the tests (`get-igc.sh` and `get-xess.sh` of 20261031; `get-igc.sh`, `get-xess.sh` and `get-ffx.sh`
 of 20261104), with its licence in `tests/fixtures/xess/LICENSE`.
+
+## OptiScaler
+
+[OptiScaler](https://github.com/optiscaler/OptiScaler) by cdozdil and the OptiScaler contributors (GPL-3.0) takes
+a game's DLSS, XeSS or FSR calls and runs another upscaler and frame generation in their place. For The Witcher 3,
+OXP3 Deck downloads a pinned OptiScaler build from its GitHub release when you tap Install, and puts it into the
+game's folder; the game is set to DLSS and DLSS frame generation, and OptiScaler runs XeSS and XeSS frame generation.
+OptiScaler is not part of OXP3 Deck and is never run by it ([THIRD_PARTY_NOTICES.md](THIRD_PARTY_NOTICES.md) says
+what is downloaded and where it goes).
+
+Sources of the games table in `optiscaler.py` (facts, no code): OptiScaler's wiki page
+[The Witcher 3: Wild Hunt](https://github.com/optiscaler/OptiScaler/wiki/The-Witcher-3-Wild-Hunt) (the
+`bin/x64_dx12` folder, `dxgi.dll`, DirectX 12, the known issues), its `OptiScaler/GameConfigs.cpp` and
+`OptiScaler.ini` (Dxgi spoofing off for `witcher3.exe`; the ini keys and values OXP3 Deck sets) and its release
+notes. The route itself (DLSS and DLSS frame generation in the game, XeSS and XeFG from OptiScaler, on the same
+chip) comes from ETA Prime's video of ClawDeck on SteamOS. xess-xmx-linux's `docs/games.md` gave its OptiScaler
+recipe (Dxgi spoofing off, `WINEDLLOVERRIDES=dxgi=n,b`) and its `docs/debugging.md` the need for `force_vk_vendor=0`
+in The Witcher 3. [Decky Framegen](https://github.com/xXJSONDeruloXx/Decky-Framegen) is named because OXP3 Deck
+detects its installs (its `framegen_patch` marker and `.b` backups) and leaves them alone.
 
 ## Decky Loader
 

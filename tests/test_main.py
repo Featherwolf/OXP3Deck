@@ -37,6 +37,9 @@ CALLS = {
     "power_game": ("1091500",), "power_take_control": (), "power_import_sdtdp": (),
     "power_fix": ("ppd",), "power_unfix": ("ppd",), "power_live": (), "extras_info": (),
     "extras_set": ({"lpmd_game_off": True},), "extras_take_control": ("fan",),
+    "opti_info": ("292030",), "opti_install": ("292030", {"upscaler": "xess", "fg": 2, "fg_input": "dlssg"}),
+    "opti_set": ("292030", {"upscaler": "fsr31", "fg": 3, "fg_input": "dlssg"}), "opti_remove": ("292030",),
+    "opti_update": ("292030",), "opti_options": ({"overlay": True},),
 }
 
 
@@ -94,7 +97,7 @@ class Base(unittest.TestCase):
         self.m = load_main(self.tmp.name)
         # nothing real runs (runuser, oxp3-tool, sysfs writes) unless a test says so (and Plugin()'s _after_restart
         # leaves the real /run alone)
-        for name in ("oxp3tool", "xess", "games", "power", "readouts", "extras"):
+        for name in ("oxp3tool", "xess", "games", "power", "readouts", "extras", "optiscaler"):
             setattr(self.m, name, Raising())
         self.p = self.m.Plugin()
         self.assertIsNone(self.p._broken)
@@ -237,6 +240,47 @@ class JobsTest(Base):
         res = call(self.p, "oxp3_install", "somewhere")
         self.assertEqual(res["error"], "oxp3_install: source must be 'bundled' or 'online', not 'somewhere'")
         self.assertEqual(call(self.p, "job_list")["jobs"], [])
+
+    def test_optiscaler_jobs(self):
+        """Bad choices and check()'s refusals start no job; the job gets the arguments; opti_set and
+        opti_options wait for an OptiScaler job."""
+        from oxp3deck import optiscaler as real
+        go = threading.Event()
+        seen = {}
+
+        def install(ctx, settings, job, appid, choices):
+            seen["install"] = (appid, choices)
+            go.wait(10)
+            return {"ok": True, "error": None}
+        why = {"value": None}
+        self.fake("optiscaler", entry=real.entry, check_choices=real.check_choices,
+                  check=lambda ctx, appid, installing: {"ok": why["value"] is None, "error": why["value"],
+                                                        "why": why["value"]},
+                  install=install, set_choices=lambda ctx, appid, choices, settings: {"ok": True, "opti": None},
+                  options=lambda ctx, opts: {"ok": True, "opti": None},
+                  remove=lambda ctx, settings, job, appid: {"ok": True},
+                  info=lambda ctx, appid, settings: {"ok": True, "opti": {"appid": appid}})
+        bad = call(self.p, "opti_install", "292030", {"upscaler": "dlss", "fg": 2})
+        self.assertEqual((bad["ok"], bad["job"]), (False, None))
+        self.assertIn("unknown upscaler", bad["error"])
+        why["value"] = "Quit The Witcher 3 first."
+        self.assertEqual(call(self.p, "opti_remove", "292030"),
+                         {"ok": False, "error": "Quit The Witcher 3 first.", "job": None})
+        self.assertEqual(call(self.p, "job_list")["jobs"], [])
+        why["value"] = None
+        res = call(self.p, "opti_install", "292030", {"upscaler": "xess", "fg": 2})
+        self.assertTrue(res["ok"], res)
+        self.assertEqual((res["job"]["kind"], res["job"]["title"]), ("opti-install", "OptiScaler for The Witcher 3"))
+        busy = call(self.p, "opti_set", "292030", {"upscaler": "xess", "fg": 0})
+        self.assertEqual(busy["error"], "opti_set: OptiScaler for The Witcher 3 is running; try again when it has "
+                                        "ended")
+        self.assertFalse(call(self.p, "opti_options", {"overlay": True})["ok"])
+        self.assertTrue(call(self.p, "opti_info", "292030")["ok"])        # info answers during the job
+        go.set()
+        self.assertTrue(wait_idle(self.p))
+        self.assertEqual(seen["install"], ("292030", {"upscaler": "xess", "fg": 2}))
+        self.assertTrue(call(self.p, "opti_set", "292030", {"upscaler": "xess", "fg": 0})["ok"])
+        self.assertTrue(call(self.p, "opti_options", {"overlay": True})["ok"])
 
     def test_xess_calls_wait_for_an_xess_job(self):
         go = threading.Event()

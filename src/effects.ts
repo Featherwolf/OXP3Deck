@@ -39,6 +39,8 @@ export const EFFECTS: Record<string, EffectSpec> = {
   "game.xess": "game", "game.fg": "game", "game.mesa": "game", "game.vendor": "game", "game.log": "game", "game.fsr": "game",
   "game.typo": "game", "game.copy": "game", "game.dx12": "game",
   "game.auto": "game", "game.auto_undo": "game", "auto.global": "game",
+  "game.opti": "game", "game.opti_upscaler": "game", "game.opti_fg": "game", "game.opti_input": "game",
+  "game.opti_remove": "game", "game.opti_update": "game", "game.opti_overlay": "game",
   "kernel.try": "reboot", "kernel.keep": "reboot",
   "oxp3.install": NOW,
   reboot: NOW,

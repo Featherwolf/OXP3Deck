@@ -149,7 +149,7 @@ test("the DirectX 12 argument: added for a known game with frame generation set,
 
 test("AutoLaunch passes the DirectX 12 argument to plan and records it", () => {
   const s = readFileSync(new URL("../../src/components/AutoLaunch.tsx", import.meta.url), "utf8");
-  assert.match(s, /plan\(text, suggest, rec, autoArgs\(appid, text\)\)/);
+  assert.match(s, /plan\(text, suggest, rec, autoArgs\(appid, text\), gi\.game\?\.opti_installed \? OPTI_DROPPED : \[\]\)/);
   assert.match(s, /record\(rec, p\.added, Math\.floor\(Date\.now\(\) \/ 1000\), p\.args\)/);
   assert.match(s, /if \(!suggest\.length && !dx12Known\(appid\)\) return none;/);
 });

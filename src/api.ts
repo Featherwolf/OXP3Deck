@@ -5,7 +5,7 @@
 import { callable } from "@decky/api";
 
 import type {
-  ApplyOpts, CatalogRes, DriversRes, ExtrasInfoRes, ExtrasOptions, ExtrasWhat, GameInfoRes, JobListRes, JobRes, JobStart, KernelRes, Overview, Oxp3UpdateCheck,
+  ApplyOpts, CatalogRes, OptiChoices, OptiInfoRes, DriversRes, ExtrasInfoRes, ExtrasOptions, ExtrasWhat, GameInfoRes, JobListRes, JobRes, JobStart, KernelRes, Overview, Oxp3UpdateCheck,
   PlanRes, PowerChangeRes, PowerFixRes, PowerImportRes, PowerInfoRes, PowerLiveRes, PowerOptions, PowerStateRes, PowerValues, Res,
   ShimRes, StatusRes, XessStateRes, XessUpdateCheck,
 } from "./types";
@@ -37,6 +37,14 @@ export const xess_remove_folder = callable<[path: string], Res>("xess_remove_fol
 
 // ---- per game ----------------------------------------------------------------------------------------------------
 export const game_info = callable<[appid: string], GameInfoRes>("game_info");
+
+// ---- OptiScaler (0.5) --------------------------------------------------------------------------------------------
+export const opti_info = callable<[appid: string], OptiInfoRes>("opti_info");
+export const opti_install = callable<[appid: string, choices: OptiChoices], JobStart>("opti_install");
+export const opti_set = callable<[appid: string, choices: OptiChoices], OptiInfoRes>("opti_set");
+export const opti_remove = callable<[appid: string], JobStart>("opti_remove");
+export const opti_update = callable<[appid: string], JobStart>("opti_update");
+export const opti_options = callable<[opts: { overlay: boolean }], OptiInfoRes>("opti_options");
 
 // ---- power -------------------------------------------------------------------------------------------------------
 export const power_info = callable<[refresh: boolean], PowerInfoRes>("power_info");

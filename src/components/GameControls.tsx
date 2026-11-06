@@ -7,18 +7,19 @@
 import { ButtonItem, DropdownItem, PanelSectionRow, ToggleField } from "@decky/ui";
 import { FC, useEffect, useMemo, useRef, useState } from "react";
 
-import { game_info, xess_state } from "../backend";
+import { game_info, opti_info, xess_state } from "../backend";
 import { driverPrefix, dx12Arg, dx12Known, fixTypo, fsrSupported, hasArg, managed, ManagedKey, parse, setArg, setManaged } from "../launchopts";
 import { effectiveOn } from "../autolaunch";
 import { getLaunchOptions, isSteamApp, RunningApp, setLaunchOptions } from "../steam";
 import { EFFECTS } from "../effects";
 import { notePending, useResource } from "../store";
-import type { GameInfo, GameInfoRes, GameIssue, XessDriver, XessStateRes } from "../types";
+import type { GameInfo, GameInfoRes, GameIssue, OptiInfoRes, XessDriver, XessStateRes } from "../types";
 import { remember, when } from "../util";
 import { firstSentence } from "../text";
 import { confirm, DetailsSpec, paragraphs } from "./confirm";
 import { AutoLaunchRows, useAutoLog, useAutoSettings } from "./AutoLaunch";
 import { CopyLaunchRows } from "./CopyLaunch";
+import { OptiRows } from "./OptiControls";
 import { Pending } from "./Effect";
 import { Code, explain, explainWhen, label, Note, Problem, Status, WithDetails } from "./Hint";
 
@@ -177,6 +178,15 @@ export const GameControls: FC<{ app: RunningApp; quick?: boolean; running?: bool
   });
   const fgN = Number(cur.XESS_FG);
   const game = gi.data?.game ?? null;
+  // OptiScaler in this game (DESIGN.md "With xess-xmx-linux"): the XeSS options it replaces are greyed out
+  const optiEntry = steam && !!game?.opti_entry;
+  const oi = useResource<OptiInfoRes>(optiEntry ? `opti-info:${app.appid}` : null, () => opti_info(app.appid));
+  // the shared opti-info resource (OptiRows reloads it after its jobs) wins over game_info's flag, which is not reloaded
+  const optiOn = steam && (oi.data?.ok ? ["installed", "partial"].includes(oi.data.opti?.state ?? "") : !!game?.opti_installed);
+  const optiPlan = optiOn && oi.data?.ok && (oi.data.opti?.state === "installed" || oi.data.opti?.state === "partial") ? oi.data.opti?.launch ?? null : null;
+  const optiWhy = optiOn ? "Set by OptiScaler for this game." : null;
+  const xWhy = why ?? optiWhy;
+  const xDisabled = disabled || optiOn;
   const lr = game ? lastRunLine(game.last_run) : null;
   const fgIssue = steam ? (game?.known_issues ?? []).find((i) => i.fg_crash) ?? null : null;
   const fsrIssue = steam ? (game?.known_issues ?? []).find((i) => i.fsr_risk || i.fg_crash) ?? null : null;
@@ -242,6 +252,7 @@ export const GameControls: FC<{ app: RunningApp; quick?: boolean; running?: bool
     done: autoLog.data?.[app.appid]?.done ?? [],
     autoOn: effectiveOn(auto.data, app.appid), running: !!running,
     appid: app.appid, argsDone: autoLog.data?.[app.appid]?.argsDone ?? [],
+    opti: optiPlan,
   };
   const xf = game?.last_run?.xefg;
   // the frame generation check (games.py xefg_check) in the last run's Details; without the log, how to turn it on
@@ -277,20 +288,20 @@ export const GameControls: FC<{ app: RunningApp; quick?: boolean; running?: bool
       )}
       <PanelSectionRow>
         <WithDetails details={xessD}>
-          <DropdownItem key={`xess-${key}`} {...below} label={label("XeSS version", xessD)} menuLabel="XeSS version" disabled={disabled}
+          <DropdownItem key={`xess-${key}`} {...below} label={label("XeSS version", xessD)} menuLabel="XeSS version" disabled={xDisabled}
             rgOptions={xessOpts} selectedOption={cur.XESS ?? ""} onChange={(o) => change({ XESS: o.data || null }, "game.xess", "XeSS version")}
-            description={explainWhen(cur.XESS === "latest" ? "Newer XeSS for older games." : cur.XESS === "dp4a" ? "For testing." : "Uses the game's XeSS.", EFFECTS["game.xess"], why)} />
+            description={explainWhen(cur.XESS === "latest" ? "Newer XeSS for older games." : cur.XESS === "dp4a" ? "For testing." : "Uses the game's XeSS.", EFFECTS["game.xess"], xWhy)} />
         </WithDetails>
         <WithDetails details={fgD}>
           <DropdownItem key={`fg-${key}-${experimental}`} {...below} label={label("Frame generation", fgD)} menuLabel="XeSS frame generation"
-            disabled={disabled} rgOptions={fgOpts} selectedOption={cur.XESS_FG ?? ""}
+            disabled={xDisabled} rgOptions={fgOpts} selectedOption={cur.XESS_FG ?? ""}
             onChange={async (o) => {
               if (o.data && !(await risky(fgIssue, `Use XeSS frame generation ${o.data}x`))) return;
               change({ XESS_FG: o.data || null }, "game.fg", "Frame generation");
             }}
             description={explainWhen(fgIssue ? "Crashes this game: leave it on Game default."
               : noFgLib ? "This game has no XeSS frame generation."
-              : cur.XESS_FG ? "Turn on frame gen in the game and set a frame limit." : "Uses the game's own choice. Can crash some games.", EFFECTS["game.fg"], why)} />
+              : cur.XESS_FG ? "Turn on frame gen in the game and set a frame limit." : "Uses the game's own choice. Can crash some games.", EFFECTS["game.fg"], xWhy)} />
         </WithDetails>
         <WithDetails details={expD}>
           <ToggleField label={label("Show 5x–8x (experimental)", expD)} checked={experimental} bottomSeparator="none"
@@ -303,9 +314,9 @@ export const GameControls: FC<{ app: RunningApp; quick?: boolean; running?: bool
             description={explainWhen("Only change if this game misbehaves.", EFFECTS["game.mesa"], why)} />
         </WithDetails>
         <WithDetails details={vendorD}>
-          <ToggleField label={label("Compatibility mode", vendorD)} checked={cur.force_vk_vendor === "-1"} disabled={disabled} bottomSeparator="none"
+          <ToggleField label={label("Compatibility mode", vendorD)} checked={cur.force_vk_vendor === "-1"} disabled={xDisabled} bottomSeparator="none"
             onChange={(v) => change({ force_vk_vendor: v ? "-1" : null }, "game.vendor", "Compatibility mode")}
-            description={explainWhen("Only for games that need it; XeSS slows down.", EFFECTS["game.vendor"], why)} />
+            description={explainWhen("Only for games that need it; XeSS slows down.", EFFECTS["game.vendor"], xWhy)} />
         </WithDetails>
         <WithDetails details={dxD}>
           <ToggleField label={label("Start in DirectX 12", dxD)} checked={dxOn} disabled={disabled} bottomSeparator="none"
@@ -319,7 +330,7 @@ export const GameControls: FC<{ app: RunningApp; quick?: boolean; running?: bool
         </WithDetails>
         {showFsr && (
           <WithDetails details={fsrD}>
-            <DropdownItem key={`fsr-${key}`} {...below} label={label("FSR → XeSS", fsrD)} menuLabel="FSR on XeSS" disabled={disabled}
+            <DropdownItem key={`fsr-${key}`} {...below} label={label("FSR → XeSS", fsrD)} menuLabel="FSR on XeSS" disabled={xDisabled}
               rgOptions={fsrOpts} selectedOption={mode}
               onChange={async (o) => {
                 const m = FSR_MODES.find((f) => f.data === o.data);
@@ -327,7 +338,7 @@ export const GameControls: FC<{ app: RunningApp; quick?: boolean; running?: bool
                 if (m.data && !(await risky(fsrIssue, m.label))) return;
                 change(m.set, "game.fsr", "FSR → XeSS");
               }}
-              description={explainWhen(fsrIssue ? "Can crash this game: leave it on the game's own." : fsrNow?.line ?? "Set by hand.", EFFECTS["game.fsr"], why)} />
+              description={explainWhen(fsrIssue ? "Can crash this game: leave it on the game's own." : fsrNow?.line ?? "Set by hand.", EFFECTS["game.fsr"], xWhy)} />
           </WithDetails>
         )}
         {busy && <Status ok={null} label="Saving…" />}
@@ -346,6 +357,12 @@ export const GameControls: FC<{ app: RunningApp; quick?: boolean; running?: bool
         )}
         <CopyLaunchRows input={copyInput} game={app.name} />
       </PanelSectionRow>
+      {optiEntry && (
+        <PanelSectionRow>
+          <OptiRows app={app} quick={quick} running={!!running} game={game} xessInstalled={xs.data?.ok ? !!x?.installed : null}
+            onWritten={(t) => { if (t !== null) { setOpts(t); setRev((n) => n + 1); } }} />
+        </PanelSectionRow>
+      )}
       {steam && (
         <PanelSectionRow>
           <AutoLaunchRows app={app} running={!!running} onWritten={(t) => { if (t !== null) { setOpts(t); setRev((n) => n + 1); } }} />
@@ -357,7 +374,7 @@ export const GameControls: FC<{ app: RunningApp; quick?: boolean; running?: bool
           details={{ title: `Proton: ${toolName(game)}`, body: protonLine(game) }} />}
         {steam && (game?.known_issues ?? []).map((i) => (
           <Status key={`issue-${i.id}`} ok={false} red={i.fg_crash && !!(cur.XESS_FG || cur.FSR || cur.FSR_FG)} label={i.label} detail={i.line}
-            details={{ title: i.label, body: paragraphs([i.detail, `Source: ${i.source}.`]) }} />
+            details={{ title: i.label, body: paragraphs([optiOn ? `Without OptiScaler: ${i.detail}` : i.detail, `Source: ${i.source}.`]) }} />
         ))}
         {steam && cur.XESS_FG && noFgLib && (
           <Status ok={false} label="No XeSS frame generation in this game" detail="Frame generation here has nothing to act on."

@@ -177,9 +177,50 @@ export type GameInfo = {
   has_fg?: boolean | null;                 // libxess_fg.dll in the game's folder (null: folder unknown or searched in part)
   prefix_checks?: GamePrefixChecks | null;
   checks?: GameCheck[];
+  // 0.5 (DESIGN.md "OptiScaler"; older backends: absent)
+  opti_installed?: boolean;                // optiscaler.json says OptiScaler is in this game
+  opti_entry?: boolean;                    // the game is in optiscaler.py's GAMES table
 };
 export type GameSuggest = { key: ManagedKey; value: string; why: string };
 export type GameInfoRes = Res & { game: GameInfo | null };
+
+// ---- OptiScaler (DESIGN.md "OptiScaler (0.5)") ---------------------------------------------------------------------
+
+export type OptiUpscaler = "xess" | "fsr31";
+export type OptiFgInput = "dlssg" | "xefg" | "upscaler";
+export type OptiFg = 0 | 2 | 3 | 4;
+export type OptiChoices = { upscaler: OptiUpscaler; fg: OptiFg; fg_input: OptiFgInput };
+/** What the launch options get while OptiScaler is in the game (optiscaler.launch_plan); the frontend applies it. */
+export type LaunchPlan = {
+  set: Partial<Record<ManagedKey, string>>; remove: ManagedKey[];
+  dll_override: string | null;             // "dxgi": WINEDLLOVERRIDES gains "dxgi=n,b"
+  dxvk_config: string | null;              // "dxgi.customVendorId = 8086" (3x/4x only)
+  args: string[];                          // ["-dx12"]
+};
+export type OptiInfo = {
+  appid: string; supported: boolean;                    // in the table
+  why: string | null;                                   // check()'s refusal, null when install would start
+  state: "none" | "installed" | "partial" | "other";    // other: another tool's OptiScaler
+  build: string | null; build_wanted: string | null; update: boolean;
+  folder: string | null;                                // exe folder, shown in Details only
+  choices: OptiChoices | null; defaults: OptiChoices | null; fg_inputs: OptiFgInput[];
+  launch: LaunchPlan | null;                            // what the record says should be in the launch options
+  cached: boolean; download_mb: number | null;          // the package is in the cache / the size to fetch
+  unpacker: string | null;                              // "7z" / "bsdtar" / null
+  notes: string[]; kept: string[]; overlay: boolean;
+  launch_new?: LaunchPlan | null;                      // the plan an install with the defaults would write
+  warnings?: string[];                                  // not refusals, only rows ("OptiScaler's XeSS will run in …")
+  version?: string | null;                              // OptiScaler's version of the pinned build
+  backed_up?: string[];                                 // files the install moved into the backup folder
+  sources?: string[];                                   // the table entry's sources
+};
+export type OptiInfoRes = Res & { opti: OptiInfo | null };
+export type OptiJobResult = Res & {
+  appid: string; build: string | null; folder: string | null;
+  copied: number; backed_up: string[]; removed: number; kept: string[];   // kept: files left, with why
+  launch: LaunchPlan | null;               // install/update: apply it; remove: undo it
+  next: string | null;
+};
 
 // ---- jobs and misc -------------------------------------------------------------------------------------------------
 

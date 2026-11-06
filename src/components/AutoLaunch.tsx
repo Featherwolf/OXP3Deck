@@ -10,6 +10,8 @@ import {
 } from "../autolaunch";
 import { game_info, get_setting, set_setting } from "../backend";
 import { dx12Known } from "../launchopts";
+import { OPTI_DROPPED } from "../opti";
+import { optiApplyPending, resetOptiInflight } from "./OptiControls";
 import { EFFECTS } from "../effects";
 import { getLaunchOptions, isRunning, isSteamApp, RunningApp, runningApp, setLaunchOptions, watchRunningApp } from "../steam";
 import { put, useResource } from "../store";
@@ -61,7 +63,8 @@ export const autoApply = async (appid: string, name: string, opts: { quiet?: boo
     const text = await getLaunchOptions(appid);
     if (text === null) return none;                       // unreadable: writing would replace the user's options
     const rec = (await loadLog())[appid];
-    const p = plan(text, suggest, rec, autoArgs(appid, text));
+    // OptiScaler in the game: the keys it takes out are never added back (DESIGN.md "With xess-xmx-linux")
+    const p = plan(text, suggest, rec, autoArgs(appid, text), gi.game?.opti_installed ? OPTI_DROPPED : []);
     if (!planned(p)) return none;
     // never while that game runs: checked right before the write
     if (isRunning(appid)) return { ...none, waiting: true };
@@ -88,11 +91,15 @@ export const watchGameExits = (): (() => void) => {
     if (!left || left.appid === now?.appid || !isSteamApp(left.appid)) return;
     const t = setTimeout(() => {
       timers.delete(t);
-      if (!isRunning(left.appid)) autoApply(left.appid, left.name).then(undefined, () => undefined);
+      // OptiScaler's waiting launch options first, then the automatic ones (one after the other: both write them)
+      if (!isRunning(left.appid)) {
+        optiApplyPending(left.appid, left.name).then(undefined, () => undefined)
+          .then(() => autoApply(left.appid, left.name)).then(undefined, () => undefined);
+      }
     }, AUTO_AFTER_EXIT_MS);
     timers.add(t);
   });
-  return () => { stop(); timers.forEach((t) => clearTimeout(t)); timers.clear(); inflight = new Set(); };
+  return () => { stop(); timers.forEach((t) => clearTimeout(t)); timers.clear(); inflight = new Set(); resetOptiInflight(); };
 };
 
 const GLOBAL_TEXT = [
@@ -159,7 +166,7 @@ export const AutoLaunchRows: FC<{ app: RunningApp; running: boolean; onWritten: 
     let alive = true;
     getLaunchOptions(appid).then((text) => {
       if (!alive || text === null) return;
-      const p = plan(text, suggest, rec, autoArgs(appid, text));
+      const p = plan(text, suggest, rec, autoArgs(appid, text), gi.data?.game?.opti_installed ? OPTI_DROPPED : []);
       setWaiting(planned(p) ? addedText(p.added, p.args) : null);
     });
     return () => { alive = false; };
