@@ -86,6 +86,8 @@ py_modules/oxp3deck/
                        "OptiScaler"); any game through resolve() (0.5.1, "OptiScaler for any game")
   optigames.py         OptiScaler's known-games table (from its wiki), the games not offered, and the pure rules that
                        find a game's exe, API and a free proxy name (0.5.1)
+  autosetup.py         "Set up games automatically": per-game mode, the plan (OptiScaler, launch keys, the Proton
+                       move), the change records, crash bookkeeping; auto.json (0.6, "Automatic setup")
 src/                   frontend (TypeScript, @decky/ui)
   api.ts               one `callable` per backend method; backend.ts wraps each so it never rejects
   types.ts             the answers below, as TypeScript types
@@ -98,6 +100,7 @@ src/                   frontend (TypeScript, @decky/ui)
   power.ts             power control's serial writer and texts (pure, tested under node)
   effects.ts           "When it takes effect": the tags, the tag of every setting, pending texts (pure, node-tested)
   autolaunch.ts        automatic launch options: what to add, the record, Undo (pure, node-tested)
+  autosetup.ts         automatic setup's texts, the hand-set check, summaries (pure, node-tested; 0.6)
   copyopts.ts          "Copy launch options": the line to paste by hand, why, its texts (pure, node-tested)
   opti.ts              OptiScaler's launch-option plan applied and undone, its choices, checklist and texts (pure,
                        node-tested; 0.5)
@@ -132,7 +135,8 @@ restart runs (`xess-script.json`). Power control keeps `DECKY_PLUGIN_SETTINGS_DI
 options) and `/run/oxp3deck/power-run.json` (the boot snapshot, the last game, what it wrote, locked limits, an
 override; for this boot only); the extras keep `DECKY_PLUGIN_SETTINGS_DIR/extras.json` (charge limit, charge
 behaviour, the intel_lpmd option) and `/run/oxp3deck/extras-run.json` (what they changed this boot and what was there
-before). The frontend keeps `ui_autolaunch`, `ui_autolaunch_log`, `ui_power_advanced` in settings.json. Nothing inside
+before). The frontend keeps `ui_autolaunch`, `ui_autolaunch_log`, `ui_power_advanced` in settings.json. Automatic setup (0.6) keeps `DECKY_PLUGIN_SETTINGS_DIR/auto.json` (the switch, each game's mode, its changes and
+session times). Nothing inside
 the plugin folder (an update deletes it).
 
 ## Backend API (main.py)
@@ -2035,6 +2039,9 @@ main.py: `extras_set` / `extras_take_control` answer with `info()` taken after t
 
 ## Automatic launch options
 
+(0.6: the toggle and the per-game dropdown are replaced by "Automatic setup"; the rules for adding keys below stay
+and are reused there.)
+
 A global toggle "Add needed launch options automatically" (default **off**) plus a per-game override. Frontend only
 (the backend never writes launch options), using `launchopts.ts`'s managed keys and `setManaged`, so the user's own
 text is never touched.
@@ -2215,7 +2222,7 @@ after a change that is not immediate, in a pending row.
 | `xess.shim` | Add XeSS to system Protons | Restart the game |
 | `xess.remove_folder` | Remove an old folder | Now |
 | `game.xess`, `game.fg`, `game.mesa`, `game.vendor`, `game.log`, `game.fsr`, `game.typo` | per-game launch options | Restart the game |
-| `game.auto`, `game.auto_undo`, `auto.global` | automatic launch options | Restart the game |
+| `game.auto_undo`, `auto.global`, `game.auto_mode`, `game.auto_retry`, `game.auto_offer` | automatic setup (0.6; `game.auto` removed) | Restart the game |
 | `game.copy` | Copy launch options (pasted by hand) | Restart the game |
 | `game.dx12` | Start in DirectX 12 | Restart the game |
 | `game.opti`, `game.opti_upscaler`, `game.opti_fg`, `game.opti_input`, `game.opti_remove`, `game.opti_update` | OptiScaler (0.5) | Restart the game (greyed "Quit <game> first." while it runs) |
@@ -3030,3 +3037,435 @@ one game, so they are not checked.
 
 On the device (owner), not done: a generic DirectX 12 Unreal game with DLSS, a known game (Cyberpunk 2077), a
 Vulkan game (No Man's Sky), and whether XeSS on Vulkan reaches the XMX cores through xess-xmx-linux.
+
+## Automatic setup (0.6)
+
+Owner requests: "this needs to be more automatic. configuration by user as backup but auto apply whenever it can", and
+about Proton: "do i need to choose the proton version still". One global switch, **Set up games automatically**, off
+until the user turns it on and confirms one dialog. With it on, OXP3 Deck sets up each game by itself while the game
+is not running, records every change with a one-line summary and Undo, and undoes a change after which the game
+closed at once. The user's own settings stay the backup: a game becomes Manual as soon as the user changes it by hand.
+It replaces the 0.4 toggle "Add needed launch options automatically" ("Automatic launch options": its rules for adding
+keys are reused, its toggle and per-game dropdown go; see "Migration").
+
+Facts this rests on (research in `scratchpad/auto/research`; the APIs are typed in @decky/ui 4.16.0, `App.d.ts`,
+`GameSessions.d.ts`, `collectionstore.d.ts`, `appdetailsstore.d.ts`): `SteamClient.Apps.GetAvailableCompatTools(appId)`
+lists `{strToolName, strDisplayName}`; `SteamClient.Apps.SpecifyCompatTool(appId, name)` sets a game's tool (returns
+nothing; `""` clears the per-game choice) and writes priority 250; `AppDetails.strCompatToolName`,
+`strCompatToolDisplayName`, `nCompatToolPriority` read it back (`RegisterForAppDetails`, refreshed by
+`appDetailsStore.RequestAppDetails`); **`nCompatToolPriority >= 250` means a per-game pick** (armada-control
+`steamCompat.ts` uses exactly this test); a change applies at the game's next start without a Steam restart; a tool
+installed while Steam runs is not listed (and SpecifyCompatTool ignores its name) until Steam restarts.
+`RegisterForAppLifetimeNotifications` gives `{unAppID, nInstanceID, bRunning}`. `collectionStore.localGamesCollection
+.allApps` lists installed apps in memory. config.vdf may lag behind, so the frontend's AppDetails are the source of
+truth for a game's current tool; the backend never reads the tool from config.vdf for these decisions.
+Owner's device: The Witcher 3 (292030) and Monster Hunter Wilds (2246340) run on GE-Proton11-11 (hooked), so neither
+is moved.
+
+### What it does
+
+| Game class (`AutoPlan.class`) | Which | Done automatically | Only offered (a row, one tap) |
+|---|---|---|---|
+| `known` | in `optiscaler.GAMES`, `optigames.KNOWN`, `games.KNOWN_ISSUES` or `launchopts.DX12_ARGS` (backend: `autosetup.DX12_APPIDS`, the same appids) | the table's setup: OptiScaler where the entry has `auto` (only The Witcher 3 now), its launch plan (WINEDLLOVERRIDES `<proxy>=n,b`, XESS_FG, -dx12, dropping XESS / FSR / FSR_FG / force_vk_vendor); otherwise XESS=latest when `suggest` has it and the issue does not forbid it; -dx12 (`autoArgs`); the issue's `auto_drop` keys taken out; the Proton move | OptiScaler for a KNOWN entry without `auto`; FSR=xess |
+| `unknown` | any other Steam game | XESS=latest when `suggest` has it (old XeSS runs on the XMX cores); the Proton move when the game ships XeSS | OptiScaler (generic setup); FSR=xess |
+| `skipped` | anti-cheat or online (below), not installed, a non-Steam app | nothing, ever | nothing (the manual controls stay) |
+
+- **Never automatic**: a game in `optigames.ONLINE` or with anti-cheat files (`optiscaler.anticheat(ctx, appid)`,
+  the 0.5.1 markers, on the install folder at `SCAN_DEPTH`, also for table games) → `skipped`, `skip_why` "<Game> uses
+  anti-cheat (<which>), so OXP3 Deck changes nothing by itself." / "<Game> is an online game, so …". Never replacing a
+  file: OptiScaler is installed automatically only when nothing would be backed up (`install(..., auto=True)`, below);
+  a launch-option key the text already sets is never given another value. Never for a game in Manual.
+- **XESS_FG** stays out of every automatic key change (`NEVER_AUTO`); it is written automatically only as part of an
+  OptiScaler setup whose table entry's `auto.choices` asks for frame generation (Witcher: 2x through XeFG, the reason
+  OptiScaler is used there). FSR=xess is never automatic any more (it replaces signed FidelityFX DLLs, issue #42):
+  offered only.
+- **Conditions**: xess-xmx-linux installed (`xess.detect().installed`) for the XeSS keys, the Proton move and the
+  automatic OptiScaler; without it nothing XeSS-related is automatic and the summary says "Install XeSS fast mode
+  first (XeSS tab)." The plan's launch keys are computed against the Proton the game will have after the plan (a
+  planned move to a hooked Proton counts as `compat_tool_hook: true`).
+
+**Table additions** (backend):
+- `optiscaler.GAMES["292030"]["auto"] = {"choices": {"upscaler": "xess", "fg": 2, "fg_input": "dlssg"}, "why":
+  "XeSS frame generation adds no fps here; OptiScaler's XeFG is the known way.", "short": "for frame generation"}`
+  (source: KNOWN_ISSUES 292030 `fg_no_gain`, ETA Prime's route). `optigames._k(..., auto=None)`: no KNOWN entry has it
+  now (none is tested on this device); a later entry gets it only with a source.
+- `games.KNOWN_ISSUES` entries gain `auto_drop: tuple[ManagedKey]` (taken out automatically, a key known to crash)
+  and `auto_never: tuple[ManagedKey]` (never added automatically). 2246340: `auto_drop ("XESS_FG", "FSR", "FSR_FG")`,
+  `auto_never ("XESS", "FSR")` (its detail: XESS=latest swaps files too). 292030: `auto_drop ("FSR", "FSR_FG")`,
+  `auto_never ("FSR",)`. Both fields default to `()`; `known_issues()` copies them.
+- `autosetup.PLAN_VERSION = 1`: raised whenever these tables change, so the library scan looks at seen games again.
+
+### The Proton move
+
+Only with the switch on, the game Automatic, not skipped, xess-xmx-linux installed, and the game **uses XeSS or
+OptiScaler**: XeSS DLLs in its folder (`GameInfo.dlls` kind `xess`), or OptiScaler installed or planned.
+1. The current tool: `facts.compat` from AppDetails (`name`, `display`, `priority`). The effective tool is `name` when
+   `priority > 0` and `name` is not empty, else Steam's default (`steamlib.default_compat_tool`, config.vdf "0").
+2. **A per-game pick by the user** (`priority >= 250` and no live `proton` change of ours whose `to` equals `name`):
+   never moved. If it lacks the hook, `proton_note` "Your Proton for <game> lacks the XeSS add-on." plus the offer
+   `proton` ("Use <target>").
+3. Needs a move when the effective tool's hook is not true: `steamlib.find_tool_dir` + `xess.has_hook` false, or the
+   folder is not found, or no tool is known; a system tool (`steamlib.is_system_tool`, e.g. proton-cachyos in
+   `/usr/share/steam/compatibilitytools.d`) counts by its hook like any other (the system shim alone does not give
+   XESS=latest / FSR).
+4. Target (`autosetup.pick_proton(ctx, tools)`; `tools` = `facts.tools`, GetAvailableCompatTools' list): among names
+   matching `^GE-Proton(\d+)-(\d+)$`, highest (major, minor) numerically whose folder has the hook (and the shim:
+   `has_marker(igdext64.dll)` not false); else `proton_experimental` when listed and hooked; else none. Checked each
+   time (an update can remove `user_settings.py`).
+5. No target: `proton_note`, first matching: a hooked `GE-Proton*` folder in `<steam_root>/compatibilitytools.d` not in
+   `tools` → "Restart Steam to use <folder>." (`kind: "restart"`); a listed GE or Experimental without the hook →
+   "<name> lacks the XeSS add-on: repair XeSS fast mode (XeSS tab)." (`kind: "unhooked"`); else "Install GE-Proton or
+   Proton Experimental, then restart Steam." (`kind: "none"`; Details: GE-Proton through ProtonUp-Qt in Desktop Mode
+   or a Decky Proton manager such as Wine Cellar; Proton Experimental from the Steam library (Tools); then restart
+   Steam; OXP3 Deck moves the game at its next pass).
+6. The frontend sets it (`setCompatTool`, below), reads it back, and records `{kind: "proton", proton: {from: name,
+   from_priority: priority, to, to_display}}`. Undo and rollback: `SpecifyCompatTool(appid, from_priority >= 250 ?
+   from : "")`, read back. A later `name != to` (at any priority: also Steam's default after "force" was turned off)
+   is the user's own pick: the change becomes `superseded` and the game Manual ("You picked another Proton.").
+
+### Per game: Automatic / Manual
+
+`AutoGame.mode` is `"auto"` (default while the switch is on) or `"manual"`; `mode_why` says why, `mode_by` `"default"
+| "user" | "detected"`.
+- **First sight** (no `AutoGame` yet; plan creates it): Manual when the user already set the game up in OXP3 Deck or
+  by hand: `settings ui_autolaunch.games[appid] === false` ("Automatic launch options were off for this game."), an
+  OptiScaler record with `origin` `"user"` (records from 0.5 have no origin: `"user"`; "You installed OptiScaler
+  yourself."), or `facts.hand` non-empty: managed keys (MANAGED_KEYS), a `WINEDLLOVERRIDES` / `DXVK_CONFIG`, or the
+  game's DX12 argument in its launch options that neither `ui_autolaunch_log[appid].added`/`args` nor
+  `ui_opti_log[appid]` accounts for (frontend `autosetup.handSet(text, autoRec, optiEntry)`; "You set its launch
+  options yourself."). Only keys OXP3 Deck manages count; `gamemoderun`, `--launcher-skip`, other variables do not.
+- **Later hand changes**: while the game is Automatic by default (`mode_by: "default"`), every plan checks
+  `facts.hand` again (less what a live automatic `launch` change set, also in the backend): non-empty → Manual
+  ("You set its launch options yourself."), so keys the user added in Steam (or in GameControls while the switch was
+  off) are never taken out by `auto_drop`.
+- **Any manual change → Manual** (`auto_mode(appid, "manual", why)` from the frontend, `mode_by: "detected"`): any
+  write in GameControls' `write()` (every XeSS dropdown, Compatibility mode, logs, FSR, Start in DirectX 12, "Fix the
+  typo"); OptiControls Install / Update / Remove / a choice change (not the global overlay); an Undo; the launch
+  options of a live `launch` change touched outside OXP3 Deck (`touched`, below: "You changed its launch options in
+  Steam."; while OptiScaler is in, the `OPTI_DROPPED` keys it takes out do not count, and `opti_done` marks a live
+  change that only set such keys `superseded`, the game staying Automatic); a Proton picked by the user (above); OptiScaler removed outside OXP3 Deck (record gone while an `opti`
+  change is live: `superseded`, "OptiScaler was removed outside OXP3 Deck.").
+- **Picking Automatic again** (`mode_by: "user"`): `facts.hand` is ignored from then on; the next pass applies the
+  whole plan, including taking out the issue's `auto_drop` keys and the keys OptiScaler conflicts with; changes the
+  user undid may be applied again; a `rolled_back` change only through "Try again".
+- With the switch off: no passes; the rows of past changes and their Undo stay; the dropdown is hidden.
+
+### Crash rollback
+
+Backend bookkeeping (`AutoGame.session`), fed by the frontend: `auto_session(appid, "start")` on `bRunning: true`
+and `auto_session(appid, "exit")` on `bRunning: false` (a second listener in steam.ts that keeps the payload; also
+`"start"` at plugin load for each Steam app in `Router.RunningApps` the backend has no start for).
+- start: `started_at` = the reaper's start (`steamlib.game_started_at(ctx, appid)`: the newest `reaper SteamLaunch
+  AppId=<appid>` process, its /proc start ticks + `/proc/stat btime`) else now; an equal `started_at` is a repeat.
+- exit (`ended_at` = now; ignored without `started_at`, then cleared): `QUICK_EXIT_S = 60`. A run of 60 s or more
+  marks every live change with `at < started_at` `tested: true` and sets `quick_exits = 0`. A shorter run:
+  `quick_exits += 1`; **rollback** = the newest live, untested change with `at < started_at` (the first start after
+  it); else, when `quick_exits >= 3` (crashes repeatedly), the newest live change, tested or not. At most one per
+  exit; afterwards `quick_exits = 0`. The answer carries it; it is also kept as `rollback_due` (a plugin reload between
+  exit and undo), which `auto_plan` returns until the undo is recorded.
+- The frontend undoes it at once (the exit pass, before anything else; never while the game runs), then
+  `auto_undo(appid, id, "rollback")`: `state: "rolled_back"`, the game stays Automatic, `notice` = "<Game> closed
+  within a minute after OXP3 Deck <what>, so that change is undone." (shown once as a toast and kept as a row until
+  dismissed or retried). The plan never applies a rolled-back change again (same kind and content: launch keys/args,
+  Proton `to`, OptiScaler build) unless "Try again" (`auto_retry`): the change is applied once more with `kept: true`
+  (`tested: true` from the start, so only the repeated-crash rule can undo it).
+- A quick quit by choice also counts; the dialog and Details say so. The OptiScaler checklist's "quit and start
+  again once" takes longer than 60 s (start, two menus, quit).
+
+### The pass (frontend `components/AutoSetup.tsx` `autoPass(appid, name, cause)`)
+
+One pass at a time (a queue; `inflight` per appid), only while `state.on`, for a Steam app (`isSteamApp`). `cause`:
+`"exit"` (watchGameExits, after `AUTO_AFTER_EXIT_MS`, and after every lifetime `bRunning: false` once its
+`auto_session(exit)` answered, again every 3 s up to `EXIT_RETRIES = 5` times while `RunningApps` still lists it, so a
+game that crashed before it became the main app gets its rollback too; first `optiApplyPending`, then the session
+exit and its rollback, then the pass; the queue drops a second request), `"open"` (GameControls mounted for a game that does not run, once per mount), `"scan"`
+(library). Steps:
+1. `facts` = `{compat: await getCompat(appid), tools: await compatTools(appid), hand: handSet(...), running:
+   isRunning(appid)}`; `plan = auto_plan(appid, facts)`. Skipped or Manual: stop.
+2. `isRunning(appid)` → stop (the row says "Will be set up when you quit <game>." with what the plan would do; for
+   the launch options only what `launchStep` would change in the current text). While the game runs the plan's
+   OptiScaler check leaves out the running refusal only (`check(..., ignore_running=True)`), so a file in the way
+   still shows; the job checks again, and `install(auto=True)` asks once more after the download, before the first
+   copy ("Quit <game> first.").
+   Checked again right before every write below.
+3. `plan.rollback` → undo it (by kind, as Undo) and stop this pass.
+4. Manual checks: a live `launch` change whose `touched(text, applied)` is true → `auto_mode(appid, "manual", …)`,
+   stop. (Proton and OptiScaler checks are the backend's, in `auto_plan`.)
+5. `plan.proton` → `setCompatTool(appid, to)`; ok → `auto_record(appid, {kind: "proton", ...})`; a failed read-back:
+   error row ("Steam did not take the Proton change."), nothing recorded, the pass goes on.
+6. `plan.opti` → `auto_opti_install(appid)` → wait for the job (`job_status` every 2 s, at most 20 min) → on `done`
+   `syncOptiLaunch(appid, result.launch)` (OptiControls' path, `ui_opti_log`); the backend records the `opti` change at
+   the job's end. A refusal or a failed job: `AutoGame.last_error`, pass goes on without it.
+7. `plan.launch` → `text = getLaunchOptions(appid)` (null: stop) → `launchStep(appid, text, plan, optiIn, rec)` =
+   `applyAuto(text, plan.launch.plan, autoArgs(appid, text after the removals), skip)` (`skip` = `OPTI_DROPPED` while
+   OptiScaler is in the game; an `autoArgs` argument a `rolled_back`, not kept change added is left out until Try
+   again) → changed: `setLaunchOptions` →
+   `auto_record(appid, {kind: "launch", launch: applied, why})`.
+8. One toast when something changed: `autosetup.toastText(name, changes)` ("Set up <game>: OptiScaler, DirectX 12.
+   Applies at its next start."); OptiScaler adds the checklist line.
+
+**Triggers**: index.tsx starts `watchAutoSetup()` (replaces `watchGameExits`, which it calls) and the library scan:
+20 s after load and every 10 min while no game runs, `installedSteamApps()` (collectionStore `localGamesCollection
+.allApps`, `app_type === 1`, `local_per_client_data.installed`) → `auto_pending(appids)` → at most 8 appids (unseen or
+seen under an older `PLAN_VERSION`, or with `rollback_due`; `rollback_due` first, then known-class) → a pass for each, one after another.
+No `RegisterForAppDetails` for games the backend did not return.
+
+### Launch-option merge rules (autolaunch.ts, pure)
+
+```ts
+export type AutoApplied = { set: Partial<Record<ManagedKey, string>>; dropped: Partial<Record<ManagedKey, string>>;
+                            args: string[] };
+export const applyAuto: (text: string, lp: LaunchPlan, args: AutoArg[], skip?: readonly ManagedKey[]) =>
+  { text: string; applied: AutoApplied };
+export const undoAuto: (text: string, a: AutoApplied) => string;
+export const touched: (text: string, a: AutoApplied) => boolean;
+```
+- A `%command` typo, or unreadable text: nothing.
+- Removals first: each `lp.remove` key that is set (managed, or an unmanaged copy before `%command%`) is cut out as one
+  token (as `undo` cuts, never re-joining the text) and its value kept in `dropped`.
+- Then additions with `plan`'s rules (`planKeys`: only absent keys; a key set with another value is the user's and
+  stays; `NEVER_AUTO` and the `skip` keys never; `SAFE` values), then `args` (`lp.args` ∪ `autoArgs`, `SAFE_ARG`,
+  `setArg`). `lp.dll_override` / `lp.dxvk_config` are ignored here (only OptiScaler's own plan sets them, through
+  opti.ts). Keys in `ui_autolaunch_log[appid].done` (the user removed them before) are not added.
+- `undoAuto`: each `set` key whose value is still the one added goes, each `args` word goes (`setArg(…, false)`), each
+  `dropped` key comes back (setManaged) where absent; text that is then only `%command%` becomes "".
+- `touched`: a `set` key now absent or with another value, an `args` word missing, or a `dropped` key back.
+
+### Backend (`py_modules/oxp3deck/autosetup.py`, state in `DECKY_PLUGIN_SETTINGS_DIR/auto.json`)
+
+`auto.json` (root's, `context.write_atomic`, read with `read_small` ≤ 1 MB; the folder is the user's, so every field is
+normalised on read as power.json's `fixed` is): `{version: 1, on: bool, confirmed_at: number|null, plan_version:
+number, games: {appid: AutoGame}}`; at most 400 games (the oldest `seen_at` without a live change dropped first), at
+most 12 changes per game (the oldest not `live` dropped first). Under one module `_LOCK`.
+
+```ts
+export type AutoMode = "auto" | "manual";
+export type AutoKind = "opti" | "launch" | "proton";
+export type AutoChangeState = "live" | "undone" | "rolled_back" | "superseded";
+export type AutoChange = {
+  id: string;                         // "<kind>-<at>" (backend-made)
+  kind: AutoKind; at: number;         // Unix seconds, backend time
+  state: AutoChangeState; tested: boolean; kept: boolean; accepted: boolean;   // accepted: an offer the user tapped
+  label: string;                      // ≤ 40: "OptiScaler" / "XESS=latest -dx12" / "GE-Proton11-11"
+  why: string; short: string;         // why ≤ 200, short ≤ 40 ("for frame generation", "for XeSS")
+  launch?: AutoApplied;               // kind launch
+  proton?: { from: string; from_priority: number; to: string; to_display: string };
+  opti?: { build: string; choices: OptiChoices };
+  ended_at?: number | null;           // undone / rolled back / superseded at
+};
+export type AutoGame = {
+  appid: string; name: string; class: "known" | "unknown" | "skipped"; skip_why: string | null;
+  mode: AutoMode; mode_why: string | null; mode_by: "default" | "user" | "detected";
+  seen_at: number; plan_version: number; changes: AutoChange[];
+  session: { started_at: number | null; quick_exits: number; last_run_s: number | null };
+  rollback_due: string | null;        // a change id
+  notice: string | null; last_error: string | null;
+};
+export type AutoOffer = { id: "opti" | "fsr" | "proton"; label: string; line: string; why: string };
+export type AutoPlan = {
+  appid: string; name: string; on: boolean; class: AutoGame["class"]; skip_why: string | null;
+  mode: AutoMode; mode_why: string | null;
+  opti: { choices: OptiChoices; why: string; short: string } | null;
+  launch: { plan: LaunchPlan; why: string; short: string } | null;    // set/remove/args; dll_override, dxvk_config null
+  proton: { to: string; to_display: string; why: string } | null;
+  proton_note: { kind: "restart" | "unhooked" | "none" | "user_pick"; line: string; detail: string } | null;
+  offers: AutoOffer[]; rollback: AutoChange | null; needs_xess: boolean;
+  game: AutoGame;
+};
+export type AutoFacts = { compat: { name: string; display: string; priority: number } | null;
+                          tools: { name: string; display: string }[]; hand: string[]; running: boolean };
+export type AutoStateRes = Res & { on: boolean; confirmed_at: number | null; games: Record<string, AutoGame> };
+export type AutoPlanRes = Res & { plan: AutoPlan | null };
+export type AutoGameRes = Res & { game: AutoGame | null };
+export type AutoUndoRes = Res & { game: AutoGame | null; job: Job | null };
+export type AutoSessionRes = Res & { rollback: AutoChange | null; game: AutoGame | null };
+export type AutoPendingRes = Res & { appids: string[] };
+```
+
+Functions (each returns `{ok, error, ...}`, never raises): `state(ctx)`, `enable(ctx, on, confirmed)`, `plan(ctx,
+settings, appid, facts)`, `pending(ctx, appids)`, `record(ctx, appid, change)`, `set_mode(ctx, appid, mode, why)`,
+`undone(ctx, appid, change_id, reason)`, `retry(ctx, appid, change_id)`, `session(ctx, appid, event)`,
+`opti_done(ctx, appid, result, accepted)` (called by the auto install job), `pick_proton(ctx, tools)`,
+`classify(ctx, appid)`. `plan` uses `games.game_info` (one folder scan), `optiscaler.entry` / `info` /
+`check(..., auto=True)` only when OptiScaler is planned or offered, `optiscaler.anticheat`. Validation in `record`:
+`kind` known; `launch` keys in MANAGED_KEYS with `SAFE` values (`^[A-Za-z0-9._-]{1,32}$`), args `SAFE_ARG`, at most 8
+of each; Proton names `^[A-Za-z0-9._+ -]{1,64}$` (display ≤ 64), `from` may be ""; `from_priority` an int 0..10000;
+`why`/`short`/`label` cut to their limits; `at` the backend's clock. An `opti` change is never recorded from the
+frontend (only `opti_done`).
+
+**main.py** (`autosetup = _load("autosetup")`; each through `self._call`, written as `_mod("autosetup").fn(self.ctx,
+...)` for the signature test):
+
+```python
+async def auto_state(self)                          # autosetup.state(ctx)                          -> AutoStateRes
+async def auto_enable(self, on, confirmed=False)    # on=True needs confirmed=True (the dialog)       -> AutoStateRes
+async def auto_pending(self, appids)                # list of ≤ 2000 digit strings                    -> AutoPendingRes
+async def auto_plan(self, appid, facts)             # autosetup.plan(ctx, self.settings, appid, facts) -> AutoPlanRes
+async def auto_record(self, appid, change)          # launch / proton changes                         -> AutoGameRes
+async def auto_mode(self, appid, mode, why=None)    # "auto" | "manual"                               -> AutoGameRes
+async def auto_undo(self, appid, change_id, reason="user")   # "user" | "rollback": launch/proton: marks it (the
+                                                    #   frontend wrote first); opti: starts job "opti-remove" (title
+                                                    #   "Remove OptiScaler for <name>"), marked when it ends ok -> AutoUndoRes
+async def auto_retry(self, appid, change_id)        # a rolled-back change may be applied again (kept) -> AutoGameRes
+async def auto_session(self, appid, event)          # "start" | "exit"                                -> AutoSessionRes
+async def auto_opti_install(self, appid, accepted=False)   # job "opti-install", title "OptiScaler for <name>",
+                                                    #   choices: entry auto.choices, else optiscaler.defaults(e);
+                                                    #   precheck: switch on (or accepted), game Automatic, not skipped,
+                                                    #   optiscaler.check(ctx, appid, installing=True, auto=True)  -> JobStart
+```
+
+**optiscaler.py**: `check(..., auto=False)`: with `auto=True` also refuses when the exe folder holds any name the
+install would write (`<proxy>.dll`, `OptiScaler.ini`, `OptiScaler/`; case-insensitive): "A file is in the way
+(<name>); OXP3 Deck replaces no file automatically."; `install(ctx, settings, job, appid, choices, *, auto=False,
+origin="user")`: with `auto=True`, a file that would need a backup aborts before the first file is copied; the record
+gains `origin` (`"user"` | `"auto"`); `anticheat(ctx, appid) -> {which, file} | None` (public, ONLINE first, then the
+markers on the install folder); `entry()` passes `auto` through. **steamlib.py**: `installed_apps(ctx) ->
+[{appid, name}]` (`appmanifest_*.acf` of every library, `StateFlags & 4`, read as root with `read_vdf`, ≤ 2000) for
+tests and a backend fallback of `pending`; `game_started_at(ctx, appid) -> float | None`. **games.py**: the two
+KNOWN_ISSUES fields; `GameInfo.suggest` unchanged (the plan filters it).
+
+### Frontend
+
+- **steam.ts** (each in try/catch, as the others): `getCompat(appid) -> Promise<{name, display, priority} | null>`
+  (the `RegisterForAppDetails` answer, 1.5 s); `compatTools(appid) -> Promise<{name, display}[]>`
+  (`GetAvailableCompatTools`, [] on error); `setCompatTool(appid, name) -> Promise<{ok, error, name}>`
+  (`SpecifyCompatTool`, then `RequestAppDetails` + `getCompat` every 250 ms for up to 5 s until `name === want &&
+  priority >= 250`, or for `""` until `priority < 250`); `installedSteamApps()`; `watchLifetime(cb: (appid, running,
+  instance) => void)`. `SpecifyCompatTool` appears nowhere else in src/.
+- **src/autosetup.ts** (pure, node-tested): `handSet`, `summaryLine(game)` (≤ 80: the live changes' labels joined
+  with ", ", then " · " + the first `short`, cut at a word), `changeRow(c)` ({label, line}), `toastText`,
+  `confirmEnable()`, `undoConfirm(c, name)`, `rollbackText(c, name)`, `protonLine(note)`, `modeLine(plan)`,
+  `queue` helpers. Every up-front text ≤ 80 characters; variable names only in a launch change's label (as the 0.4
+  "Added:" row).
+- **The switch** (`AutoSetupSwitch`, top of the Games tab, the XeSS tab and the quick panel's "This game" section
+  head): ToggleField "Set up games automatically ⓘ", one line "OXP3 Deck sets up games after you quit them. Undo
+  any time." / off: "Off: you set up each game yourself." Turning it on: `confirm(confirmEnable())`, then
+  `auto_enable(true, true)`; off: no dialog. Dialog: title "Set up games automatically?", ok "Turn on", effect
+  `auto.global`, text:
+  1. "OXP3 Deck will set up your games by itself, only while they are not running: right after you quit one, or when
+     it first sees it."
+  2. "Games it knows get their best known setup: OptiScaler where its table says it helps (The Witcher 3), DirectX 12,
+     the launch options XeSS needs, and launch options known to crash the game taken out."
+  3. "Other games only get what can only help: XeSS on the fast XMX cores. OptiScaler is offered, not installed."
+  4. "A game that uses XeSS and whose Proton lacks the XeSS add-on is moved to the newest GE-Proton (or Proton
+     Experimental). A Proton you picked for a game is never changed."
+  5. "Never for games with anti-cheat, never over an existing file, never for a game you set up yourself. Each game
+     shows what was done and why, with Undo. If a game closes within a minute after a change, the change is undone
+     before its next start."
+  `lines` (linesTitle "May change:"): "Steam launch options (only OXP3 Deck's keys)", "A game's Proton
+  (SpecifyCompatTool)", "OptiScaler files in a game folder (as <user>)".
+- **Per game** (`AutoSetupRows` in GameControls, above the XeSS options; replaces `AutoLaunchRows` except its legacy
+  "Added: …" row and Undo for an old `ui_autolaunch_log` record):
+
+| Row | Label | One line | Tag | → Details |
+|---|---|---|---|---|
+| Mode (switch on) | "Set up this game" ⓘ (dropdown "Automatic" / "Manual") | auto: "OXP3 Deck sets it up after you quit it." / manual: `mode_why` or "You set it up; OXP3 Deck changes nothing." / skipped: greyed `skip_why` | `game.auto_mode` | the class, what the plan would do, the offers, "any change you make here switches it to Manual" |
+| Summary | "Set up automatically" ✓ ⓘ | `summaryLine` ("OptiScaler, DirectX 12 · for frame generation") | — | each live change: label, why, date (`when`), "Applies from the next start." |
+| Change (one per live change) | launch: "Launch options: <label>" / opti: "OptiScaler installed" / proton: "Proton changed to <to_display> for XeSS" | why's first sentence; ButtonItem "Undo" ("Puts back what was there before."; greyed "Quit <game> first.") | `game.auto_undo` | before → after; Undo confirm (`undoConfirm`) |
+| Waiting | "Will be set up when you quit <game>" | the planned labels | — | — |
+| Rollback notice (red) | "Undone after a quick exit" | `rollbackText` ("<Game> closed within a minute after <label>.") ; ButtonItem "Try again" ("Applies it again; it won't be undone for a quick exit again.") | `game.auto_retry` | the run's length, the rule (60 s, 3 quick exits) |
+| Proton note | "No Proton with the XeSS add-on" / "Restart Steam to use <name>" / "Listed Proton lacks the XeSS add-on" | `proton_note.line` | — | `proton_note.detail` |
+| Offer (each) | "Also possible: <label>" ButtonItem "Use it" | `offer.line` ("OptiScaler may help this game; untested here.", "FSR → XeSS: the game's FSR runs on XeSS.", "Use <GE-Proton> for XeSS.") | `game.auto_offer` | `offer.why`; confirm; applied as an `accepted` change (`tested: true`), the game stays Automatic |
+| Error | Problem "Automatic setup" | `last_error` / the pass's error | — | full text |
+
+- **Undo** (per change; confirm; never while the game runs): launch → `undoAuto` + `setLaunchOptions` then
+  `auto_undo`; proton → `setCompatTool(appid, from_priority >= 250 ? from : "")` then `auto_undo`; opti →
+  `auto_undo` (the remove job, JobView under the row) then on `done` `syncOptiLaunch(appid, null)`. A user Undo makes
+  the game Manual ("You tapped Undo.").
+- **markManual(appid, why)** (AutoSetup.tsx, a no-op while the switch is off or the game is already Manual): called by
+  GameControls `write()` (after a write that worked), OptiControls `install` / `update` / `remove` / a choice change,
+  and the offer buttons never (they are accepted changes).
+- **Migration**: `AutoGlobalToggle` and the per-game "Add launch options automatically" dropdown are removed; the old
+  `autoApply` no longer runs. When `ui_autolaunch.on` was true, the switch row shows "Replaces 'Add needed launch
+  options automatically': turn on to keep it." until it is turned on. `ui_autolaunch.games[appid] === false` →
+  Manual at first sight. Old `ui_autolaunch_log` records keep their row and Undo, and their `done` keys are not added
+  again.
+
+### Effect tags (effects.ts additions)
+
+| Setting id | Control | Tag |
+|---|---|---|
+| `auto.global` | Set up games automatically (kept id, new control) | Restart the game |
+| `game.auto_mode` | Set up this game (Automatic / Manual) | Restart the game |
+| `game.auto_undo` | Undo of an automatic change (kept id) | Restart the game |
+| `game.auto_retry` | Try again after a rollback | Restart the game |
+| `game.auto_offer` | Use it (an offer) | Restart the game |
+
+`game.auto` goes (its dropdown is removed); tests/js/effects.test.mjs still finds every id src/ uses.
+
+### Tests
+
+- **`tests/test_autosetup.py`** (fake root, fake library and Protons: `compatibilitytools.d/GE-Proton11-11`,
+  `GE-Proton10-25`, `GE-Proton9-27` with and without `user_settings.py` naming proton-hook.py, a system
+  `proton-cachyos` under `/usr/share/steam/compatibilitytools.d` without the hook, `Proton - Experimental` hooked;
+  `xess.detect` patched): classes (Witcher and MH Wilds known, a plain game unknown, EasyAntiCheat folder / an ONLINE
+  appid skipped with nothing planned, not even Proton); first sight Manual from `ui_autolaunch` false, from an
+  OptiScaler record without origin, from `facts.hand`; `hand` ignored after `auto_mode("auto")`; Witcher on
+  GE-Proton11-11: plan = OptiScaler (xess, 2, dlssg), no Proton move, no XESS=latest (OptiScaler drops it); MH Wilds on
+  GE-Proton11-11: launch remove XESS_FG / FSR / FSR_FG, no XESS add, no OptiScaler; an unknown game with XeSS 1.3 on
+  proton-cachyos: Proton → GE-Proton11-11 (newest hooked, numeric order: 11-11 over 10-25 over 9-27; an unhooked
+  newer one skipped) and XESS=latest computed against it; FSR only as an offer; Experimental when no hooked GE; a
+  hooked GE on disk but not in `tools` → note `restart`; nothing → note `none` with its line; `priority` 250 with a
+  name we did not set → no move, note `user_pick`, offer; our own 250 (a live change with that `to`) is not the
+  user's; a later other name at 250 → `superseded`, Manual; xess not installed → nothing XeSS-related, `needs_xess`.
+  Sessions: start/exit 30 s after a change → rollback of that change, `rollback_due` kept until `undone`; 90 s → all
+  older changes tested; three quick exits with only tested changes → newest rolled back; a change applied after the
+  start is not rolled back; reaper start time used; a rolled-back change is not planned again until `retry`. Record
+  validation (bad keys, values, names, an `opti` change from the frontend refused), limits (400 games, 12 changes),
+  a planted auto.json normalised.
+- **test_optiscaler**: `check(auto=True)` refuses with a `dxgi.dll` / `OptiScaler.ini` in the way, nothing written;
+  `install(auto=True)` never backs up; `origin` recorded; `anticheat` for ONLINE and for markers.
+- **test_steamlib**: `installed_apps` (StateFlags, two libraries, a broken manifest), `game_started_at` (fake /proc
+  with two reapers, btime).
+- **test_games**: the new KNOWN_ISSUES fields (every entry has them as tuples of managed keys).
+- **test_main**: `CALLS` gains `"auto_state": ()`, `"auto_enable": (True, True)`, `"auto_pending": (["292030"],)`,
+  `"auto_plan": ("292030", {...facts})`, `"auto_record": ("1", {...})`, `"auto_mode": ("1", "manual")`,
+  `"auto_undo": ("1", "launch-1")`, `"auto_retry": ("1", "launch-1")`, `"auto_session": ("1", "start")`,
+  `"auto_opti_install": ("292030",)`; `auto_enable(True)` without `confirmed` refused; bad appids / facts refused;
+  the signature test covers `_mod("autosetup")`. **test_package**: `autosetup.py` in the zip.
+- **node** `tests/js/autosetup.test.mjs`: `applyAuto` / `undoAuto` / `touched` byte for byte (removal keeps the rest,
+  a user value not overwritten, NEVER_AUTO and skip keys never added, round trip restores the text, typo untouched);
+  `handSet` (old log and opti log subtracted, unmanaged words ignored); `summaryLine` and every text ≤ 80 chars;
+  `confirmEnable` has `effect` and names anti-cheat, Undo and the one-minute rule; the pass with fakes: rollback before
+  any write, `isRunning` before each write (a game that starts mid-pass gets nothing), Proton read-back failure
+  records nothing, OptiScaler job then its launch plan, one toast. `pages.test.mjs`: `SpecifyCompatTool` only in
+  steam.ts; every `setLaunchOptions(` / `setCompatTool(` in AutoSetup.tsx preceded by `isRunning(` in the same
+  function; `markManual(` in GameControls' `write` and in OptiControls' install/update/remove/choice handlers; the
+  switch's `confirm(` has `effect`; `AutoGlobalToggle` gone.
+
+On the device (owner): switch on with the dialog; The Witcher 3 (GE-Proton11-11) gets OptiScaler after quitting it,
+its summary and Undo; MH Wilds keeps its Proton and loses XESS_FG if set (after picking Automatic); a game with XeSS on
+proton-cachyos moves to GE-Proton11-11 ("Proton changed to GE-Proton11-11 for XeSS"), Undo puts it back; quit a game
+within a minute of a change and see it undone.
+
+### Builders (Automatic setup)
+
+| Builder | Owns | Must not edit |
+|---|---|---|
+| backend | new `py_modules/oxp3deck/autosetup.py`; `optiscaler.py` (`auto`, `origin`, `anticheat`), `optigames.py` (`auto` field), `games.py` (KNOWN_ISSUES fields), `steamlib.py` (`installed_apps`, `game_started_at`); `main.py`; new `tests/test_autosetup.py`, `tests/test_optiscaler.py`, `tests/test_steamlib.py`, `tests/test_games.py`, `tests/test_main.py`, `tests/test_package.py` | src/, tests/js |
+| frontend | `src/` (types.ts, api.ts, backend.ts, steam.ts, autolaunch.ts, new autosetup.ts, effects.ts, index.tsx, new components/AutoSetup.tsx, AutoLaunch.tsx, GameControls.tsx, OptiControls.tsx, pages Games / XeSS / Quick); `tests/js/*`; README.md ("Set up games automatically") | py_modules, main.py, tests/*.py |
+
+The interface between them is exactly the types and methods above; the frontend may stub `auto_*` answers in node
+tests. DESIGN.md belongs to the integrator; a builder writes "(Built: …)" notes into this section only.
+
+(Built, frontend: `src/autosetup.ts` holds the texts, `handSet(text, autoRec, optiEntry, appid, live)` (appid for the
+DX12 argument, `live` = live automatic launch changes, also subtracted), the queue and the pass itself as
+`runPass(deps, …)` / `undoChange` / `acceptOffer` with the Steam and backend calls injected, so node tests it with
+fakes; `components/AutoSetup.tsx` gives it writers that check `isRunning(` right before `setLaunchOptions(` /
+`setCompatTool(`. `src/autostate.ts` (new) holds the cached `auto_state`, `noteGame` and `markManual`, so OptiControls
+imports it without a circular import through AutoSetup.tsx. `applyAuto` takes an optional 5th `rec` (the 0.4 record:
+its `done` / `argsDone` are not added again); `undoAuto` puts a dropped key back as one token after the leading
+assignments (byte for byte where it was there, quoted when needed). The pass computes `autoArgs` on the text after
+the removals (so `-dx12` is not added because of an `FSR=xess` it takes out), and puts a Proton or launch change back
+when `auto_record` refuses it (no change without Undo). The `proton` offer's target is the listed tool whose name or
+display equals the offer's `label`. A rolled-back change keeps its row with "Try again" until a later change of the
+same kind exists (there is no dismiss call). The XeSS tab's section around the switch is named "Games".)
+
+(Built, backend: `autosetup.py` as above, plus: `AutoPlan.opti_why` (why OptiScaler is not planned for a game whose
+table entry has `auto`: the refusal, "Install XeSS fast mode first (XeSS tab).", or undone after a quick exit);
+`auto_undo` answers `kind` and, for an OptiScaler change whose record is already gone, marks it without a job;
+`auto_mode(appid, "manual", why)` keeps the first `mode_why` while the game is already Manual; `auto_mode` before any
+plan creates the game with `plan_version` 0 (the scan still plans it); a quick exit while the switch is off arms no
+rollback; `autosetup.pending(ctx, None)` (not reachable from main.py) reads the manifests
+(`steamlib.installed_apps`); optiscaler `game_record(ctx, appid)` is public; `optiscaler.update` keeps the record's
+`origin`.)

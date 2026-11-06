@@ -40,6 +40,13 @@ CALLS = {
     "opti_info": ("292030",), "opti_install": ("292030", {"upscaler": "xess", "fg": 2, "fg_input": "dlssg"}),
     "opti_set": ("292030", {"upscaler": "fsr31", "fg": 3, "fg_input": "dlssg"}), "opti_remove": ("292030",),
     "opti_update": ("292030",), "opti_options": ({"overlay": True},),
+    "auto_state": (), "auto_enable": (True, True), "auto_pending": (["292030"],),
+    "auto_plan": ("292030", {"compat": {"name": "GE-Proton11-11", "display": "GE-Proton11-11", "priority": 250},
+                             "tools": [{"name": "GE-Proton11-11", "display": "GE-Proton11-11"}], "hand": [],
+                             "running": False}),
+    "auto_record": ("1", {"kind": "launch", "launch": {"set": {"XESS": "latest"}, "dropped": {}, "args": []}}),
+    "auto_mode": ("1", "manual"), "auto_undo": ("1", "launch-1"), "auto_retry": ("1", "launch-1"),
+    "auto_session": ("1", "start"), "auto_opti_install": ("292030",),
 }
 
 
@@ -97,7 +104,7 @@ class Base(unittest.TestCase):
         self.m = load_main(self.tmp.name)
         # nothing real runs (runuser, oxp3-tool, sysfs writes) unless a test says so (and Plugin()'s _after_restart
         # leaves the real /run alone)
-        for name in ("oxp3tool", "xess", "games", "power", "readouts", "extras", "optiscaler"):
+        for name in ("oxp3tool", "xess", "games", "power", "readouts", "extras", "optiscaler", "autosetup"):
             setattr(self.m, name, Raising())
         self.p = self.m.Plugin()
         self.assertIsNone(self.p._broken)
@@ -282,6 +289,51 @@ class JobsTest(Base):
         self.assertEqual(seen["install"], ("292030", {"upscaler": "xess", "fg": 2}))
         self.assertTrue(call(self.p, "opti_set", "292030", {"upscaler": "xess", "fg": 0})["ok"])
         self.assertTrue(call(self.p, "opti_options", {"overlay": True})["ok"])
+
+    def test_automatic_setup_calls(self):
+        """The real autosetup module on the test's settings folder: turning on needs the dialog, bad app ids and
+        facts are refused, an OptiScaler Undo starts the remove job, auto_opti_install is a job with a precheck."""
+        from oxp3deck import autosetup as real
+        self.m.autosetup = real
+        os.makedirs(self.p.ctx.settings_dir, exist_ok=True)
+        off = call(self.p, "auto_enable", True)
+        self.assertFalse(off["ok"])
+        self.assertIn("confirmation dialog", off["error"])
+        self.assertFalse(call(self.p, "auto_state")["on"])
+        self.assertTrue(call(self.p, "auto_enable", True, True)["on"])
+        self.assertFalse(call(self.p, "auto_plan", "12x", CALLS["auto_plan"][1])["ok"])
+        self.assertFalse(call(self.p, "auto_plan", "292030", {"tools": "GE"})["ok"])
+        self.assertFalse(call(self.p, "auto_pending", "292030")["ok"])
+        self.assertFalse(call(self.p, "auto_pending", ["29x"])["ok"])
+        self.assertEqual(call(self.p, "auto_pending", ["292030"])["appids"], ["292030"])
+        self.assertFalse(call(self.p, "auto_mode", "1", "off")["ok"])
+        self.assertFalse(call(self.p, "auto_session", "1", "pause")["ok"])
+        self.assertFalse(call(self.p, "auto_record", "1", {"kind": "opti"})["ok"])
+        # an OptiScaler change: Undo goes through the remove job
+        seen = {}
+        self.fake("autosetup", undone=lambda ctx, appid, cid, reason: {"ok": True, "game": {"appid": appid},
+                                                                       "kind": "opti"},
+                  opti_undo_precheck=lambda ctx, appid, cid: None,
+                  opti_undo=lambda ctx, settings, job, appid, cid, reason: seen.setdefault("undo", (appid, cid,
+                                                                                                     reason)) and
+                  {"ok": True},
+                  opti_precheck=lambda ctx, settings, appid, accepted: None if accepted else "Automatic setup is off.",
+                  opti_install=lambda ctx, settings, job, appid, accepted: seen.setdefault("install", (appid,
+                                                                                                       accepted))
+                  and {"ok": True})
+        self.fake("optiscaler", game_name=lambda ctx, appid: "The Witcher 3")
+        res = call(self.p, "auto_undo", "292030", "opti-5", "rollback")
+        self.assertTrue(res["ok"], res)
+        self.assertEqual((res["job"]["kind"], res["job"]["title"]), ("opti-remove", "Remove OptiScaler for The "
+                                                                                    "Witcher 3"))
+        self.assertTrue(wait_idle(self.p))
+        self.assertEqual(seen["undo"], ("292030", "opti-5", "rollback"))
+        refused = call(self.p, "auto_opti_install", "292030")
+        self.assertEqual((refused["ok"], refused["error"], refused["job"]), (False, "Automatic setup is off.", None))
+        res = call(self.p, "auto_opti_install", "292030", True)
+        self.assertEqual((res["job"]["kind"], res["job"]["title"]), ("opti-install", "OptiScaler for The Witcher 3"))
+        self.assertTrue(wait_idle(self.p))
+        self.assertEqual(seen["install"], ("292030", True))
 
     def test_xess_calls_wait_for_an_xess_job(self):
         go = threading.Event()

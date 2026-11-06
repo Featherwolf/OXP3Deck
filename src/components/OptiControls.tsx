@@ -21,6 +21,7 @@ import { confirm, DetailsSpec, paragraphs } from "./confirm";
 import { Pending } from "./Effect";
 import { explain, explainWhen, label, Note, Problem, Status, WithDetails } from "./Hint";
 import { JobView } from "./JobView";
+import { markManual } from "../autostate";
 
 const loadLog = async (): Promise<OptiLog> => readLog(await get_setting(LOG_KEY));
 export const useOptiLog = () => useResource<OptiLog>("ui:opti-log", loadLog);
@@ -76,7 +77,7 @@ export const syncOptiLaunch = async (appid: string, want: LaunchPlan | null): Pr
   }
 };
 
-/** For the exit watch (AutoLaunch.tsx watchGameExits): a change that waited for the game to quit. */
+/** For the exit watch (AutoSetup.tsx exitFlow): a change that waited for the game to quit. */
 export const optiApplyPending = async (appid: string, name: string): Promise<void> => {
   const rec = (await loadLog())[appid];
   if (!rec?.pending) return;
@@ -142,6 +143,8 @@ export const OptiRows: FC<{ app: RunningApp; quick?: boolean; running: boolean; 
     const r = await call();
     const err = started(r);
     if (err || !r.job) return err;
+    // install / update / remove by hand: the automatic setup leaves this game alone from now on (Manual)
+    markManual(appid, "You changed OptiScaler here.");
     afterJob(r.job.id, (j) => {
       const out = asResult(j);
       res.reload();
@@ -179,6 +182,7 @@ export const OptiRows: FC<{ app: RunningApp; quick?: boolean; running: boolean; 
     const r = await opti_set(appid, next);
     if (r.opti) put<OptiInfoRes>(`opti-info:${appid}`, r);
     if (!r.ok) return r.error || "refused";
+    markManual(appid, "You changed OptiScaler here.");
     if (r.opti?.launch) await syncLaunch(r.opti.launch, id, what);
     return null;
   });

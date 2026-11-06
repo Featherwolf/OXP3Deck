@@ -294,9 +294,12 @@ test("GameControls: the OptiScaler section for a table game, the XeSS options gr
   }
   assert.match(s, /opti: optiPlan,/, "Copy launch options gets the plan");
   assert.match(s, /optiOn \? `Without OptiScaler: \$\{i\.detail\}` : i\.detail/);
-  // the exit watch applies a waiting OptiScaler change before the automatic launch options
-  const a = src("components/AutoLaunch.tsx");
-  assert.match(a, /optiApplyPending\(left\.appid, left\.name\)[\s\S]{0,80}\.then\(\(\) => autoApply\(left\.appid, left\.name\)\)/);
+  // the exit watch applies a waiting OptiScaler change before the automatic setup's pass
+  const a = src("components/AutoSetup.tsx");
+  const flow = a.slice(a.indexOf("export const exitFlow"), a.indexOf("export const AUTO_AFTER_EXIT_MS"));
+  const opti = flow.indexOf("await optiApplyPending(appid, name)"), sess = flow.indexOf("await sessions.get(appid)"), pass = flow.indexOf('await autoPass(appid, name, "exit")');
+  assert.ok(opti > 0 && sess > opti && pass > sess, "OptiScaler's waiting options, then the session exit, then the pass");
+  assert.match(a, /if \(!isRunning\(left\.appid\)\) exitFlow\(left\.appid, left\.name\)/);
 });
 
 test("api.ts and backend.ts have every OptiScaler call", () => {

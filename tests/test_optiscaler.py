@@ -759,6 +759,98 @@ class InstallTest(Base):
         self.assertEqual(sorted(os.listdir(cache)), [BUILD, "v9-old"])
 
 
+class AutoTest(Base):
+    """The automatic setup's install (DESIGN.md "Automatic setup"): auto=True replaces no file, origin is
+    recorded, anticheat() names online games and anti-cheat files."""
+
+    def test_check_refuses_a_file_in_the_way_and_writes_nothing(self):
+        for name, shown in (("DXGI.dll", "dxgi.dll"), ("OptiScaler.ini", "OptiScaler.ini"),
+                            ("optiscaler/x.dll", "OptiScaler/")):
+            with self.subTest(name=name):
+                p = write(os.path.join(self.folder, name), b"x")
+                before = snapshot(self.tmp.name)
+                why = optiscaler.IN_THE_WAY.format(shown)
+                self.assertEqual(optiscaler.check(self.ctx, WITCHER, installing=True, auto=True)["why"], why)
+                res = optiscaler.install(self.ctx, None, self.job, WITCHER, self.choices(), auto=True,
+                                         origin="auto")
+                self.assertEqual((res["ok"], res["error"]), (False, why))
+                self.assertEqual(snapshot(self.tmp.name), before)
+                self.assertEqual((self.shell.calls, self.downloads), ([], []))
+                os.unlink(p)
+                if "/" in name:
+                    os.rmdir(os.path.dirname(p))
+        self.assertTrue(optiscaler.check(self.ctx, WITCHER, installing=True, auto=True)["ok"])
+
+    def test_install_never_backs_up(self):
+        """A file that appears after the check (here: the check is skipped) stops the install before any copy."""
+        real_check = optiscaler.check
+        with mock.patch.object(optiscaler, "check", lambda ctx, appid, installing, auto=False:
+                               {"ok": True, "error": None, "why": None}):
+            write(os.path.join(self.folder, "OptiScaler.ini"), b"someone's ini")
+            own_tree(self.game, self.w.uid)
+            before = snapshot(self.game)
+            with mock.patch.object(userexec, "copy_new", side_effect=AssertionError("nothing is copied")):
+                res = optiscaler.install(self.ctx, None, self.job, WITCHER, self.choices(), auto=True,
+                                         origin="auto")
+        self.assertEqual((res["ok"], res["error"]), (False, optiscaler.IN_THE_WAY.format("OptiScaler.ini")))
+        self.assertEqual(snapshot(self.game), before)
+        self.assertIsNone(optiscaler.game_record(self.ctx, WITCHER))
+        self.assertIs(optiscaler.check, real_check)
+
+    def test_a_game_started_during_the_download_gets_no_files(self):
+        """The check runs before the download, which can take minutes: right before the first copy it asks again."""
+        real_fetch = optiscaler.fetch
+        started = []
+
+        def fetch(*a, **kw):
+            started.append(True)
+            return real_fetch(*a, **kw)
+        with mock.patch.object(optiscaler, "fetch", fetch), \
+                mock.patch.object(steamlib, "running_game", lambda ctx: WITCHER if started else None), \
+                mock.patch.object(userexec, "copy_new", side_effect=AssertionError("nothing is copied")):
+            res = optiscaler.install(self.ctx, None, self.job, WITCHER, self.choices(), auto=True, origin="auto")
+        self.assertEqual(started, [True])
+        self.assertEqual((res["ok"], res["error"]), (False, "Quit The Witcher 3 first."))
+        self.assertIsNone(optiscaler.game_record(self.ctx, WITCHER))
+
+    def test_check_can_leave_out_the_running_game(self):
+        write(os.path.join(self.folder, "dxgi.dll"), b"x")
+        with mock.patch.object(steamlib, "running_game", return_value=WITCHER):
+            self.assertRegex(optiscaler.check(self.ctx, WITCHER, installing=True, auto=True)["why"], "^Quit ")
+            self.assertEqual(optiscaler.check(self.ctx, WITCHER, installing=True, auto=True,
+                                              ignore_running=True)["why"], optiscaler.IN_THE_WAY.format("dxgi.dll"))
+
+    def test_origin_is_recorded_and_kept_by_update(self):
+        res = optiscaler.install(self.ctx, None, self.job, WITCHER, self.choices(), auto=True, origin="auto")
+        self.assertTrue(res["ok"], res)
+        self.assertEqual(res["backed_up"], [])
+        self.assertEqual(optiscaler.game_record(self.ctx, WITCHER)["origin"], "auto")
+        self.assertTrue(optiscaler.update(self.ctx, None, self.job, WITCHER)["ok"])
+        self.assertEqual(optiscaler.game_record(self.ctx, WITCHER)["origin"], "auto")
+        self.assertTrue(self.remove()["ok"])
+        self.assertTrue(self.install()["ok"])
+        self.assertEqual(optiscaler.game_record(self.ctx, WITCHER)["origin"], "user")
+        self.assertIsNone(optiscaler.game_record(self.ctx, "12x"))
+
+    def test_the_witchers_entry_has_its_automatic_setup(self):
+        auto = optiscaler.entry(WITCHER)["auto"]
+        self.assertEqual(auto["choices"], {"upscaler": "xess", "fg": 2, "fg_input": "dlssg"})
+        self.assertEqual(optiscaler.check_choices(optiscaler.entry(WITCHER), auto["choices"])[1], None)
+        self.assertLessEqual(len(auto["why"]), 200)
+        self.assertLessEqual(len(auto["short"]), 40)
+        for appid in optigames.KNOWN:
+            self.assertIsNone(optiscaler.entry(appid)["auto"], appid)     # none tested on this device
+
+    def test_anticheat(self):
+        self.assertIsNone(optiscaler.anticheat(self.ctx, WITCHER))
+        self.assertEqual(optiscaler.anticheat(self.ctx, "730"), {"which": "online", "file": None})
+        p = write(os.path.join(self.game, "EasyAntiCheat/x"), b"x")
+        self.assertEqual(optiscaler.anticheat(self.ctx, WITCHER),
+                         {"which": "EasyAntiCheat", "file": os.path.dirname(os.path.realpath(p))})
+        self.assertIsNone(optiscaler.anticheat(self.ctx, "1234567"))       # not installed
+        self.assertIsNone(optiscaler.anticheat(self.ctx, "12x"))
+
+
 class BackupTest(Base):
     """A flat layout (every package file next to the exe) puts files where the game has its own."""
 

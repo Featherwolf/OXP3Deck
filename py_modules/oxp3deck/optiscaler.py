@@ -77,6 +77,11 @@ GAMES = {
         "sources": ("github.com/optiscaler/OptiScaler/wiki/The-Witcher-3-Wild-Hunt",
                     "OptiScaler master OptiScaler/GameConfigs.cpp (witcher3.exe)",
                     "ClawDeck assets/games.json witcher3.exe entry, read only as a pointer"),
+        # Automatic setup (DESIGN.md "Automatic setup"): games.KNOWN_ISSUES 292030 fg_no_gain (XeSS frame generation
+        # adds no fps through the launch options) and ETA Prime's route (DLSS frame generation as the input, XeFG out)
+        "auto": {"choices": {"upscaler": "xess", "fg": 2, "fg_input": "dlssg"},
+                 "why": "XeSS frame generation adds no fps here; OptiScaler's XeFG is the known way.",
+                 "short": "for frame generation"},
     },
 }
 
@@ -339,6 +344,15 @@ def _put_game(ctx, appid: str, g: dict | None) -> None:
         else:
             rec["games"][appid] = g
         _save(ctx, rec)
+
+
+def game_record(ctx, appid) -> dict | None:
+    """A copy of the record's entry for the game ({build, choices, origin, ...}), or None: the automatic setup reads
+    origin ("user" | "auto"; records from 0.5 have none: "user") and choices."""
+    appid = str(appid or "")
+    if not _APPID.match(appid):
+        return None
+    return _game_rec(ctx, appid)
 
 
 def installed_for(ctx, appid) -> bool:
@@ -684,6 +698,20 @@ def _anticheat(folder: str) -> tuple[str, str] | None:
     return None
 
 
+def anticheat(ctx, appid) -> dict | None:
+    """{which, file} when the game is an online game (optigames.ONLINE: which "online", file None) or has anti-cheat
+    files SCAN_DEPTH levels under its install folder (also for table games); else None. The automatic setup does
+    nothing for such a game."""
+    appid = str(appid or "")
+    if appid in optigames.ONLINE:
+        return {"which": "online", "file": None}
+    install = steamlib.app_install_dir(ctx, appid) if _APPID.match(appid) else None
+    if not install:
+        return None
+    found = _anticheat(os.path.realpath(install))
+    return {"which": found[1], "file": found[0]} if found else None
+
+
 def anticheat_why(name: str, install: str, found: tuple[str, str]) -> str:
     rel = os.path.relpath(found[0], install)
     tail = "/" if os.path.isdir(found[0]) else ""
@@ -745,9 +773,25 @@ def _taken_why(e: dict) -> str:
     return f"The game folder already has {names} (other mods); OptiScaler needs one of these names free."
 
 
-def check(ctx, appid, *, installing: bool) -> dict:
+IN_THE_WAY = "A file is in the way ({}); OXP3 Deck replaces no file automatically."
+
+
+def _auto_in_the_way(e: dict, names: set[str]) -> str | None:
+    """The first name an install would write that is already in the exe folder (lower-case names): the proxy DLL
+    (the one picked, else the table's first), OptiScaler.ini, the OptiScaler folder."""
+    proxy = e.get("proxy") or ((e.get("proxies") or (None,))[0])
+    for want, shown in (((f"{proxy}.dll", f"{proxy}.dll") if proxy else (None, None)),
+                        ("optiscaler.ini", "OptiScaler.ini"), ("optiscaler", "OptiScaler/")):
+        if want and want in names:
+            return shown
+    return None
+
+
+def check(ctx, appid, *, installing: bool, auto: bool = False, ignore_running: bool = False) -> dict:
     """The refusals of DESIGN.md "OptiScaler → Refusals" and "OptiScaler for any game", in order: {ok, error, why}.
-    installing=False: for Remove, Update and a choice change (the game must not run and the record must exist)."""
+    installing=False: for Remove, Update and a choice change (the game must not run and the record must exist).
+    auto=True (the automatic setup): also refused when a file the install would write is in the exe folder.
+    ignore_running=True: the other refusals while the game runs (the automatic setup's plan; the job checks again)."""
     def no(why: str) -> dict:
         return {"ok": False, "error": why, "why": why}
 
@@ -755,7 +799,7 @@ def check(ctx, appid, *, installing: bool) -> dict:
     if not _APPID.match(appid):
         return no(NO_SETUP)
     name = _name(ctx, appid)
-    if steamlib.running_game(ctx) == appid:
+    if not ignore_running and steamlib.running_game(ctx) == appid:
         return no(f"Quit {name} first.")
     g = _game_rec(ctx, appid)
     if not installing:
@@ -791,6 +835,10 @@ def check(ctx, appid, *, installing: bool) -> dict:
     if found:
         return no(anticheat_why(name, root, found))
     names = _names(e["dir"])
+    if auto:
+        hit = _auto_in_the_way(e, names)
+        if hit:
+            return no(IN_THE_WAY.format(hit))
     if _foreign(names) or MARK_DIR in names:
         return no(FOREIGN)
     if not e.get("proxy"):
@@ -1334,7 +1382,32 @@ def _write_ini(ctx, g: dict, folder: str, text: str, appid: str) -> None:
     _put_game(ctx, appid, g)
 
 
-def _put_in(ctx, job, appid: str, e: dict, choices: dict, folder: str, pkg_dir: str, lst: dict) -> dict:
+def _first_in_the_way(folder: str, dests: list[str]) -> str | None:
+    """The first of `dests` (paths in the exe folder) that is already there in any case: a file a backup would be
+    needed for."""
+    for rel in dests:
+        cur = folder
+        parts = rel.split("/")
+        for i, part in enumerate(parts):
+            try:
+                dfd = _open_in(cur)
+            except OSError:
+                break
+            try:
+                have = _ci_name(dfd, part)
+                st = _lstat(dfd, have) if have else None
+            finally:
+                os.close(dfd)
+            if st is None:
+                break
+            if i == len(parts) - 1 or not stat.S_ISDIR(st.st_mode):
+                return "/".join(parts[:i] + [have])
+            cur = os.path.join(cur, have)
+    return None
+
+
+def _put_in(ctx, job, appid: str, e: dict, choices: dict, folder: str, pkg_dir: str, lst: dict,
+            origin: str = "user") -> dict:
     build_id = e["build"]
     layout = BUILDS[build_id]["layout"]
     root = _install_root(ctx, folder) or folder
@@ -1349,7 +1422,8 @@ def _put_in(ctx, job, appid: str, e: dict, choices: dict, folder: str, pkg_dir: 
     ini = ini_text(ini_src, e, choices, glob, layout)
     g = {"build": build_id, "folder": folder, "proxy": e["proxy"], "layout": layout, "choices": choices,
          "files": [], "dirs": [], "backups": [], "launch": launch_plan(e, choices), "installed_at": int(time.time()),
-         "partial": True, "kind": e.get("kind", "tested"), "api": e.get("api", "dx12"), "exe": e.get("exe")}
+         "partial": True, "kind": e.get("kind", "tested"), "api": e.get("api", "dx12"), "exe": e.get("exe"),
+         "origin": origin if origin in ("user", "auto") else "user"}
     _put_game(ctx, appid, g)
     rel_folder = os.path.relpath(folder, root)
     _say(job, f"Copying {len(plan) + 1} files into {rel_folder} as {ctx.user}")
@@ -1381,13 +1455,15 @@ def _put_in(ctx, job, appid: str, e: dict, choices: dict, folder: str, pkg_dir: 
                    backed_up=[b["rel"] for b in g["backups"]], launch=g["launch"], next=_next_text(choices, e))
 
 
-def install(ctx, settings, job, appid, choices) -> dict:
-    """check, fetch, then put the files in (DESIGN.md "Install into the game"). OptiJobResult."""
+def install(ctx, settings, job, appid, choices, *, auto: bool = False, origin: str = "user") -> dict:
+    """check, fetch, then put the files in (DESIGN.md "Install into the game"). OptiJobResult. auto=True (the
+    automatic setup): refused when any file would need a backup, before the first file is copied. origin: who
+    asked ("user" | "auto"), kept in the record."""
     appid = str(appid or "")
     why = choices_why(ctx, appid, choices)
     if why:
         return _result(appid, ok=False, error=why)
-    c = check(ctx, appid, installing=True)
+    c = check(ctx, appid, installing=True, auto=auto)
     if not c["ok"]:
         return _result(appid, ok=False, error=c["error"])
     e, why = resolve(ctx, appid, fresh=True)
@@ -1404,8 +1480,19 @@ def install(ctx, settings, job, appid, choices) -> dict:
     lst = _package(ctx, e["build"])
     if lst is None:
         return _result(appid, ok=False, error="the downloaded package does not match its list: try again")
+    if auto:
+        layout = BUILDS[e["build"]]["layout"]
+        dests = [d for d in (_dest_of(f["rel"], e["proxy"], layout) for f in lst["files"]) if d is not None]
+        hit = _first_in_the_way(folder, [*dests, "OptiScaler.ini"])
+        if hit:
+            _say(job, IN_THE_WAY.format(hit))
+            return _result(appid, ok=False, error=IN_THE_WAY.format(hit), folder=folder)
+        if steamlib.running_game(ctx) == appid:     # the download can take minutes: the game may have started
+            why = f"Quit {_name(ctx, appid)} first."
+            _say(job, why)
+            return _result(appid, ok=False, error=why, folder=folder)
     try:
-        res = _put_in(ctx, job, appid, e, choices, folder, got["path"], lst)
+        res = _put_in(ctx, job, appid, e, choices, folder, got["path"], lst, origin)
     except (OptiError, OSError, ValueError) as ex:
         why = str(ex) if isinstance(ex, (OptiError, ValueError)) else f"{ex.strerror or ex}"
         _say(job, f"Failed: {why}; taking out what was put in so far")
@@ -1616,7 +1703,7 @@ def update(ctx, settings, job, appid) -> dict:
         return _result(appid, ok=False, error="OptiScaler could not be taken out completely, so the update stopped: "
                                               "see Details", kept=r["kept"], removed=r["removed"],
                        launch=old_launch, folder=r["folder"])
-    res = install(ctx, settings, job, appid, choices)
+    res = install(ctx, settings, job, appid, choices, origin=g.get("origin") if g.get("origin") == "auto" else "user")
     res["removed"] = r["removed"]
     res["launch_before"] = old_launch
     return res

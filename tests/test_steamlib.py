@@ -363,6 +363,77 @@ class CompatToolTest(unittest.TestCase):
         self.assertEqual(steamlib.find_tool_dir(self.w.ctx, "Evil"), p)
 
 
+class InstalledAppsTest(unittest.TestCase):
+    """installed_apps: every library's manifests with StateFlags bit 4 (DESIGN.md "Automatic setup")."""
+
+    def setUp(self):
+        self.tmp = tempfile.TemporaryDirectory()
+        self.addCleanup(self.tmp.cleanup)
+        self.w = World(self.tmp.name)
+        self.w.make_steam()
+
+    def manifest(self, lib, appid, name, flags):
+        write(os.path.join(lib, "steamapps", f"appmanifest_{appid}.acf"),
+              f'"AppState"\n{{\n\t"appid"\t\t"{appid}"\n\t"name"\t\t"{name}"\n\t"StateFlags"\t\t"{flags}"\n}}\n')
+
+    def test_two_libraries_flags_and_a_broken_manifest(self):
+        sd = self.w.add_library(os.path.join(self.tmp.name, "media", "SD"))
+        self.manifest(self.w.steam, "292030", "The Witcher 3", 4)
+        self.manifest(self.w.steam, "10", "Counter-Strike", 6)          # installed, update pending
+        self.manifest(self.w.steam, "20", "Half-Life Update", 2)        # not installed (update required only)
+        self.manifest(sd, "2246340", "Monster Hunter Wilds", 1028)
+        self.manifest(sd, "292030", "copy", 4)                          # the first library's wins
+        write(os.path.join(sd, "steamapps", "appmanifest_30.acf"), '"AppState" { "StateFlags" "x" ')
+        write(os.path.join(sd, "steamapps", "appmanifest_x.acf"), "junk")
+        self.assertEqual(steamlib.installed_apps(self.w.ctx),
+                         [{"appid": "10", "name": "Counter-Strike"}, {"appid": "292030", "name": "The Witcher 3"},
+                          {"appid": "2246340", "name": "Monster Hunter Wilds"}])
+
+    def test_no_steam(self):
+        import shutil
+        shutil.rmtree(self.w.steam)
+        self.assertEqual(steamlib.installed_apps(self.w.ctx), [])
+
+    def test_capped(self):
+        with mock.patch.object(steamlib, "INSTALLED_MAX", 2):
+            for a in ("1", "2", "3"):
+                self.manifest(self.w.steam, a, f"g{a}", 4)
+            self.assertEqual(len(steamlib.installed_apps(self.w.ctx)), 2)
+
+
+class GameStartedAtTest(unittest.TestCase):
+    def setUp(self):
+        self.tmp = tempfile.TemporaryDirectory()
+        self.addCleanup(self.tmp.cleanup)
+        self.w = World(self.tmp.name)
+        self.w.make_steam()
+        os.makedirs(self.w.sys("/proc"))
+        write(self.w.sys("/proc/stat"), "cpu  1 2 3\nbtime 1700000000\nprocesses 5\n")
+
+    def reaper(self, appid, start):
+        return self.w.proc([os.path.join(self.w.steam, "ubuntu12_32", "reaper"), "SteamLaunch", f"AppId={appid}",
+                            "--", "x"], start=start)
+
+    def test_newest_reaper_of_the_game(self):
+        self.reaper("292030", 1000)
+        self.reaper("292030", 5000)
+        self.reaper("2246340", 9000)
+        with mock.patch.object(steamlib, "_clock_ticks", return_value=100):
+            self.assertEqual(steamlib.game_started_at(self.w.ctx, "292030"), 1700000050.0)
+            self.assertEqual(steamlib.game_started_at(self.w.ctx, "2246340"), 1700000090.0)
+            self.assertIsNone(steamlib.game_started_at(self.w.ctx, "1"))
+            self.assertIsNone(steamlib.game_started_at(self.w.ctx, "29x"))
+
+    def test_no_boot_time(self):
+        os.unlink(self.w.sys("/proc/stat"))
+        self.reaper("292030", 1000)
+        self.assertIsNone(steamlib.game_started_at(self.w.ctx, "292030"))
+
+    def test_an_argument_after_the_separator_does_not_count(self):
+        self.w.proc([os.path.join(self.w.steam, "ubuntu12_32", "reaper"), "SteamLaunch", "--", "AppId=292030"])
+        self.assertIsNone(steamlib.game_started_at(self.w.ctx, "292030"))
+
+
 class ProcessTest(unittest.TestCase):
     def setUp(self):
         self.tmp = tempfile.TemporaryDirectory()

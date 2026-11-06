@@ -51,6 +51,7 @@ power = _load("power")              # (powerhw is imported by power)
 readouts = _load("readouts")
 extras = _load("extras")
 optiscaler = _load("optiscaler")
+autosetup = _load("autosetup")
 
 OXP3_VENDOR = "ONE-NETBOOK"          # oxp3_tool/detect.py OXP3_SYS_VENDOR / OXP3_PRODUCT_NAME
 OXP3_PRODUCT = "ONEXPLAYER 3"
@@ -554,6 +555,56 @@ class Plugin:
             return self._opti_title(verb, appid)
         except Exception:
             return f"{verb} for {appid}"
+
+    # ---- automatic setup (DESIGN.md "Automatic setup (0.6)") ---------------------------------------------------------
+
+    async def auto_state(self):
+        return await self._call("auto_state", lambda: _mod("autosetup").state(self.ctx))
+
+    async def auto_enable(self, on, confirmed=False):
+        return await self._call("auto_enable", lambda: _mod("autosetup").enable(self.ctx, on, confirmed))
+
+    async def auto_pending(self, appids):
+        def go():
+            if not isinstance(appids, list):
+                return {"ok": False, "error": "auto_pending: appids must be a list", "appids": []}
+            return _mod("autosetup").pending(self.ctx, appids)
+        return await self._call("auto_pending", go)
+
+    async def auto_plan(self, appid, facts):
+        return await self._call("auto_plan", lambda: _mod("autosetup").plan(self.ctx, self.settings, appid, facts))
+
+    async def auto_record(self, appid, change):
+        return await self._call("auto_record", lambda: _mod("autosetup").record(self.ctx, appid, change))
+
+    async def auto_mode(self, appid, mode, why=None):
+        return await self._call("auto_mode", lambda: _mod("autosetup").set_mode(self.ctx, appid, mode, why))
+
+    async def auto_undo(self, appid, change_id, reason="user"):
+        """launch / proton: marked (the frontend wrote first); opti: the job "opti-remove", marked when it ends."""
+        res = await self._call("auto_undo", lambda: _mod("autosetup").undone(self.ctx, appid, change_id, reason))
+        res.setdefault("game", None)
+        res["job"] = None
+        if not res["ok"] or res.get("kind") != "opti":
+            return res
+        started = await self._start(
+            "auto_undo", "opti-remove", self._opti_title_safe("Remove OptiScaler", appid),
+            lambda job: _mod("autosetup").opti_undo(self.ctx, self.settings, job, appid, change_id, reason),
+            lambda: _mod("autosetup").opti_undo_precheck(self.ctx, appid, change_id))
+        return {"ok": started["ok"], "error": started["error"], "game": res["game"], "job": started.get("job"),
+                "kind": "opti"}
+
+    async def auto_retry(self, appid, change_id):
+        return await self._call("auto_retry", lambda: _mod("autosetup").retry(self.ctx, appid, change_id))
+
+    async def auto_session(self, appid, event):
+        return await self._call("auto_session", lambda: _mod("autosetup").session(self.ctx, appid, event))
+
+    async def auto_opti_install(self, appid, accepted=False):
+        return await self._start(
+            "auto_opti_install", "opti-install", self._opti_title_safe("OptiScaler", appid),
+            lambda job: _mod("autosetup").opti_install(self.ctx, self.settings, job, appid, accepted is True),
+            lambda: _mod("autosetup").opti_precheck(self.ctx, self.settings, appid, accepted is True))
 
     # ---- power (not jobs: no job ever blocks these) ----------------------------------------------------------------
 

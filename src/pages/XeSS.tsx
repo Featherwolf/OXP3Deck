@@ -6,7 +6,7 @@ import { FC, useMemo, useState } from "react";
 import { blockedBy, installXess, uninstallXess, useAction } from "../actions";
 import { get_overview, xess_check_update, xess_remove_folder, xess_set_driver, xess_shim_system_protons, xess_state } from "../backend";
 import { confirm, DetailsSpec, paragraphs } from "../components/confirm";
-import { AutoGlobalToggle } from "../components/AutoLaunch";
+import { AutoSetupSwitch } from "../components/AutoSetup";
 import { Pending } from "../components/Effect";
 import { Code, explain, explainWhen, INFO, Note, Problem, Status, WithDetails } from "../components/Hint";
 import { EFFECTS } from "../effects";
@@ -151,8 +151,8 @@ export const XessTab: FC = () => {
         {inst.job && <JobView job={inst.job} lines={6} />}
       </PanelSection>
       {x?.installed && (
-        <PanelSection title="Launch options">
-          <PanelSectionRow><AutoGlobalToggle /></PanelSectionRow>
+        <PanelSection title="Games">
+          <PanelSectionRow><AutoSetupSwitch /></PanelSectionRow>
         </PanelSection>
       )}
       {x?.installed && drivers.length > 0 && (

@@ -43,7 +43,9 @@ test("the table of DESIGN.md", () => {
     assert.equal(EFFECTS[id], "reboot", id);
   }
   assert.equal(EFFECTS["fix.oled-profile"], "session");
-  for (const id of ["game.xess", "game.fsr", "game.auto", "auto.global", "xess.driver", "xess.shim"]) assert.equal(EFFECTS[id], "game", id);
+  for (const id of ["game.xess", "game.fsr", "auto.global", "game.auto_mode", "game.auto_undo", "game.auto_retry", "game.auto_offer",
+    "xess.driver", "xess.shim"]) assert.equal(EFFECTS[id], "game", id);
+  assert.equal("game.auto" in EFFECTS, false, "0.6: the per-game dropdown is gone");
   assert.deepEqual(EFFECTS["xess.install"], ["idle", "session"]);
 });
 

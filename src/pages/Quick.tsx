@@ -7,6 +7,7 @@ import { FC, useEffect } from "react";
 
 import { applyFixes, blockedBy, fixesEffect, installOxp3, installXess, useAction } from "../actions";
 import { get_overview, oxp3_status, xess_check_update, xess_state } from "../backend";
+import { AutoSetupSwitch } from "../components/AutoSetup";
 import { GameControls } from "../components/GameControls";
 import { DetailsSpec, paragraphs } from "../components/confirm";
 import { explain, explainWhen, INFO, Note, Problem, Status, WithDetails } from "../components/Hint";
@@ -208,6 +209,7 @@ export const QuickPanel: FC = () => {
       {o && <XessSection o={o} />}
       {app && (
         <PanelSection title="This game">
+          <PanelSectionRow><AutoSetupSwitch /></PanelSectionRow>
           <PanelSectionRow><Note label={app.name} details={{ title: app.name, body: "Saved in the game's Steam launch options. Changes apply the next time you start it." }}>XeSS settings for this game</Note></PanelSectionRow>
           <GameControls app={app} quick running />
         </PanelSection>

@@ -147,9 +147,12 @@ test("the DirectX 12 argument: added for a known game with frame generation set,
   assert.equal("args" in record(undefined, [XESS], 1), false);
 });
 
-test("AutoLaunch passes the DirectX 12 argument to plan and records it", () => {
+test("0.6: AutoLaunch keeps only an old record's row and Undo; the automatic setup passes the DirectX 12 argument", () => {
   const s = readFileSync(new URL("../../src/components/AutoLaunch.tsx", import.meta.url), "utf8");
-  assert.match(s, /plan\(text, suggest, rec, autoArgs\(appid, text\), gi\.game\?\.opti_installed \? OPTI_DROPPED : \[\]\)/);
-  assert.match(s, /record\(rec, p\.added, Math\.floor\(Date\.now\(\) \/ 1000\), p\.args\)/);
-  assert.match(s, /if \(!suggest\.length && !dx12Known\(appid\)\) return none;/);
+  assert.doesNotMatch(s, /export const autoApply|AutoGlobalToggle|DropdownItem/);
+  assert.match(s, /export const LegacyAutoRows/);
+  const a = readFileSync(new URL("../../src/autosetup.ts", import.meta.url), "utf8");
+  assert.match(a, /const args = autoArgs\(appid, afterRemove\)\.filter\(\(a\) => !no\.has\(a\.arg\)\);/);
+  assert.match(a, /return applyAuto\(text, lp, args, optiIn \? OPTI_DROPPED : \[\], rec\);/);
+  assert.match(a, /launchStep\(appid, text, plan, optiIn, await d\.legacyRec\(appid\)\)/);
 });

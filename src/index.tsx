@@ -4,7 +4,7 @@ import { DialogButton, Focusable, staticClasses } from "@decky/ui";
 import { MdSettings, MdVideogameAsset } from "react-icons/md";
 
 import { power_game } from "./backend";
-import { watchGameExits } from "./components/AutoLaunch";
+import { watchAutoSetup } from "./components/AutoSetup";
 import { openPage, ROUTE } from "./nav";
 import { FullPage } from "./pages/Full";
 import { QuickPanel } from "./pages/Quick";
@@ -19,8 +19,8 @@ export default definePlugin(() => {
   power_game(runningApp()?.appid ?? null).then(notePower);
   // a game that starts again has applied its "Restart the game" changes
   const stopPending = onMainAppChange((a) => clearPendingFor(a));
-  // automatic launch options: added a few seconds after a game quits (never while it runs)
-  const stopAuto = watchGameExits();
+  // automatic setup: a few seconds after a game quits (never while it runs), the session events, the library scan
+  const stopAuto = watchAutoSetup();
   return {
     name: "OXP3 Deck",
     // Decky's own title bar, with a button to the full page (as "More" at the bottom does)

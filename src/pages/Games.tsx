@@ -3,7 +3,7 @@
 import { PanelSection, PanelSectionRow } from "@decky/ui";
 import { FC } from "react";
 
-import { AutoGlobalToggle } from "../components/AutoLaunch";
+import { AutoSetupSwitch } from "../components/AutoSetup";
 import { GameControls } from "../components/GameControls";
 import { Note, Status } from "../components/Hint";
 import { lastGame, useRunningApp } from "../steam";
@@ -15,7 +15,7 @@ export const GamesTab: FC = () => {
     return (
       <PanelSection title="Games">
         <PanelSectionRow>
-          <AutoGlobalToggle />
+          <AutoSetupSwitch />
           <Note label="No game yet" details={{ title: "No game yet", body: "Start a game: this page then shows its XeSS settings (saved in its Steam launch options), how XeSS ran last time, and tips for its XeSS version. The last game stays here after it exits." }}>
             Start a game to see its XeSS settings here.</Note>
         </PanelSectionRow>
@@ -25,7 +25,7 @@ export const GamesTab: FC = () => {
   return (
     <PanelSection title="Game">
       <PanelSectionRow>
-        <AutoGlobalToggle />
+        <AutoSetupSwitch />
         <Status ok={null} label={game.name} detail="Changes apply next time you start it."
           details={{ title: game.name, body: app ? "Running now. Changes apply at its next start." : "Not running; the last game seen.", lines: [`Steam app id: ${game.appid}`] }} />
       </PanelSectionRow>

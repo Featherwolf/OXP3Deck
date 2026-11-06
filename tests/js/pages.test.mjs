@@ -243,19 +243,22 @@ test("every confirm dialog says when it takes effect", () => {
 });
 
 test("automatic launch options never write while that game runs", () => {
+  // the old record's Undo (AutoLaunch.tsx)
   const s = src("components/AutoLaunch.tsx");
   const calls = [...s.matchAll(/setLaunchOptions\(appid/g)];
-  assert.equal(calls.length, 2);
+  assert.equal(calls.length, 1);
   for (const m of calls) {
     const before = s.slice(Math.max(0, m.index - 400), m.index);
     assert.match(before, /if \(isRunning\(appid\)\) \{?\s*(return|setErr)/, "a running check right before the write");
-    const fnStart = Math.max(s.lastIndexOf("export const autoApply", m.index), s.lastIndexOf("const doUndo", m.index));
-    assert.ok(before.length && s.slice(fnStart, m.index).includes("isRunning(appid)"), "in the same function");
+    const fnStart = s.lastIndexOf("const doUndo", m.index);
+    assert.ok(fnStart > 0 && s.slice(fnStart, m.index).includes("isRunning(appid)"), "in the same function");
   }
-  // only AutoLaunch.tsx, GameControls (the user's own picks) and OptiControls (OptiScaler's plan) write launch options
+  // only AutoLaunch.tsx, AutoSetup.tsx (through autosetup.ts's pass, which gets its writer from AutoSetup.tsx), GameControls
+  // (the user's own picks) and OptiControls (OptiScaler's plan) write launch options
   const writers = allSources().filter((n) => !["steam.ts"].includes(n) && /\bsetLaunchOptions\(/.test(src(n)));
-  assert.deepEqual(writers.sort(), ["components/AutoLaunch.tsx", "components/GameControls.tsx", "components/OptiControls.tsx"]);
-  assert.match(src("index.tsx"), /const stopAuto = watchGameExits\(\);/);
+  assert.deepEqual(writers.sort(), ["autosetup.ts", "components/AutoLaunch.tsx", "components/AutoSetup.tsx", "components/GameControls.tsx", "components/OptiControls.tsx"]);
+  assert.doesNotMatch(src("autosetup.ts"), /from "\.\/steam"/, "autosetup.ts writes only through the deps it is given");
+  assert.match(src("index.tsx"), /const stopAuto = watchAutoSetup\(\);/);
   assert.match(src("index.tsx"), /stopAuto\(\);/);
 });
 

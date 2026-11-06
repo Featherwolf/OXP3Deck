@@ -3,6 +3,9 @@
 // it (tests/js/autolaunch.test.mjs). The user's own text is never rewritten: a key is inserted as one token at the
 // place setManaged would put it, and Undo cuts out only that token.
 import { DX12_ARGS, fgConfigured, hasArg, managed, type ManagedKey, MANAGED_KEYS, NEVER_AUTO, parse, setArg, setManaged } from "./launchopts";
+import type { AutoApplied, LaunchPlan } from "./types";
+
+export type { AutoApplied };
 
 export type AutoSuggest = { key: ManagedKey; value: string; why: string };
 /** A game argument to add after %command% ("Start in DirectX 12"). */
@@ -112,18 +115,29 @@ const planKeys = (s: string, p: ReturnType<typeof parse>, suggest: AutoSuggest[]
     return true;
   });
   if (!add.length) return none;
-  const tokens = tokensText(add);
+  return insertKeys(s, p, add) ?? none;
+};
+
+/**
+ * `add` inserted as KEY=VALUE tokens after the leading assignments (as setManaged would place them), the rest of the
+ * text kept byte for byte; null when the text has game arguments without %command% that would need re-quoting.
+ */
+const insertKeys = (s: string, p: ReturnType<typeof parse>, add: AutoSuggest[]): { text: string; added: AutoSuggest[] } | null => {
+  const tokens = add.map((a) => `${a.key}=${quoteValue(a.value)}`).join(" ");
   if (!p.hasCommand) {
     if (!s.trim()) return { text: `${tokens} %command%`, added: add };
     // the game's arguments go behind %command%: only when they need no quoting there
     const next = setManaged(s, Object.fromEntries(add.map((a) => [a.key, a.value])));
-    return next === `${tokens} %command% ${s.trim()}` ? { text: next, added: add } : none;
+    return next === `${tokens} %command% ${s.trim()}` ? { text: next, added: add } : null;
   }
   // after the leading assignments (as setManaged does), before a wrapper such as gamemoderun or %command% itself
   const firstOther = p.tokens.find((t) => t.key === null);
   const at = firstOther ? firstOther.end - firstOther.raw.length : commandStart(s, p.tokens);
   return { text: `${s.slice(0, at)}${tokens} ${s.slice(at)}`, added: add };
 };
+
+/** A value as a shell word: plain when safe, else in single quotes (a user's value put back by undoAuto). */
+const quoteValue = (v: string): string => (/^[A-Za-z0-9._:,+/@%=-]+$/.test(v) ? v : `'${v.replace(/'/g, "'\\''")}'`);
 
 /** Where the %command% token starts: after the last token before it, past the spaces. */
 const commandStart = (s: string, tokens: { end: number }[]): number => {
@@ -246,3 +260,98 @@ export const planned = (p: Plan): boolean => p.added.length > 0 || p.args.length
 /** The toast after an addition. */
 export const addedToast = (name: string, added: AutoSuggest[], args: AutoArg[] = []): string =>
   `Added launch options for ${name}: ${addedText(added, args)}. They apply at its next start.`;
+
+// ---- automatic setup (DESIGN.md "Automatic setup (0.6)", "Launch-option merge rules") --------------------------------
+
+const isKey = (k: unknown): k is ManagedKey => typeof k === "string" && (MANAGED_KEYS as readonly string[]).includes(k);
+const EMPTY = (): AutoApplied => ({ set: {}, dropped: {}, args: [] });
+
+/** Cut these spans (each a token and the whitespace after it) out of `s`. */
+const cutSpans = (s: string, cut: [number, number][]): string => {
+  let out = "";
+  let from = 0;
+  for (const [a, b] of cut.sort((x, y) => x[0] - y[0])) { out += s.slice(from, a); from = b; }
+  return out + s.slice(from);
+};
+
+/**
+ * The launch options after an automatic setup step: first the plan's `remove` keys that are set are cut out (each
+ * token alone, as Undo cuts; their values kept in `dropped`), then the `set` keys the text lacks are added with
+ * plan()'s rules (a key set with another value is the user's and stays; NEVER_AUTO and `skip` never; a key the user
+ * removed after an old automatic addition, `rec.done`, neither), then the game arguments (`lp.args` and `args`).
+ * `lp.dll_override` / `lp.dxvk_config` are ignored (only OptiScaler's own plan sets them). A "%command" typo: nothing.
+ */
+export const applyAuto = (text: string, lp: LaunchPlan, args: AutoArg[] = [], skip: readonly ManagedKey[] = [],
+  rec?: AutoRecord): { text: string; applied: AutoApplied } => {
+  const s = text ?? "";
+  const none = { text: s, applied: EMPTY() };
+  const p = parse(s);
+  if (p.typo || !lp) return none;
+  const set = lp.set ?? {};
+  // removals first
+  const dropped: Partial<Record<ManagedKey, string>> = {};
+  const cut: [number, number][] = [];
+  if (p.hasCommand) {
+    const remove = new Set((lp.remove ?? []).filter((k) => isKey(k) && set[k] === undefined));
+    for (const t of p.tokens) {
+      if (t.key === null || !remove.has(t.key as ManagedKey)) continue;
+      let end = t.end;
+      while (end < s.length && /\s/.test(s[end])) end++;
+      cut.push([t.end - t.raw.length, end]);
+      dropped[t.key as ManagedKey] = t.value ?? "";
+    }
+  }
+  let out = cut.length ? cutSpans(s, cut) : s;
+  if (cut.length && out.trim() === "%command%") out = "";
+  // then additions (plan's rules), then the arguments
+  const suggest: AutoSuggest[] = Object.entries(set).filter(([k, v]) => isKey(k) && typeof v === "string")
+    .map(([k, v]) => ({ key: k as ManagedKey, value: v as string, why: "" }));
+  const words: AutoArg[] = [...(lp.args ?? []).map((a) => ({ arg: a, why: "" })), ...(args ?? [])];
+  const pl = plan(out, suggest, rec, words, skip);
+  const applied: AutoApplied = {
+    set: Object.fromEntries(pl.added.map((a) => [a.key, a.value])),
+    dropped,
+    args: [...new Set(pl.args.map((a) => a.arg))],
+  };
+  return { text: pl.text, applied };
+};
+
+/**
+ * The launch options without an automatic change: each added key whose value is still the one added goes, each added
+ * argument goes, each key it took out comes back where it is absent. Text that is then only %command% becomes "".
+ */
+export const undoAuto = (text: string, a: AutoApplied): string => {
+  let out = undo(text ?? "", { added: a?.set ?? {}, why: [], at: 0, done: [], undone: false, args: a?.args ?? [] });
+  const back: AutoSuggest[] = [];
+  const p = parse(out);
+  for (const [k, v] of Object.entries(a?.dropped ?? {})) {
+    if (!isKey(k) || typeof v !== "string" || !v) continue;
+    if (p.vars.some(([name]) => name === k)) continue;
+    back.push({ key: k, value: v, why: "" });
+  }
+  if (back.length) {
+    // as one token each where the keys go, the rest byte for byte; setManaged only when that is not possible
+    const ins = p.typo ? null : !out.trim() ? { text: `${back.map((b) => `${b.key}=${quoteValue(b.value)}`).join(" ")} %command%`, added: back } : insertKeys(out, p, back);
+    out = ins ? ins.text : setManaged(out, Object.fromEntries(back.map((b) => [b.key, b.value])));
+  }
+  return out.trim() === "%command%" ? "" : out;
+};
+
+/** Whether the user changed what an automatic change did: an added key gone or changed, an argument gone, a taken-out key back. */
+export const touched = (text: string | null | undefined, a: AutoApplied | null | undefined): boolean => {
+  if (text === null || text === undefined || !a) return false;
+  const p = parse(text);
+  const have = managed(p);
+  for (const [k, v] of Object.entries(a.set ?? {})) if (have[k as ManagedKey] !== v) return true;
+  for (const w of a.args ?? []) if (!hasArg(text, w)) return true;
+  for (const k of Object.keys(a.dropped ?? {})) if (p.vars.some(([name]) => name === k)) return true;
+  return false;
+};
+
+/** An automatic change did something. */
+export const appliedAny = (a: AutoApplied | null | undefined): boolean =>
+  !!a && (Object.keys(a.set ?? {}).length > 0 || Object.keys(a.dropped ?? {}).length > 0 || (a.args ?? []).length > 0);
+
+/** "XESS=latest -dx12 no XESS_FG": what it added, then what it took out. */
+export const appliedText = (a: AutoApplied): string =>
+  [tokensText(a.set ?? {}), ...(a.args ?? []), ...Object.keys(a.dropped ?? {}).map((k) => `no ${k}`)].filter(Boolean).join(" ");

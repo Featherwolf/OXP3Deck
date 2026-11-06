@@ -36,10 +36,13 @@ PROXIES_BY_API = {
 FG_INPUTS = ("dlssg", "fsrfg", "xefg", "upscaler")
 
 
-def _k(name, exe, folder, api, proxies, pick, fg=(), notes=(), page="", gc=True, args=(), conf="H", fit="good"):
+def _k(name, exe, folder, api, proxies, pick, fg=(), notes=(), page="", gc=True, args=(), conf="H", fit="good",
+       auto=None):
     """One known-games entry. exe: lower-case name(s), or None (found by the generic rules); folder: where the wiki
     puts it ("." the install folder), a hint only; fg: the frame-generation inputs the wiki documents (OptiFG,
-    "upscaler", is added for every DirectX 12 game); conf: H = appid and folder checked, M = from memory."""
+    "upscaler", is added for every DirectX 12 game); conf: H = appid and folder checked, M = from memory. auto:
+    {choices, why, short} when the automatic setup installs OptiScaler by itself (DESIGN.md "Automatic setup"); no
+    entry has it now (none is tested on this device), a later one only with a source."""
     exes = (exe,) if isinstance(exe, str) else tuple(exe or ())
     inputs = tuple(fg) + (("upscaler",) if api == "dx12" and "upscaler" not in fg else ())
     srcs = [WIKI + page] if page else []
@@ -47,7 +50,8 @@ def _k(name, exe, folder, api, proxies, pick, fg=(), notes=(), page="", gc=True,
         srcs.append(f"{GC} ({exes[0]})")
     return {"name": name, "exes": exes, "folder": folder, "api": api, "proxies": tuple(proxies), "pick": pick,
             "fg_inputs": inputs if api == "dx12" else (), "fg_input": inputs[0] if api == "dx12" else "upscaler",
-            "notes": tuple(notes), "args": tuple(args), "sources": tuple(srcs), "conf": conf, "fit": fit}
+            "notes": tuple(notes), "args": tuple(args), "sources": tuple(srcs), "conf": conf, "fit": fit,
+            "auto": auto}
 
 
 # The wiki documents these (its per-game pages); appid -> entry. The Witcher 3 is optiscaler.GAMES (tested).

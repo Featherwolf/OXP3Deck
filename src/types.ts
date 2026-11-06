@@ -372,3 +372,57 @@ export type ExtrasState = {
   options: ExtrasOptions;
 };
 export type ExtrasInfoRes = Res & { extras: ExtrasState | null };
+
+// ---- automatic setup (DESIGN.md "Automatic setup (0.6)") -----------------------------------------------------------
+
+/** What an automatic launch-option change did (autolaunch.applyAuto): keys added, keys taken out (their old values), arguments added. */
+export type AutoApplied = { set: Partial<Record<ManagedKey, string>>; dropped: Partial<Record<ManagedKey, string>>; args: string[] };
+export type AutoMode = "auto" | "manual";
+export type AutoKind = "opti" | "launch" | "proton";
+export type AutoChangeState = "live" | "undone" | "rolled_back" | "superseded";
+export type AutoChange = {
+  id: string;                         // "<kind>-<at>" (backend-made)
+  kind: AutoKind; at: number;         // Unix seconds, backend time
+  state: AutoChangeState; tested: boolean; kept: boolean; accepted: boolean;   // accepted: an offer the user tapped
+  label: string;                      // ≤ 40: "OptiScaler" / "XESS=latest -dx12" / "GE-Proton11-11"
+  why: string; short: string;         // why ≤ 200, short ≤ 40 ("for frame generation", "for XeSS")
+  launch?: AutoApplied;               // kind launch
+  proton?: { from: string; from_priority: number; to: string; to_display: string };
+  opti?: { build: string; choices: OptiChoices };
+  ended_at?: number | null;           // undone / rolled back / superseded at
+};
+export type AutoClass = "known" | "unknown" | "skipped";
+export type AutoGame = {
+  appid: string; name: string; class: AutoClass; skip_why: string | null;
+  mode: AutoMode; mode_why: string | null; mode_by: "default" | "user" | "detected";
+  seen_at: number; plan_version: number; changes: AutoChange[];
+  session: { started_at: number | null; quick_exits: number; last_run_s: number | null };
+  rollback_due: string | null;        // a change id
+  notice: string | null; last_error: string | null;
+};
+export type AutoOffer = { id: "opti" | "fsr" | "proton"; label: string; line: string; why: string };
+export type AutoProtonNote = { kind: "restart" | "unhooked" | "none" | "user_pick"; line: string; detail: string };
+export type AutoPlan = {
+  appid: string; name: string; on: boolean; class: AutoClass; skip_why: string | null;
+  mode: AutoMode; mode_why: string | null;
+  opti: { choices: OptiChoices; why: string; short: string } | null;
+  launch: { plan: LaunchPlan; why: string; short: string } | null;    // set/remove/args; dll_override, dxvk_config null
+  proton: { to: string; to_display: string; why: string } | null;
+  proton_note: AutoProtonNote | null;
+  offers: AutoOffer[]; rollback: AutoChange | null; needs_xess: boolean;
+  game: AutoGame;
+};
+export type AutoCompat = { name: string; display: string; priority: number };
+export type AutoTool = { name: string; display: string };
+export type AutoFacts = { compat: AutoCompat | null; tools: AutoTool[]; hand: string[]; running: boolean };
+/** What the frontend reports with auto_record (the backend sets id, at, state, tested). */
+export type AutoChangeIn = {
+  kind: "launch" | "proton"; label: string; why: string; short: string; accepted?: boolean;
+  launch?: AutoApplied; proton?: { from: string; from_priority: number; to: string; to_display: string };
+};
+export type AutoStateRes = Res & { on: boolean; confirmed_at: number | null; games: Record<string, AutoGame> };
+export type AutoPlanRes = Res & { plan: AutoPlan | null };
+export type AutoGameRes = Res & { game: AutoGame | null };
+export type AutoUndoRes = Res & { game: AutoGame | null; job: Job | null };
+export type AutoSessionRes = Res & { rollback: AutoChange | null; game: AutoGame | null };
+export type AutoPendingRes = Res & { appids: string[] };

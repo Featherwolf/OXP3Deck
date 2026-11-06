@@ -38,7 +38,7 @@ export const EFFECTS: Record<string, EffectSpec> = {
   "xess.driver": "game", "xess.shim": "game", "xess.remove_folder": NOW,
   "game.xess": "game", "game.fg": "game", "game.mesa": "game", "game.vendor": "game", "game.log": "game", "game.fsr": "game",
   "game.typo": "game", "game.copy": "game", "game.dx12": "game",
-  "game.auto": "game", "game.auto_undo": "game", "auto.global": "game",
+  "game.auto_undo": "game", "auto.global": "game", "game.auto_mode": "game", "game.auto_retry": "game", "game.auto_offer": "game",
   "game.opti": "game", "game.opti_upscaler": "game", "game.opti_fg": "game", "game.opti_input": "game",
   "game.opti_remove": "game", "game.opti_update": "game", "game.opti_overlay": "game",
   "kernel.try": "reboot", "kernel.keep": "reboot",

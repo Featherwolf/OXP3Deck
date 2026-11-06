@@ -45,6 +45,9 @@ KNOWN_ISSUES: dict[str, tuple[dict, ...]] = {
                   "also swaps files in this game: if it crashes with it, take that off too.",
         "source": "owner report; github.com/HHHHanasak1/xess-xmx-linux/issues/42; "
                   "github.com/optiscaler/OptiScaler/wiki/Monster-Hunter-Wilds",
+        # Automatic setup (DESIGN.md "Automatic setup"): XESS_FG crashed it; the FSR routes replace Capcom's signed
+        # DLL; XESS=latest swaps files too (the detail above)
+        "auto_drop": ("XESS_FG", "FSR", "FSR_FG"), "auto_never": ("XESS", "FSR"),
     },),
     "292030": ({
         "id": "fg_no_gain", "fg_crash": False, "fsr_risk": False,
@@ -64,13 +67,25 @@ KNOWN_ISSUES: dict[str, tuple[dict, ...]] = {
                   "users report as smooth on Intel. Leave FSR=xess and FSR_FG off for this game.",
         "source": "owner tests with shim logs (igdext_xefg.log, igdext_xell.log), 2026-11-05/06; Intel IGCIT #1572; "
                   "earlier XeLL 1.2.1.13 analysis",
+        "auto_drop": ("FSR", "FSR_FG"), "auto_never": ("FSR",),     # "Leave FSR=xess and FSR_FG off" (above)
     },),
 }
 
 
+# The launch-option keys OXP3 Deck manages (src/launchopts.ts MANAGED_KEYS, the same list).
+MANAGED_KEYS = ("XESS", "XESS_FG", "MESA", "force_vk_vendor", "XESS_LOG", "FSR", "FSR_FG")
+
+
 def known_issues(appid: str) -> list[dict]:
-    """The known issues of a game (copies), [] for any other."""
-    return [dict(i) for i in KNOWN_ISSUES.get(str(appid), ())]
+    """The known issues of a game (copies), [] for any other. auto_drop: keys the automatic setup takes out of the
+    launch options (known to crash the game); auto_never: keys it never adds. Both () when the entry has none."""
+    out = []
+    for i in KNOWN_ISSUES.get(str(appid), ()):
+        d = dict(i)
+        d["auto_drop"] = tuple(i.get("auto_drop", ()))
+        d["auto_never"] = tuple(i.get("auto_never", ()))
+        out.append(d)
+    return out
 
 
 def _scan(folder: str) -> tuple[list[str], list[str], bool]:
@@ -448,6 +463,12 @@ def _suggest(det: dict, game: dict) -> list[dict]:
         out.append({"key": "FSR", "value": "xess", "why": "The game has FSR 3.1+ and no XeSS: its FSR runs on XeSS."})
     # never frame generation: it can crash a game (Monster Hunter Wilds), so only the user turns it on
     return [a for a in out if a["key"] not in NEVER_SUGGESTED]
+
+
+def suggest(det: dict, game: dict) -> list[dict]:
+    """_suggest for a game dict whose compat_tool_hook the caller may have set (the automatic setup computes the
+    keys against the Proton the game will have after its plan)."""
+    return _suggest(det, game)
 
 
 # Keys the automatic launch options never add, for any game (autolaunch.ts and copyopts.ts drop them too).

@@ -311,12 +311,29 @@ next start. No re-login is needed.
   `C:\igdext_xefg.log` in the game's prefix. When it says "Latency reduction is not enabled" and
   `xefgSwapChainSetEnabled(1) -> -15`, turn on **Xe Low Latency** in the game's graphics menu; the Details show the
   log's lines and when it was written.
-- **Add needed launch options automatically** (Games and XeSS tabs, off by default; each game can override it): when
-  a game needs `XESS=latest` (XeSS older than 2.0.2.68, old frame generation, XeLL 1.2) or `FSR=xess` (FSR 3.1+ and
-  no XeSS, xess-xmx-linux 20261104+), OXP3 Deck adds just that variable, a few seconds after you quit the game or
-  when you open its settings while it is not running; never while it runs. For The Witcher 3 with XeSS frame
-  generation set in its launch options it also adds `-dx12`. The game's settings show **Added:
-  XESS=latest** with why, and **Undo**. A key added once, or undone, is never added again for that game.
+- **Set up games automatically** (Games tab, XeSS tab and Quick Access "This game"; off until you turn it on and
+  confirm one dialog that lists what it may change). With it on, OXP3 Deck sets up each game by itself, only while
+  the game is not running: a few seconds after you quit it, when you open its settings, or when a library scan
+  (20 s after loading, then every 10 minutes while no game runs, at most 8 games each time) first sees it.
+  - Games it knows (its OptiScaler tables, its known issues, the DirectX 12 list) get their best known setup:
+    OptiScaler where the table says it helps (The Witcher 3: XeSS with XeFG 2x through DLSS frame generation),
+    `-dx12`, `XESS=latest` where the game needs it, and launch options known to crash the game taken out (Monster
+    Hunter Wilds: `XESS_FG`, `FSR`, `FSR_FG`). Other games only get what can only help (`XESS=latest` for old XeSS);
+    OptiScaler and `FSR=xess` are offered ("Also possible: …", **Use it**), never applied by themselves.
+  - **Proton**: a game that uses XeSS or OptiScaler and whose Proton lacks the xess-xmx-linux hook (for example the
+    system proton-cachyos, or no Proton found) is moved to the newest installed GE-Proton with the hook (else Proton
+    Experimental); its row says "Proton changed to GE-Proton11-11 for XeSS" with **Undo**. A Proton you picked for a
+    game yourself is never changed (you get an offer instead). Without a suitable Proton the row says how to get one
+    (ProtonUp-Qt or a Decky Proton manager for GE-Proton, Steam's Tools for Proton Experimental, then restart Steam).
+  - Never for anti-cheat or online games, never over an existing file, never for a game in **Manual**. Each game has
+    **Set up this game: Automatic / Manual**; any change you make to it by hand (its XeSS options, OptiScaler, an
+    Undo, its launch options edited in Steam, another Proton picked) switches it to Manual, and a game you had set up
+    yourself starts as Manual. Picking Automatic again applies the whole plan.
+  - Each change has a row with why and **Undo**. If the game closes within a minute after a change (also when you
+    quit it that quickly yourself), or three times in a row, the change is undone before its next start and the row
+    says so, with **Try again**.
+  - It replaces 0.4's "Add needed launch options automatically": an old "Added: XESS=latest" row keeps its Undo, and
+    keys you removed then are not added again.
 - Everything else in the launch options stays as you wrote it: wrappers such as `gamemoderun`, other variables, and
   the game's own arguments. Options without `%command%` are game arguments, so the plugin writes
   `VARIABLES %command% ARGUMENTS`, with each argument in quotes where the shell would read it otherwise
@@ -325,7 +342,7 @@ next start. No re-login is needed.
 - **Copy launch options** (the game's section in Quick Access and on the Games tab): the whole launch line, your
   own text plus the options above, with a Copy button. It is there when OXP3 Deck cannot set it itself (Steam
   refused or kept other text, a non-Steam game, Steam did not return the options, the game needs an option that waits
-  until you quit it or that automatic mode is off for) and also when you just want a copy. Paste it into the game's
+  until you quit it, or a game the automatic setup leaves alone) and also when you just want a copy. Paste it into the game's
   Properties → General → Launch options; it applies when you start the game again. When copying does not work in
   Game Mode, the line shows in a text field to copy with Steam's keyboard.
 

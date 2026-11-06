@@ -303,6 +303,40 @@ def is_system_tool(ctx, path: str | None) -> bool:
     return False
 
 
+INSTALLED_MAX = 2000
+
+
+def installed_apps(ctx) -> list[dict]:
+    """[{appid, name}] of every app whose appmanifest_<appid>.acf in any library says it is installed (StateFlags
+    bit 4), at most INSTALLED_MAX, sorted by appid. A broken manifest is skipped."""
+    out: dict[str, str] = {}
+    for lib in libraries(ctx):
+        sa = os.path.join(lib, "steamapps")
+        try:
+            names = sorted(os.listdir(sa))
+        except OSError:
+            continue
+        for n in names:
+            m = re.match(r"^appmanifest_([0-9]+)\.acf$", n)
+            if not m or m.group(1) in out or m.group(1) == "0":
+                continue
+            acf = read_vdf(os.path.join(sa, n))
+            flags = vdf_get(acf, "AppState", "StateFlags") if acf else None
+            try:
+                installed = int(str(flags)) & 4
+            except ValueError:
+                continue
+            if not installed:
+                continue
+            name = vdf_get(acf, "AppState", "name")
+            out[m.group(1)] = name.strip()[:120] if isinstance(name, str) and name.strip() else m.group(1)
+            if len(out) >= INSTALLED_MAX:
+                break
+        if len(out) >= INSTALLED_MAX:
+            break
+    return [{"appid": k, "name": out[k]} for k in sorted(out, key=int)]
+
+
 # ---- processes -----------------------------------------------------------------------------------------------------
 
 def _user_pids(ctx):
@@ -357,6 +391,45 @@ def running_game(ctx) -> str | None:
                 found.append((_start_time(d), pid, m.group(1)))
                 break
     return max(found)[2] if found else None
+
+
+def _boot_time(ctx) -> float | None:
+    raw = context.read_small(ctx.sys_path("/proc/stat"), 1 << 20) or b""
+    m = re.search(rb"^btime\s+([0-9]+)\s*$", raw, re.M)
+    return float(m.group(1)) if m else None
+
+
+def _clock_ticks() -> int:
+    try:
+        return int(os.sysconf("SC_CLK_TCK")) or 100
+    except (ValueError, OSError, AttributeError):
+        return 100
+
+
+def game_started_at(ctx, appid) -> float | None:
+    """When Steam started the game (Unix seconds): the newest `reaper SteamLaunch AppId=<appid>` process's start
+    (/proc/<pid>/stat field 22 in clock ticks after boot, plus /proc/stat btime); None without such a process or a
+    readable boot time."""
+    appid = str(appid or "")
+    if not _APPID.match(appid):
+        return None
+    starts = []
+    for _pid, d in _user_pids(ctx):
+        argv = _argv(d)
+        if not argv or os.path.basename(argv[0]) != "reaper" or "SteamLaunch" not in argv:
+            continue
+        for a in argv[1:]:
+            if a == "--":
+                break
+            if a == f"AppId={appid}":
+                starts.append(_start_time(d))
+                break
+    if not starts:
+        return None
+    btime = _boot_time(ctx)
+    if btime is None:
+        return None
+    return btime + max(starts) / _clock_ticks()
 
 
 def _steam_rank(d: str) -> int | None:

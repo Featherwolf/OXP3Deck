@@ -5,6 +5,7 @@
 import { callable } from "@decky/api";
 
 import type {
+  AutoChangeIn, AutoFacts, AutoGameRes, AutoMode, AutoPendingRes, AutoPlanRes, AutoSessionRes, AutoStateRes, AutoUndoRes,
   ApplyOpts, CatalogRes, OptiChoices, OptiInfoRes, DriversRes, ExtrasInfoRes, ExtrasOptions, ExtrasWhat, GameInfoRes, JobListRes, JobRes, JobStart, KernelRes, Overview, Oxp3UpdateCheck,
   PlanRes, PowerChangeRes, PowerFixRes, PowerImportRes, PowerInfoRes, PowerLiveRes, PowerOptions, PowerStateRes, PowerValues, Res,
   ShimRes, StatusRes, XessStateRes, XessUpdateCheck,
@@ -45,6 +46,18 @@ export const opti_set = callable<[appid: string, choices: OptiChoices], OptiInfo
 export const opti_remove = callable<[appid: string], JobStart>("opti_remove");
 export const opti_update = callable<[appid: string], JobStart>("opti_update");
 export const opti_options = callable<[opts: { overlay: boolean }], OptiInfoRes>("opti_options");
+
+// ---- automatic setup (0.6) --------------------------------------------------------------------------------------
+export const auto_state = callable<[], AutoStateRes>("auto_state");
+export const auto_enable = callable<[on: boolean, confirmed: boolean], AutoStateRes>("auto_enable");
+export const auto_pending = callable<[appids: string[]], AutoPendingRes>("auto_pending");
+export const auto_plan = callable<[appid: string, facts: AutoFacts], AutoPlanRes>("auto_plan");
+export const auto_record = callable<[appid: string, change: AutoChangeIn], AutoGameRes>("auto_record");
+export const auto_mode = callable<[appid: string, mode: AutoMode, why: string | null], AutoGameRes>("auto_mode");
+export const auto_undo = callable<[appid: string, change_id: string, reason: "user" | "rollback"], AutoUndoRes>("auto_undo");
+export const auto_retry = callable<[appid: string, change_id: string], AutoGameRes>("auto_retry");
+export const auto_session = callable<[appid: string, event: "start" | "exit"], AutoSessionRes>("auto_session");
+export const auto_opti_install = callable<[appid: string, accepted: boolean], JobStart>("auto_opti_install");
 
 // ---- power -------------------------------------------------------------------------------------------------------
 export const power_info = callable<[refresh: boolean], PowerInfoRes>("power_info");

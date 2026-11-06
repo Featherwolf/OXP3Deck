@@ -9,7 +9,6 @@ import { FC, useEffect, useMemo, useRef, useState } from "react";
 
 import { game_info, opti_info, xess_state } from "../backend";
 import { driverPrefix, dx12Arg, dx12Known, fixTypo, fsrSupported, hasArg, managed, ManagedKey, parse, setArg, setManaged } from "../launchopts";
-import { effectiveOn } from "../autolaunch";
 import { getLaunchOptions, isSteamApp, RunningApp, setLaunchOptions } from "../steam";
 import { EFFECTS } from "../effects";
 import { notePending, useResource } from "../store";
@@ -17,7 +16,9 @@ import type { GameInfo, GameInfoRes, GameIssue, OptiInfoRes, XessDriver, XessSta
 import { remember, when } from "../util";
 import { firstSentence } from "../text";
 import { confirm, DetailsSpec, paragraphs } from "./confirm";
-import { AutoLaunchRows, useAutoLog, useAutoSettings } from "./AutoLaunch";
+import { useAutoLog } from "./AutoLaunch";
+import { autoOnFor, markManual, useAutoState } from "../autostate";
+import { AutoSetupRows } from "./AutoSetup";
 import { CopyLaunchRows } from "./CopyLaunch";
 import { OptiRows } from "./OptiControls";
 import { Pending } from "./Effect";
@@ -142,6 +143,8 @@ export const GameControls: FC<{ app: RunningApp; quick?: boolean; running?: bool
     setWanted(r.ok ? null : next);
     // while the game runs, the pending row ("Restart … to apply") says it instead of "Saved"
     setSaved(r.ok && !(running && what));
+    // a change by hand: the automatic setup leaves this game alone from now on (Manual)
+    if (r.ok) markManual(app.appid, "You changed its settings here.");
     if (r.ok && running && what) notePending({ id: what.id, effect: EFFECTS["game.xess"], label: what.label, appid: app.appid, game: app.name });
   };
   const change = (c: Partial<Record<ManagedKey, string | null>>, id: string, what: string) => write(setManaged(text, c), { id, label: what });
@@ -228,7 +231,7 @@ export const GameControls: FC<{ app: RunningApp; quick?: boolean; running?: bool
   const dxKnown = dx12Known(app.appid);
   const dxOn = hasArg(text, dxArg);
   const dxD = det("Start in DirectX 12",
-    `Starts the game with its DirectX 12 argument (${dxArg} after %command%, as the game's last argument); turning it off takes out only that argument, the rest of your text stays.${dxKnown ? " This game's XeSS frame generation option stays on only in DirectX 12 (owner report, The Witcher 3; with --launcher-skip the launcher's own choice is skipped too). With the automatic launch options on, OXP3 Deck adds it by itself once XeSS frame generation is set here." : ""}`,
+    `Starts the game with its DirectX 12 argument (${dxArg} after %command%, as the game's last argument); turning it off takes out only that argument, the rest of your text stays.${dxKnown ? " This game's XeSS frame generation option stays on only in DirectX 12 (owner report, The Witcher 3; with --launcher-skip the launcher's own choice is skipped too). With Set up games automatically on, OXP3 Deck adds it by itself once XeSS frame generation is set here." : ""}`,
     dxKnown ? "Frame generation also needs Xe Low Latency on in the game's graphics menu." : `Not every game knows ${dxArg}: a game that does not ignores it, or may not start. Turn it off if the game misbehaves.`,
     dxArg);
   const logD = det("Save XeSS logs", "Writes the add-on's, XeLL's and XeSS frame generation's logs into the game's prefix (C:\\igdext_trace.log and others), for a bug report.",
@@ -244,13 +247,13 @@ export const GameControls: FC<{ app: RunningApp; quick?: boolean; running?: bool
       Pick the settings above, then copy the line with the button below and paste it into the game's Properties → Launch options.</>,
   };
   // the whole line to paste by hand (copyopts.ts): the refused write, the draft, or Steam's text with what the game needs
-  const auto = useAutoSettings();
+  const autoState = useAutoState();
   const autoLog = useAutoLog();
   const copyInput = {
     steam, text: opts, draft, wanted,
     suggest: steam ? game?.suggest ?? [] : [],
     done: autoLog.data?.[app.appid]?.done ?? [],
-    autoOn: effectiveOn(auto.data, app.appid), running: !!running,
+    autoOn: autoOnFor(autoState.data, app.appid), running: !!running,
     appid: app.appid, argsDone: autoLog.data?.[app.appid]?.argsDone ?? [],
     opti: optiPlan,
   };
@@ -276,6 +279,11 @@ export const GameControls: FC<{ app: RunningApp; quick?: boolean; running?: bool
     <>
       {xs.data?.ok && !x?.installed && (
         <PanelSectionRow><Status ok={false} label="XeSS fast mode not installed" detail="These settings do nothing yet." /></PanelSectionRow>
+      )}
+      {steam && (
+        <PanelSectionRow>
+          <AutoSetupRows app={app} running={!!running} onWritten={(t) => { if (t !== null) { setOpts(t); setRev((n) => n + 1); } }} />
+        </PanelSectionRow>
       )}
       {blocked && (
         <PanelSectionRow>
@@ -361,11 +369,6 @@ export const GameControls: FC<{ app: RunningApp; quick?: boolean; running?: bool
         <PanelSectionRow>
           <OptiRows app={app} quick={quick} running={!!running} game={game} xessInstalled={xs.data?.ok ? !!x?.installed : null}
             onWritten={(t) => { if (t !== null) { setOpts(t); setRev((n) => n + 1); } }} />
-        </PanelSectionRow>
-      )}
-      {steam && (
-        <PanelSectionRow>
-          <AutoLaunchRows app={app} running={!!running} onWritten={(t) => { if (t !== null) { setOpts(t); setRev((n) => n + 1); } }} />
         </PanelSectionRow>
       )}
       <PanelSectionRow>

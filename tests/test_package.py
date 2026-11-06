@@ -201,6 +201,7 @@ class RealBuildTest(unittest.TestCase):
         self.assertIn("py_modules/oxp3deck/extras.py", files)
         self.assertIn("py_modules/oxp3deck/readouts.py", files)
         self.assertIn("py_modules/oxp3deck/optiscaler.py", files)
+        self.assertIn("py_modules/oxp3deck/autosetup.py", files)
         for i in self.infos:
             if not i.is_dir():
                 self.assertEqual(self.zf.read(i), (self.source(i.filename)).read_bytes(), i.filename)

@@ -180,3 +180,118 @@ export const setLaunchOptions = async (appid: string, text: string): Promise<Set
   if (back === null) return { ok: true, error: null, text: null };   // written; Steam did not answer the re-read
   return { ok: false, error: `Steam kept different launch options: ${back || "(empty)"}`, text: back };
 };
+
+// ---- Proton and the library (DESIGN.md "Automatic setup (0.6)", "Frontend") -----------------------------------------
+
+export type CompatNow = { name: string; display: string; priority: number };
+
+/**
+ * The game's compatibility tool as Steam has it now (AppDetails: strCompatToolName, strCompatToolDisplayName,
+ * nCompatToolPriority; a priority of 250 or more is a per-game pick); null when Steam does not answer within 1.5 s.
+ */
+export const getCompat = (appid: string): Promise<CompatNow | null> => new Promise((resolve) => {
+  if (!isSteamApp(appid)) { resolve(null); return; }
+  let done = false;
+  let reg: { unregister(): void } | null = null;
+  const finish = (v: CompatNow | null) => {
+    if (done) return;
+    done = true;
+    clearTimeout(timer);
+    try { reg?.unregister(); } catch { /* already gone */ }
+    resolve(v);
+  };
+  const timer = setTimeout(() => finish(null), 1500);
+  try {
+    reg = client()?.Apps?.RegisterForAppDetails?.(Number(appid), (d: any) => {
+      if (!d) { finish(null); return; }
+      finish({
+        name: typeof d.strCompatToolName === "string" ? d.strCompatToolName : "",
+        display: typeof d.strCompatToolDisplayName === "string" ? d.strCompatToolDisplayName : "",
+        priority: typeof d.nCompatToolPriority === "number" ? d.nCompatToolPriority : 0,
+      });
+    }) ?? null;
+    if (done) { try { reg?.unregister(); } catch { /* already gone */ } }
+    if (!reg && !done) finish(null);
+  } catch {
+    finish(null);
+  }
+});
+
+/** The compatibility tools Steam offers for the game (GetAvailableCompatTools); [] when it cannot tell. */
+export const compatTools = async (appid: string): Promise<{ name: string; display: string }[]> => {
+  if (!isSteamApp(appid)) return [];
+  try {
+    const list = await client()?.Apps?.GetAvailableCompatTools?.(Number(appid));
+    if (!Array.isArray(list)) return [];
+    return list.filter((t: any) => t && typeof t.strToolName === "string" && t.strToolName)
+      .map((t: any) => ({ name: String(t.strToolName), display: String(t.strDisplayName ?? t.strToolName) }));
+  } catch {
+    return [];
+  }
+};
+
+export type CompatResult = { ok: boolean; error: string | null; name: string | null };
+
+/**
+ * Give the game another compatibility tool ("" clears the per-game choice: Steam's default again), then read it back
+ * until Steam has it: SpecifyCompatTool answers nothing. Applies at the game's next start.
+ */
+export const setCompatTool = async (appid: string, name: string): Promise<CompatResult> => {
+  if (!isSteamApp(appid)) return { ok: false, error: "not a Steam game", name: null };
+  try {
+    const apps = client()?.Apps;
+    if (!apps?.SpecifyCompatTool) return { ok: false, error: "Steam has no SpecifyCompatTool any more", name: null };
+    apps.SpecifyCompatTool(Number(appid), name);
+  } catch (e) {
+    return { ok: false, error: `Steam refused the Proton change: ${e instanceof Error ? e.message : String(e)}`, name: null };
+  }
+  let now: CompatNow | null = null;
+  for (let waited = 0; waited < 5000; waited += 250) {
+    await sleep(250);
+    try { await (window as any).appDetailsStore?.RequestAppDetails?.(Number(appid)); } catch { /* read below anyway */ }
+    now = await getCompat(appid);
+    if (now && (name ? now.name === name && now.priority >= 250 : now.priority < 250)) return { ok: true, error: null, name: now.name };
+  }
+  return { ok: false, error: "Steam did not take the Proton change.", name: now?.name ?? null };
+};
+
+/** The installed Steam games Steam knows of (collectionStore's local games); [] when it cannot tell. */
+export const installedSteamApps = (): RunningApp[] => {
+  try {
+    const apps = (window as any).collectionStore?.localGamesCollection?.allApps;
+    if (!Array.isArray(apps)) return [];
+    const out: RunningApp[] = [];
+    for (const a of apps) {
+      const appid = String(a?.appid ?? "");
+      if (a?.app_type !== 1 || !isSteamApp(appid)) continue;
+      if (a?.local_per_client_data && a.local_per_client_data.installed === false) continue;
+      out.push({ appid, name: String(a.display_name || `App ${appid}`) });
+    }
+    return out;
+  } catch {
+    return [];
+  }
+};
+
+/** The Steam apps running now (Router.RunningApps); [] when Steam cannot tell. */
+export const runningApps = (): string[] => {
+  try {
+    const apps = (Router as any)?.RunningApps;
+    return Array.isArray(apps) ? apps.map((a: any) => String(a?.appid ?? "")).filter(isSteamApp) : [];
+  } catch {
+    return [];
+  }
+};
+
+/** cb(appid, running, instance) on every app start and exit (Steam's lifetime notifications); returns the stop. */
+export const watchLifetime = (cb: (appid: string, running: boolean, instance: number) => void): (() => void) => {
+  let reg: { unregister(): void } | null = null;
+  try {
+    reg = client()?.GameSessions?.RegisterForAppLifetimeNotifications?.((n: any) => {
+      try { cb(String(n?.unAppID ?? ""), !!n?.bRunning, Number(n?.nInstanceID ?? 0)); } catch { /* a dead listener */ }
+    }) ?? null;
+  } catch {
+    reg = null;
+  }
+  return () => { try { reg?.unregister(); } catch { /* already gone */ } };
+};

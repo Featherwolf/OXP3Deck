@@ -220,7 +220,24 @@ class KnownIssuesTest(GameBase):
             for i in issues:
                 self.assertTrue(i["source"], appid)
                 self.assertLessEqual(len(i["line"]), 80, i["line"])
-                self.assertEqual(set(i), {"id", "fg_crash", "fsr_risk", "label", "line", "detail", "source"})
+                self.assertEqual(set(i), {"id", "fg_crash", "fsr_risk", "label", "line", "detail", "source",
+                                          "auto_drop", "auto_never"})
+
+    def test_automatic_setup_fields(self):
+        """auto_drop / auto_never: tuples of managed keys in every entry, copied by known_issues (DESIGN.md
+        "Automatic setup")."""
+        for appid, issues in games.KNOWN_ISSUES.items():
+            for i in issues:
+                for field in ("auto_drop", "auto_never"):
+                    self.assertIsInstance(i[field], tuple, (appid, field))
+                    self.assertTrue(set(i[field]) <= set(games.MANAGED_KEYS), (appid, field))
+            for i in games.known_issues(appid):
+                self.assertIsInstance(i["auto_drop"], tuple)
+        mh = games.known_issues(MH_WILDS)[0]
+        self.assertEqual((mh["auto_drop"], mh["auto_never"]), (("XESS_FG", "FSR", "FSR_FG"), ("XESS", "FSR")))
+        w = games.known_issues(WITCHER)[0]
+        self.assertEqual((w["auto_drop"], w["auto_never"]), (("FSR", "FSR_FG"), ("FSR",)))
+        self.assertEqual(games.known_issues("10"), [])
 
     def test_other_games_have_none(self):
         self.assertEqual(games.known_issues("10"), [])
