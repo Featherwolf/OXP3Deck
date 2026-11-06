@@ -47,23 +47,23 @@ KNOWN_ISSUES: dict[str, tuple[dict, ...]] = {
                   "github.com/optiscaler/OptiScaler/wiki/Monster-Hunter-Wilds",
     },),
     "292030": ({
-        "id": "xell12", "fg_crash": False, "fsr_risk": False,
-        "label": "Frame generation may not start",
-        "line": "Its XeLL 1.2 refuses the add-on's GPU report, so frame gen stays off.",
-        "detail": "The Witcher 3 ships Intel's XeSS SDK 2.1.1 files, with XeLL 1.2.1.13. That XeLL does not check "
-                  "for Wine: when the GPU shows as Intel it asks the xess-xmx-linux add-on for the GPU generation and "
-                  "accepts only 1270–1276 and 1300. The add-on reports 30 on Panther Lake, so XeLL stops (\"XeLL "
-                  "context creation failed - unsupported device\") and XeSS frame generation never starts: the "
-                  "menu option does nothing. On SteamOS the game most likely ran on Valve's Proton, where XeSS "
-                  "version: Latest swaps in XeLL 1.3.2.10, which sees Wine and keeps its own context. What to try: "
-                  "1. Pick Proton Experimental for the game (it gets the add-on and the hook), then XeSS version: "
-                  "Latest and Save XeSS logs. 2. A quick test on proton-cachyos: Compatibility mode (XeLL and frame "
-                  "generation then take the cross-vendor path: frame generation 2x, upscaling on the slower mode; "
-                  "not verified). 3. Experimental: IGDEXT_GTGEN=1300 in the launch options makes the add-on report a "
-                  "generation XeLL 1.2 accepts (affects every caller; untested). proton-cachyos 11.0-20261005 hides "
-                  "Wine from this game, so even with its hook XeLL 1.3 refuses the GPU there too.",
-        "source": "XeLL 1.2.1.13 disassembly (xellAILIsSupportedDevice); xess-xmx-linux shim GpuInfo.cpp "
-                  "(GTGeneration 30); proton-cachyos 11.0-20261005 release notes",
+        "id": "fg_no_gain", "fg_crash": False, "fsr_risk": False,
+        "label": "XeSS frame generation does not add fps",
+        "line": "XeSS frame gen added no fps on GE-Proton here. Try Proton Experimental.",
+        "detail": "Tested on the ONEXPLAYER 3 (Arc B390, GE-Proton11-11, xess-xmx-linux 20261104, November 2026): "
+                  "about 50 fps with XeSS frame generation on or off in all three set-ups: Intel's newer libraries "
+                  "(XESS=latest: frame generation refuses every frame, \"Latency reduction is not enabled\", -15, "
+                  "although the game turns Xe Low Latency on), the game's own libraries with IGDEXT_GTGEN=1300 "
+                  "(frame generation is never created), and the cross-vendor path without the add-on "
+                  "(force_vk_vendor=-1). XeLL also logs \"Marker already submitted\" every frame. Windows users "
+                  "with Intel GPUs report the same since patch 5.00 (the counter does not rise or motion stays at "
+                  "the base rate; still open with Intel). It is reported working on SteamOS with the same chip, where "
+                  "Valve's Proton is the main difference still untested here, so try Proton Experimental first. XeSS "
+                  "frame generation needs DirectX 12 (-dx12) and borderless to stay on at all. What works: XeSS "
+                  "upscaling on XMX (no extra launch options), and the game's FSR frame generation, which Windows "
+                  "users report as smooth on Intel. Leave FSR=xess and FSR_FG off for this game.",
+        "source": "owner tests with shim logs (igdext_xefg.log, igdext_xell.log), 2026-11-05/06; Intel IGCIT #1572; "
+                  "earlier XeLL 1.2.1.13 analysis",
     },),
 }
 

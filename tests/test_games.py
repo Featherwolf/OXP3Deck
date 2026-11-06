@@ -82,7 +82,7 @@ class GameInfoTest(GameBase):
         # no hook on a system Proton: XESS=latest does nothing there (xess-research: the old line was wrong)
         self.assertIn("needs the Proton hook, which proton-cachyos-slr does not have: pick Proton Experimental", advice)
         self.assertNotIn("XESS=latest swaps in XeLL 1.3.2.10 while the game runs", advice)
-        self.assertEqual([i["id"] for i in g["known_issues"]], ["xell12"])
+        self.assertEqual([i["id"] for i in g["known_issues"]], ["fg_no_gain"])
         self.assertFalse(g["fg_crash"])
         self.assertTrue(g["has_fg"])
 
@@ -224,7 +224,7 @@ class KnownIssuesTest(GameBase):
 
     def test_other_games_have_none(self):
         self.assertEqual(games.known_issues("10"), [])
-        self.assertEqual(self.info()["known_issues"][0]["id"], "xell12")
+        self.assertEqual(self.info()["known_issues"][0]["id"], "fg_no_gain")
 
 
 class NeverFrameGenerationTest(GameBase):
