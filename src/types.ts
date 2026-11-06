@@ -229,6 +229,16 @@ export type OptiInfo = {
   fit?: "good" | "poor" | null;                         // known: the wiki's setup fits this device less well
   optifg_ini?: Record<string, string>;                  // the game's own OptiFG keys ({"OptiFG_HUDLimit": "1"})
   choices_stale?: boolean;                              // installed, but its saved choices are no longer offered
+  fg_caps?: OptiFgCaps | null;                          // what the game's files allow (null: not DirectX 12, not searched)
+};
+/** Which frame-generation inputs the game's own files allow (DESIGN.md "Frame-generation inputs from the files"). */
+export type OptiFgFile = { name: string; rel: string | null; version: string | null; input: OptiFgInput };
+export type OptiFgCaps = {
+  inputs: OptiFgInput[];                                // in the order of preference: xefg, fsrfg, dlssg, upscaler
+  why: Partial<Record<OptiFgInput, string>>;            // one sentence per input: the file (and version) or what is missing
+  line: string;                                         // ≤ 80 characters ("Streamline 1: DLSS frame generation isn't possible here.")
+  sl1: boolean;                                         // Streamline 1 found
+  files: OptiFgFile[];                                  // the files found, with their versions
 };
 export type OptiInfoRes = Res & { opti: OptiInfo | null };
 export type OptiJobResult = Res & {

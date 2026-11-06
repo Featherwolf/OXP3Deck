@@ -396,3 +396,110 @@ def pick_proxy(api: str, names: set[str], table: tuple[str, ...] | None = None,
         if imported:
             return imported[0], taken
     return free[0], taken
+
+
+# ---- which frame-generation inputs the game's own files allow (DESIGN.md "Frame-generation inputs from the files") --
+
+# The automatic default, most preferred first: the game's own XeSS frame generation (on Intel its output is XeFG
+# anyway, and OptiScaler gets the game's HUD-less image and XeLL), then its FSR 3.1 frame generation and its DLSS
+# frame generation (both native inputs with the HUD-less image, OptiScaler's wiki: "Always best to use native FG
+# inputs"), then OptiFG ("upscaler"), which works without any game frame generation but needs the HUD fix.
+FG_ORDER = ("xefg", "fsrfg", "dlssg", "upscaler")
+# The files that show each input (lower case). FSR: FidelityFX 3.1.4+ ships frame generation as its own DLL;
+# 3.1.0-3.1.3's amd_fidelityfx_dx12.dll holds upscaling and frame generation together (OptiScaler DllNames.h
+# ffxDx12 / ffxDx12FG; OptiScaler.ini FGOutput fsrfg). DLSS: Streamline's sl.interposer.dll plus its DLSS-G plugin
+# (sl.dlss_g.dll) or NVIDIA's nvngx_dlssg.dll.
+FG_FILES = {"libxess_fg.dll": "xefg", "amd_fidelityfx_framegeneration_dx12.dll": "fsrfg",
+            "amd_fidelityfx_dx12.dll": "fsrfg", "sl.interposer.dll": "dlssg", "sl.dlss_g.dll": "dlssg",
+            "nvngx_dlssg.dll": "dlssg"}
+FG_LABELS = {"xefg": "XeSS frame generation", "fsrfg": "FSR frame generation", "dlssg": "DLSS frame generation",
+             "upscaler": "OptiFG (OptiScaler's own frame generation)"}
+# OptiScaler's "DLSSG via SL" input needs Streamline 2 or newer (wiki Frame-Generation-Options: "Only supports DX12
+# and Streamline 2+ games", "It's not possible to update SL1 games to SL2"; Config.cpp FGCanFollowGame:
+# streamlineVersion.major >= 2, the major of sl.interposer.dll's file version, Streamline_Hooks.cpp).
+SL_MIN_MAJOR = 2
+
+
+def _major(v: str | None) -> int | None:
+    try:
+        return int(str(v).split(".")[0]) if v else None
+    except ValueError:
+        return None
+
+
+def fg_caps(found: dict[str, dict]) -> dict:
+    """Pure: the frame-generation inputs a DirectX 12 game's files allow. found: {lower file name: {rel, version}}
+    (version None when unread). {inputs: in FG_ORDER, upscaler always; why: {input: reason}; line: one short line
+    (<= 80 characters) saying which and why; sl1: Streamline 1 found; files: [{name, rel, version, input}]}."""
+    why: dict[str, str] = {}
+    ok: list[str] = []
+
+    def has(*names):
+        return next((n for n in names if n in found), None)
+
+    def ver(n):
+        v = found[n].get("version")
+        return f"{n} {v}" if v else n
+
+    x = has("libxess_fg.dll")
+    if x:
+        ok.append("xefg")
+        why["xefg"] = f"{ver(x)}: the game has XeSS frame generation."
+    else:
+        why["xefg"] = "No libxess_fg.dll: the game has no XeSS frame generation."
+    f = has("amd_fidelityfx_framegeneration_dx12.dll", "amd_fidelityfx_dx12.dll")
+    if f:
+        ok.append("fsrfg")
+        why["fsrfg"] = f"{ver(f)}: the game has FSR 3.1 frame generation (pick it in the game, if it offers it)."
+    else:
+        why["fsrfg"] = "No amd_fidelityfx_framegeneration_dx12.dll or amd_fidelityfx_dx12.dll: the game has no " \
+                       "FSR 3.1 frame generation."
+    sl = found.get("sl.interposer.dll")
+    g = has("sl.dlss_g.dll", "nvngx_dlssg.dll")
+    major = _major(sl.get("version")) if sl else None
+    sl1 = sl is not None and major is not None and major < SL_MIN_MAJOR
+    if sl is None:
+        why["dlssg"] = "No sl.interposer.dll: the game has no Streamline DLSS frame generation."
+    elif sl1:
+        why["dlssg"] = f"Streamline {major} ({ver('sl.interposer.dll')}): OptiScaler's DLSS frame generation input " \
+                       "needs Streamline 2 or newer, so it isn't possible here."
+    elif not g:
+        why["dlssg"] = f"{ver('sl.interposer.dll')} without sl.dlss_g.dll or nvngx_dlssg.dll: the game has no DLSS " \
+                       "frame generation."
+    else:
+        ok.append("dlssg")
+        why["dlssg"] = f"{ver('sl.interposer.dll')} and {ver(g)}: Streamline 2 or newer with DLSS frame generation." \
+            if major is not None else f"sl.interposer.dll (version unread) and {ver(g)}: DLSS frame generation."
+    ok.append("upscaler")
+    why["upscaler"] = "Always possible in DirectX 12: OptiScaler makes the frames from the upscaler's input."
+    inputs = [i for i in FG_ORDER if i in ok]
+    if sl1:
+        line = "Streamline 1: DLSS frame generation isn't possible here."
+    elif inputs == ["upscaler"]:
+        line = "No frame generation in the game's files: OptiScaler makes its own."
+    else:
+        names = [{"xefg": "XeSS", "fsrfg": "FSR", "dlssg": "DLSS"}[i] for i in inputs if i != "upscaler"]
+        line = f"The game's files have {' and '.join(names) if len(names) < 3 else 'XeSS, FSR and DLSS'} frame " \
+               "generation."
+    files = [{"name": n, "rel": found[n].get("rel"), "version": found[n].get("version"), "input": FG_FILES[n]}
+             for n in FG_FILES if n in found]
+    return {"inputs": inputs, "why": why, "line": line, "sl1": sl1, "files": files}
+
+
+def fg_narrow(inputs: tuple[str, ...], pinned: str, caps: dict | None, generic: bool) -> tuple[tuple, str]:
+    """Pure: (the inputs offered, the default input) once the files are known. A known or tested setup keeps its
+    documented inputs and order, minus the ones the files rule out; a generic setup offers what the files allow, in
+    FG_ORDER. The default: the pinned input when still offered (a generic setup: the first in FG_ORDER), else the
+    first offered in FG_ORDER. caps None (the files could not be searched): unchanged."""
+    if caps is None or not inputs:
+        return tuple(inputs), pinned
+    allowed = set(caps["inputs"])
+    if generic:
+        out = tuple(i for i in FG_ORDER if i in allowed and i in inputs)
+    else:
+        out = tuple(i for i in inputs if i in allowed)
+    if not out:
+        out = ("upscaler",)
+    if pinned in out and not generic:
+        return out, pinned
+    return out, next(i for i in FG_ORDER if i in out)

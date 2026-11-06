@@ -8,6 +8,7 @@ import json
 import os
 import shutil
 import stat
+import struct
 import tempfile
 import unittest
 from unittest import mock
@@ -16,6 +17,19 @@ from oxp3deck import downloads, optigames, optiscaler, pe, steamlib, sysexec, us
 from tests.test_steamlib import ROOT, World, write
 
 WITCHER = "292030"
+
+
+def dll(version, tag=b""):
+    """A fake DLL whose VS_FIXEDFILEINFO says `version` (pe.file_version reads it)."""
+    a, b, c, d = version
+    return b"MZ" + tag + b"\0" * 64 + b"VS_VERSION_INFO\0" + struct.pack(
+        "<IIIIII", 0xFEEF04BD, 0x00010000, (a << 16) | b, (c << 16) | d, 0, 0) + b"\0" * 32
+
+
+# The Witcher 3's frame-generation files in bin/x64_dx12: its XeSS frame generation, and Streamline 1 with DLSS-G
+# (DESIGN.md "Frame-generation inputs from the files").
+WITCHER_FG = {"libxess_fg.dll": dll((1, 1, 0, 39), b"xefg"), "sl.interposer.dll": dll((1, 5, 10, 0), b"sl"),
+              "nvngx_dlssg.dll": dll((3, 1, 10, 0), b"dlssg")}
 BUILD = "v10-20261105"
 OWN_XESS = b"the game's own libxess 1.3"
 
@@ -191,7 +205,11 @@ class Base(unittest.TestCase):
         write(os.path.join(self.game, "bin/x64_dx12/witcher3.exe"), b"MZ dx12")
         write(os.path.join(self.game, "bin/x64_dx12/libxess.dll"), OWN_XESS)
         write(os.path.join(self.game, "bin/x64_dx12/libxell.dll"), b"MZ xell 1.2.1.13")
+        for name, data in WITCHER_FG.items():
+            write(os.path.join(self.game, "bin/x64_dx12", name), data)
         own_tree(self.game, self.w.uid)
+        optiscaler.forget_listing()
+        self.addCleanup(optiscaler.forget_listing)
         self.folder = os.path.join(self.game, "bin/x64_dx12")
         self.shell = FakeShell(self.w.uid)
         p = mock.patch.object(sysexec, "run", self.shell)
@@ -552,7 +570,8 @@ class InstallTest(Base):
                                          "dll_override": "dxgi", "dxvk_config": None, "args": ["-dx12"]})
         names = sorted(os.listdir(self.folder))
         self.assertEqual(names, [".oxp3deck-optiscaler", "OptiScaler", "OptiScaler.ini", "dxgi.dll", "libxell.dll",
-                                 "libxess.dll", "witcher3.exe"])
+                                 "libxess.dll", "libxess_fg.dll", "nvngx_dlssg.dll", "sl.interposer.dll",
+                                 "witcher3.exe"])
         self.assertEqual(sorted(os.listdir(os.path.join(self.folder, "OptiScaler"))),
                          ["D3D12_Optiscaler", "libxell.dll", "libxess.dll", "libxess_fg.dll"])   # no .bat
         self.assertEqual(self.read("dxgi.dll"), PACKAGE["OptiScaler.dll"])
@@ -878,7 +897,7 @@ class AutoTest(Base):
 
     def test_choices_picked_by_hand_are_not_moved(self):
         for origin, extra in (("user", {}), ("auto", {"picked": True}),
-                              ("auto", {"choices": self.choices(fg=3, fg_input="dlssg")})):
+                              ("user", {"choices": self.choices(fg=3, fg_input="dlssg")})):
             with self.subTest(origin=origin, extra=extra):
                 self.old_install(origin, **extra)
                 before = self.record()["games"][WITCHER]
@@ -887,6 +906,39 @@ class AutoTest(Base):
                 self.assertEqual(self.record()["games"][WITCHER], before)
                 self.assertTrue(optiscaler.info(self.ctx, WITCHER)["opti"]["choices_stale"])
                 self.assertTrue(self.remove()["ok"])
+
+    def test_an_input_the_files_rule_out_is_moved_keeping_the_rest(self):
+        """Not the old automatic choices, but an input the game's files cannot support (Streamline 1: dlssg): the
+        same choices with the setup's default input (DESIGN.md "Frame-generation inputs from the files")."""
+        self.old_install("auto", choices=self.choices(fg=3, fg_input="dlssg"))
+        self.assertTrue(optiscaler.migrate_auto(self.ctx, WITCHER))
+        self.assertEqual(self.record()["games"][WITCHER]["choices"], self.choices(fg=3, fg_input="xefg"))
+        self.assertIn("FGInput=xefg", self.ini())
+        self.assertFalse(optiscaler.migrate_auto(self.ctx, WITCHER))          # once
+        self.assertTrue(self.remove()["ok"])
+
+    def test_options_keep_choices_picked_by_hand_on_an_input_ruled_out(self):
+        """The overlay switch rewrites every ini; a hand-picked input the files rule out stays in it (the game page
+        offers "Write these choices"), not the setup's defaults."""
+        self.old_install("user", choices=self.choices(upscaler="fsr31", fg=3, fg_input="dlssg"))
+        self.assertTrue(optiscaler.options(self.ctx, {"overlay": True})["ok"])
+        ini = self.ini()
+        self.assertIn("FGInput=dlssg", ini)
+        self.assertIn("ShowFps=true", ini)
+        self.assertEqual(self.record()["games"][WITCHER]["choices"],
+                         self.choices(upscaler="fsr31", fg=3, fg_input="dlssg"))
+        self.assertTrue(self.remove()["ok"])
+
+    def test_update_keeps_hand_picked_choices_and_the_mark(self):
+        """Update on an input the files rule out keeps the upscaler and multiplier (default input), and choices
+        picked by hand stay marked, so migrate_auto never moves them afterwards."""
+        self.old_install("auto", choices=self.choices(upscaler="fsr31", fg=3, fg_input="dlssg"), picked=True)
+        res = optiscaler.update(self.ctx, None, self.job, WITCHER)
+        self.assertTrue(res["ok"], res)
+        g = self.record()["games"][WITCHER]
+        self.assertEqual((g["choices"], g.get("picked"), g["origin"]),
+                         (self.choices(upscaler="fsr31", fg=3, fg_input="xefg"), True, "auto"))
+        self.assertTrue(self.remove()["ok"])
 
     def test_set_choices_marks_them_picked(self):
         self.old_install("auto")
@@ -1185,7 +1237,9 @@ class AnyGameTest(Base):
         game = self.make("1091500", "Cyberpunk 2077", {
             "REDprelauncher.exe": make_pe(["d3d11.dll"], pad=50000),
             "bin/x64/Cyberpunk2077.exe": make_pe(["d3d12.dll"], pad=1000),
-            "bin/x64/nvngx_dlss.dll": b"MZ"})
+            "bin/x64/nvngx_dlss.dll": b"MZ",
+            "bin/x64/sl.interposer.dll": dll((2, 7, 30, 0)), "bin/x64/sl.dlss_g.dll": dll((2, 7, 30, 0)),
+            "bin/x64/nvngx_dlssg.dll": dll((3, 10, 0, 0)), "bin/x64/amd_fidelityfx_dx12.dll": dll((1, 1, 3, 0))})
         e, _why = optiscaler.resolve(self.ctx, "1091500")
         self.assertEqual((e["kind"], e["folder"], e["exe"], e["api"], e["proxy"], e["pick"]),
                          ("known", "bin/x64", "Cyberpunk2077.exe", "dx12", "dxgi", "XeSS"))
@@ -1202,6 +1256,124 @@ class AnyGameTest(Base):
         self.assertTrue(res["ok"], res)
         self.assertEqual(res["launch"]["dll_override"], "wininet")
         self.assertIn("pick XeSS and DLSS frame generation", res["next"])
+
+    # ---- frame-generation inputs from the game's files (DESIGN.md "Frame-generation inputs from the files") ----
+
+    FG_GAMES = {
+        # name: (files, inputs offered, default input, sl1)
+        "sl1": ({"sl.interposer.dll": dll((1, 5, 10, 0)), "nvngx_dlssg.dll": dll((3, 1, 0, 0))},
+                ("upscaler",), "upscaler", True),
+        "sl2": ({"sl.interposer.dll": dll((2, 7, 30, 0)), "sl.dlss_g.dll": dll((2, 7, 30, 0))},
+                ("dlssg", "upscaler"), "dlssg", False),
+        "xefg": ({"libxess_fg.dll": dll((1, 2, 0, 13)), "sl.interposer.dll": dll((2, 4, 0, 0)),
+                  "nvngx_dlssg.dll": dll((3, 7, 0, 0))}, ("xefg", "dlssg", "upscaler"), "xefg", False),
+        "fsrfg": ({"amd_fidelityfx_framegeneration_dx12.dll": dll((1, 1, 4, 0))}, ("fsrfg", "upscaler"), "fsrfg",
+                  False),
+        "fsr31": ({"amd_fidelityfx_dx12.dll": dll((1, 1, 2, 0)), "sl.interposer.dll": dll((2, 1, 0, 0))},
+                  ("fsrfg", "upscaler"), "fsrfg", False),         # Streamline 2 without DLSS-G: no dlssg
+        "none": ({"nvngx_dlss.dll": b"MZ dlss"}, ("upscaler",), "upscaler", False),
+    }
+
+    def fg_game(self, files, appid="999010", deep=False):
+        """A generic DirectX 12 game; its frame-generation files next to the exe, or (deep) in an Unreal plugin
+        folder nine levels down."""
+        where = "Engine/Plugins/Runtime/Nvidia/Streamline/Binaries/ThirdParty/Win64/" if deep else "bin/"
+        tree = {"bin/game.exe": make_pe(["kernel32.dll", "d3d12.dll"], pad=9000)}
+        tree.update({where + n: d for n, d in files.items()})
+        return self.make(appid, f"FG Game {appid}", tree)
+
+    def test_generic_inputs_follow_the_files(self):
+        for n, (name, (files, inputs, default, sl1)) in enumerate(self.FG_GAMES.items()):
+            with self.subTest(name=name):
+                appid = str(999100 + n)
+                self.fg_game(files, appid)
+                optiscaler.forget_listing()
+                e, why = optiscaler.resolve(self.ctx, appid)
+                self.assertIsNone(why)
+                self.assertEqual((e["fg_inputs"], e["fg_input"]), (inputs, default))
+                info = optiscaler.info(self.ctx, appid)["opti"]
+                caps = info["fg_caps"]
+                self.assertEqual((info["fg_inputs"], info["defaults"]["fg_input"]), (list(inputs), default))
+                self.assertEqual(caps["sl1"], sl1)
+                self.assertLessEqual(len(caps["line"]), 80)
+                if sl1:
+                    self.assertEqual(caps["line"], "Streamline 1: DLSS frame generation isn't possible here.")
+                    self.assertIn("Streamline 2 or newer", caps["why"]["dlssg"])
+                self.assertEqual({f["name"] for f in caps["files"]}, set(files) - {"nvngx_dlss.dll"})
+                for f in caps["files"]:
+                    self.assertEqual((f["rel"], f["version"] is not None), (f"bin/{f['name']}", True))
+                for bad in set(optigames.FG_INPUTS) - set(inputs):
+                    why = optiscaler.check_choices(e, self.choices(fg=2, fg_input=bad))[1]
+                    self.assertIn(f"({bad}) isn't possible", why)
+                    self.assertIsNotNone(optiscaler.check_choices(e, self.choices(fg=0, fg_input=bad))[0])
+
+    def test_the_files_are_found_deep_in_an_unreal_plugin(self):
+        self.fg_game({"sl.interposer.dll": dll((2, 7, 30, 0)), "sl.dlss_g.dll": dll((2, 7, 30, 0))}, deep=True)
+        e, _why = optiscaler.resolve(self.ctx, "999010")
+        self.assertEqual(e["fg_inputs"], ("dlssg", "upscaler"))
+        self.assertTrue(e["fg_caps"]["files"][0]["rel"].startswith("Engine/Plugins/Runtime/Nvidia/Streamline/"))
+
+    def test_a_search_cut_short_rules_nothing_out(self):
+        """FG_SCAN_MAX reached: a file not found may be in the part not searched, so the listed inputs stay, even
+        when some files were found before the cut."""
+        self.fg_game({"amd_fidelityfx_dx12.dll": dll((1, 1, 2, 0))}, deep=False)
+        with mock.patch.object(optiscaler, "FG_SCAN_MAX", 1):
+            optiscaler.forget_listing()
+            e, _why = optiscaler.resolve(self.ctx, "999010")
+        self.assertIsNone(e["fg_caps"])
+        self.assertEqual(e["fg_inputs"], tuple(optiscaler._generic_base("1", "x")["fg_inputs"]))
+
+    def test_the_exe_folder_is_read_when_the_walk_cannot_reach_it(self):
+        """An exe folder outside the install folder (a link in the path): its own files still count."""
+        root = tempfile.mkdtemp(dir=self.tmp.name)
+        exe_dir = os.path.join(root, "elsewhere")
+        write(os.path.join(exe_dir, "libxess_fg.dll"), dll((1, 2, 0, 0)))
+        os.makedirs(os.path.join(root, "install"))
+        optiscaler.forget_listing()
+        found, searched = optiscaler._fg_found(os.path.join(root, "install"), exe_dir)
+        self.assertTrue(searched)
+        self.assertEqual(found["libxess_fg.dll"]["rel"], "libxess_fg.dll")
+        self.assertEqual(found["libxess_fg.dll"]["version"], "1.2.0.0")
+
+    def test_optiscalers_own_files_do_not_count(self):
+        """OptiScaler's own libxess_fg.dll (in OptiScaler/ after an install) is not the game's XeSS FG."""
+        self.fg_game({"OptiScaler/libxess_fg.dll": dll((1, 2, 0, 0)), ".oxp3deck-optiscaler/backup/libxess_fg.dll":
+                      dll((1, 2, 0, 0))})
+        e, _why = optiscaler.resolve(self.ctx, "999010")
+        self.assertEqual(e["fg_inputs"], ("upscaler",))
+
+    def test_a_known_entrys_pinned_input_the_files_rule_out_is_overridden(self):
+        """Cyberpunk 2077's documented input is dlssg; with Streamline 1 files the check takes OptiFG, notes it
+        and logs it."""
+        self.make("1091500", "Cyberpunk 2077", {
+            "bin/x64/Cyberpunk2077.exe": make_pe(["d3d12.dll"], pad=1000),
+            "bin/x64/sl.interposer.dll": dll((1, 5, 0, 0)), "bin/x64/nvngx_dlssg.dll": dll((3, 1, 0, 0)),
+            "bin/x64/libxess_fg.dll": dll((1, 2, 0, 0))})
+        with self.assertLogs("oxp3deck", "INFO") as logs:
+            e, _why = optiscaler.resolve(self.ctx, "1091500")
+        self.assertEqual((e["kind"], e["fg_inputs"], e["fg_input"]), ("known", ("upscaler",), "upscaler"))
+        self.assertTrue(any("input dlssg overridden" in m for m in logs.output))
+        self.assertTrue(any("DLSS frame generation isn't possible with this game's files" in n for n in e["notes"]))
+        # the wiki does not document xefg for it, so the files' XeSS FG does not add it
+        self.assertNotIn("xefg", e["fg_inputs"])
+
+    def test_witcher_without_xess_fg_falls_back_to_optifg(self):
+        os.unlink(os.path.join(self.folder, "libxess_fg.dll"))
+        optiscaler.forget_listing()
+        e, _why = optiscaler.resolve(self.ctx, WITCHER)
+        self.assertEqual((e["fg_inputs"], e["fg_input"]), (("upscaler",), "upscaler"))
+        self.assertEqual(optiscaler.defaults(e), {"upscaler": "xess", "fg": 2, "fg_input": "upscaler"})
+        self.assertEqual(optiscaler.auto_choices(e), {"upscaler": "xess", "fg": 2, "fg_input": "upscaler"})
+        self.assertEqual(e["fg_caps"]["line"], "Streamline 1: DLSS frame generation isn't possible here.")
+
+    def test_witcher_with_its_files(self):
+        e, _why = optiscaler.resolve(self.ctx, WITCHER)
+        self.assertEqual((e["fg_inputs"], e["fg_input"]), (("xefg", "upscaler"), "xefg"))
+        caps = e["fg_caps"]
+        self.assertEqual(caps["inputs"], ["xefg", "upscaler"])
+        self.assertTrue(caps["sl1"])
+        self.assertEqual({f["name"]: f["version"] for f in caps["files"]},
+                         {"libxess_fg.dll": "1.1.0.39", "sl.interposer.dll": "1.5.10.0", "nvngx_dlssg.dll": "3.1.10.0"})
 
     def test_a_known_game_whose_exe_moved_gets_the_generic_setup(self):
         self.make("1091500", "Cyberpunk 2077", {"bin/x64/Cyberpunk2077_new.exe": make_pe(["d3d12.dll"])})
@@ -1273,6 +1445,34 @@ class AnyGameTest(Base):
 
 
 class OptigamesTest(unittest.TestCase):
+    def test_fg_caps_and_narrow(self):
+        caps = optigames.fg_caps({"sl.interposer.dll": {"rel": "sl.interposer.dll", "version": "2.7.30.0"},
+                                  "nvngx_dlssg.dll": {"rel": "nvngx_dlssg.dll", "version": None},
+                                  "libxess_fg.dll": {"rel": "libxess_fg.dll", "version": "1.2.0.0"},
+                                  "amd_fidelityfx_dx12.dll": {"rel": "x/amd_fidelityfx_dx12.dll", "version": None}})
+        self.assertEqual(caps["inputs"], ["xefg", "fsrfg", "dlssg", "upscaler"])     # the order of preference
+        self.assertEqual(caps["line"], "The game's files have XeSS, FSR and DLSS frame generation.")
+        self.assertEqual(optigames.fg_narrow(("dlssg", "fsrfg", "xefg", "upscaler"), "upscaler", caps, True),
+                         (("xefg", "fsrfg", "dlssg", "upscaler"), "xefg"))
+        # a table entry keeps its order and its pinned input while the files allow it
+        self.assertEqual(optigames.fg_narrow(("dlssg", "upscaler"), "dlssg", caps, False),
+                         (("dlssg", "upscaler"), "dlssg"))
+        sl1 = optigames.fg_caps({"sl.interposer.dll": {"rel": "a", "version": "1.5.10.0"},
+                                 "sl.dlss_g.dll": {"rel": "b", "version": "1.5.10.0"}})
+        self.assertEqual((sl1["inputs"], sl1["sl1"]), (["upscaler"], True))
+        self.assertEqual(optigames.fg_narrow(("dlssg", "upscaler"), "dlssg", sl1, False), (("upscaler",), "upscaler"))
+        self.assertEqual(optigames.fg_narrow(("dlssg",), "dlssg", sl1, False), (("upscaler",), "upscaler"))
+        self.assertEqual(optigames.fg_narrow(("dlssg", "upscaler"), "dlssg", None, False),
+                         (("dlssg", "upscaler"), "dlssg"))               # not searched: unchanged
+        none = optigames.fg_caps({})
+        self.assertEqual((none["inputs"], none["line"]),
+                         (["upscaler"], "No frame generation in the game's files: OptiScaler makes its own."))
+        unread = optigames.fg_caps({"sl.interposer.dll": {"rel": "a", "version": None},
+                                    "sl.dlss_g.dll": {"rel": "b", "version": None}})
+        self.assertIn("dlssg", unread["inputs"])                    # version unread: not ruled out
+        self.assertEqual(optigames.FG_ORDER, ("xefg", "fsrfg", "dlssg", "upscaler"))
+        self.assertEqual(set(optigames.FG_ORDER), set(optigames.FG_INPUTS))
+
     def test_pick_exe(self):
         files = [("bin/x64/witcher3.exe", 100), ("bin/x64_dx12/witcher3.exe", 100), ("REDprelauncher.exe", 500)]
         self.assertEqual(optigames.pick_exe(files, set()), ("bin/x64_dx12", "witcher3.exe", "largest"))

@@ -4,7 +4,7 @@
 // never writes launch options; components/OptiControls.tsx reads and writes Steam.
 import { hasArg, hasListEntry, managed, type ManagedKey, MANAGED_KEYS, parse, setArg, setListEntry, setManaged } from "./launchopts";
 import type { EffectSpec } from "./effects";
-import type { GameInfo, LaunchPlan, OptiApi, OptiChoices, OptiFg, OptiFgInput, OptiInfo, OptiKind, OptiUpscaler } from "./types";
+import type { GameInfo, LaunchPlan, OptiApi, OptiChoices, OptiFg, OptiFgCaps, OptiFgInput, OptiInfo, OptiKind, OptiUpscaler } from "./types";
 
 /** The keys an OptiScaler game drops (DESIGN.md "With xess-xmx-linux"); the backend's plan says it too. */
 export const OPTI_DROPPED: readonly ManagedKey[] = ["XESS", "FSR", "FSR_FG", "force_vk_vendor"];
@@ -362,12 +362,69 @@ export const CHECKLIST_HELP = [
   "If XeSS frame generation still adds no fps: pick \"None: OptiScaler makes its own\" as the game setting it replaces (Games tab), XeSS or DLSS in the game, and keep gamma and brightness at their defaults.",
   "If the picture flickers with DLSS: pick XeSS in the game (OptiScaler's wiki, Known Issues).",
 ];
-/** The same for a known or generic setup. */
-export const checklistHelp = (setup: OptiSetup): string[] => setup.kind === "tested" ? CHECKLIST_HELP : [
+/** What to do when the game setting a frame-generation input needs is missing or greyed out (per input). */
+export const INPUT_HELP: Record<OptiFgInput, string> = {
+  dlssg: "If DLSS frame generation stays greyed out in the game, pick another game setting it replaces (Games tab): OptiScaler takes DLSS frame generation over only in Streamline 2 or newer games.",
+  fsrfg: "If the game has no FSR frame generation setting, its FSR files are for upscaling only: pick another game setting it replaces (Games tab).",
+  xefg: "If the game has no XeSS frame generation setting, or it stays greyed out, pick another game setting it replaces (Games tab).",
+  upscaler: "OptiFG: keep the game's frame generation off; OptiScaler's HUD fix is on. In Unreal Engine games pick DLSS or FSR in the game, not XeSS (OptiScaler's wiki: no depth with XeSS there).",
+};
+/** The same for a known or generic setup; `input`: the line for that frame-generation input too (with FG on). */
+export const checklistHelp = (setup: OptiSetup, input?: OptiFgInput, fg?: OptiFg): string[] => setup.kind === "tested"
+  ? [...CHECKLIST_HELP, ...(input && fg && input !== "xefg" && input !== "upscaler" ? [INPUT_HELP[input]] : [])] : [
+  ...(input && fg && fgPossible(setup) ? [INPUT_HELP[input]] : []),
   "If DLSS is greyed out in the game: pick FSR or XeSS. OXP3 Deck turns OptiScaler's GPU spoof off on Intel (with it XeSS runs on the slower path), so some games hide DLSS.",
   "If OptiScaler's menu never shows: the game may need another file name or setup. Remove OptiScaler; OptiScaler's wiki may have a page for the game.",
   ...(setup.kind === "generic" ? ["OptiScaler only works when the game has DLSS 2 or newer, FSR 2 or newer, or XeSS."] : []),
 ];
+
+// ---- frame-generation inputs from the game's files (DESIGN.md "Frame-generation inputs from the files") ------------
+
+/** The inputs the dropdown offers: the backend's fg_inputs (already narrowed to what the files allow), in its order. */
+export const offeredInputs = (info: OptiInfo | null | undefined): { data: OptiFgInput; label: string }[] => {
+  const want = Array.isArray(info?.fg_inputs) ? info.fg_inputs : [];
+  if (!want.length) return INPUTS;
+  return want.map((d) => INPUTS.find((i) => i.data === d)).filter((i): i is { data: OptiFgInput; label: string } => !!i);
+};
+
+/** A stored or answered fg_caps, else null. */
+export const readCaps = (v: unknown): OptiFgCaps | null => {
+  if (!v || typeof v !== "object") return null;
+  const o = v as Record<string, unknown>;
+  if (typeof o.line !== "string" || !Array.isArray(o.inputs)) return null;
+  const inputs = o.inputs.filter((i): i is OptiFgInput => INPUTS.some((x) => x.data === i));
+  const why: Partial<Record<OptiFgInput, string>> = {};
+  if (o.why && typeof o.why === "object") {
+    for (const [k, w] of Object.entries(o.why as Record<string, unknown>)) {
+      if (INPUTS.some((x) => x.data === k) && typeof w === "string") why[k as OptiFgInput] = w;
+    }
+  }
+  const files = (Array.isArray(o.files) ? o.files : []).filter((f): f is Record<string, unknown> => !!f && typeof f === "object")
+    .filter((f) => typeof f.name === "string" && INPUTS.some((x) => x.data === f.input))
+    .map((f) => ({ name: f.name as string, rel: typeof f.rel === "string" ? f.rel : null,
+      version: typeof f.version === "string" ? f.version : null, input: f.input as OptiFgInput }));
+  return { inputs, why, line: o.line.slice(0, 80), sl1: o.sl1 === true, files };
+};
+
+/** The one line up front under "Game setting it replaces": which inputs the files allow and why (≤ 80). */
+export const capsLine = (info: OptiInfo | null | undefined): string | null => readCaps(info?.fg_caps)?.line ?? null;
+
+/** Its Details: one sentence per input (offered or not, and why), then the files and versions found. */
+export const capsDetails = (info: OptiInfo | null | undefined): { body: string[]; lines: string[] } => {
+  const caps = readCaps(info?.fg_caps);
+  if (!caps) return { body: [], lines: [] };
+  const offered = new Set(offeredInputs(info).map((i) => i.data));
+  const body = [
+    "OXP3 Deck looks at the game's own files to see which of its frame-generation settings OptiScaler can take over, and offers only those. OptiFG (OptiScaler's own) is always possible in DirectX 12.",
+    ...INPUTS.map((i) => offered.has(i.data) ? `${i.label}: offered. ${caps.why[i.data] ?? ""}`.trim()
+      : caps.inputs.includes(i.data) ? `${i.label}: not offered: OptiScaler's wiki does not document it for this game.`
+      : `${i.label}: not offered. ${caps.why[i.data] ?? ""}`.trim()),
+    "The default is the first one offered in this order: XeSS frame generation (on Intel its output is XeSS frame generation anyway), FSR, DLSS, then OptiFG.",
+  ];
+  const lines = caps.files.length ? caps.files.map((f) => `${f.rel ?? f.name}${f.version ? ` ${f.version}` : " (no version)"}`)
+    : ["No frame-generation files found"];
+  return { body, lines };
+};
 
 /** The install row's line up front: what this setup is (≤ 80 characters). */
 export const installLine = (info: OptiInfo | null | undefined): string => {

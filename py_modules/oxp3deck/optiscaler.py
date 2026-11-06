@@ -288,8 +288,11 @@ def check_choices(e: dict | None, choices) -> tuple[dict | None, str | None]:
     if fg and e.get("api", "dx12") != "dx12":
         return None, f"OptiScaler: frame generation needs DirectX 12; {e['name']} runs in " \
                      f"{optigames.API_NAMES.get(e.get('api'), e.get('api'))}"
-    if inp not in (e["fg_inputs"] if fg else optigames.FG_INPUTS):
+    if inp not in optigames.FG_INPUTS:
         return None, f"OptiScaler: unknown frame generation input {str(inp)[:20]!r}"
+    if fg and inp not in e["fg_inputs"]:
+        return None, f"OptiScaler: {optigames.FG_LABELS[inp]} ({inp}) isn't possible for {e['name']}: " \
+                     f"{input_why(e, inp)}"
     return {"upscaler": up, "fg": fg, "fg_input": inp}, None
 
 
@@ -525,6 +528,7 @@ def _listing(install: str) -> dict:
 
 def forget_listing() -> None:
     _LISTINGS.clear()
+    _FG_FOUND.clear()
 
 
 def _generic_base(appid: str, name: str) -> dict:
@@ -593,6 +597,11 @@ def resolve(ctx, appid, *, fresh: bool = False) -> tuple[dict | None, str | None
         e.update(kind=kind, name=name, dir=g.get("folder"), proxy=g.get("proxy") or e.get("proxy"), taken=[])
         if isinstance(g.get("exe"), str):
             e["exe"] = g["exe"]
+        folder = e["dir"] if isinstance(e["dir"], str) else None
+        if folder:
+            _with_fg_caps(ctx, appid, e, _install_root(ctx, folder))
+        else:
+            e["fg_caps"] = None
         return e, None
     if tested:
         folder, why = _tested_dir(ctx, appid, tested)
@@ -601,6 +610,8 @@ def resolve(ctx, appid, *, fresh: bool = False) -> tuple[dict | None, str | None
         e = copy.deepcopy(tested)
         e.update(dir=folder, folder=tested["folder"])
         e["proxy"], e["taken"] = optigames.pick_proxy(e["api"], _names(folder), e["proxies"])
+        install = steamlib.app_install_dir(ctx, appid)
+        _with_fg_caps(ctx, appid, e, os.path.realpath(install) if install else None)
         return e, None
     install = steamlib.app_install_dir(ctx, appid)
     if not install:
@@ -661,6 +672,7 @@ def resolve(ctx, appid, *, fresh: bool = False) -> tuple[dict | None, str | None
         e["notes"] = tuple(notes)
     e.update(dir=folder, name=name)
     e["proxy"], e["taken"] = optigames.pick_proxy(e["api"], _names(folder), e["proxies"], imports)
+    _with_fg_caps(ctx, appid, e, install)
     return e, None
 
 
@@ -683,6 +695,147 @@ def _exe_dlls(path: str) -> tuple[list[str] | None, set[bytes] | None]:
             _EXE_DLLS.clear()
         _EXE_DLLS[key] = (imports, mentioned)
     return _EXE_DLLS[key]
+
+
+# ---- frame-generation inputs from the game's files (DESIGN.md "Frame-generation inputs from the files") ----------
+
+# an Unreal plugin's Streamline sits in Engine/Plugins/Runtime/Nvidia/Streamline/Binaries/ThirdParty/Win64
+FG_DEPTH = 10
+FG_SCAN_MAX = 60000
+_FG_FOUND: dict[tuple[str, str], tuple[float, tuple[dict, bool]]] = {}
+_VERSIONS: dict[tuple, str | None] = {}
+_FG_NOTED: set[tuple[str, str]] = set()
+
+
+def _dll_version(path: str, st) -> str | None:
+    key = (path, st.st_size, st.st_mtime_ns)
+    if key not in _VERSIONS:
+        if len(_VERSIONS) > 128:
+            _VERSIONS.clear()
+        _VERSIONS[key] = pe.file_version(path)
+    return _VERSIONS[key]
+
+
+def _fg_found(install: str | None, exe_dir: str) -> tuple[dict, bool]:
+    """({lower name: {rel, version}}, searched): the frame-generation files (optigames.FG_FILES) in the exe folder,
+    else the shallowest copy under the install folder (FG_DEPTH levels, no link followed, OptiScaler's and OXP3
+    Deck's own folders not entered). searched False: the walk was cut short (FG_SCAN_MAX entries, or an error), so
+    a missing file proves nothing. Kept LIST_TTL s."""
+    base = (install or exe_dir).rstrip("/")
+    key = (base, exe_dir)
+    now = time.monotonic()
+    hit = _FG_FOUND.get(key)
+    if hit and now - hit[0] < LIST_TTL:
+        return hit[1]
+    best: dict[str, tuple[tuple, dict, str, object]] = {}
+    n, cut = 0, False
+    skip = ("optiscaler", MARK_DIR, "d3d12_optiscaler")
+    # the exe folder itself first, also when the walk cannot reach it (outside the install folder, or behind a link)
+    if not (exe_dir.rstrip("/") + "/").startswith(base + "/"):
+        try:
+            with os.scandir(exe_dir) as it:
+                for de in it:
+                    low = de.name.lower()
+                    if low in optigames.FG_FILES and de.is_file(follow_symlinks=False):
+                        st = de.stat(follow_symlinks=False)
+                        best[low] = ((0, 0, ""), {"rel": de.name}, de.path, st)
+        except OSError:
+            cut = True
+    try:
+        for top, dnames, fnames, dfd in os.fwalk(base, follow_symlinks=False):
+            rel_top = "" if top == base else top[len(base) + 1:]
+            depth = len(_parts(rel_top))
+            in_exe = top.rstrip("/") == exe_dir.rstrip("/")
+            for f in fnames:
+                low = f.lower()
+                if low not in optigames.FG_FILES:
+                    continue
+                st = _lstat(dfd, f)
+                if st is None or not stat.S_ISREG(st.st_mode):
+                    continue
+                rank = (0 if in_exe else 1, depth, rel_top)
+                if low not in best or rank < best[low][0]:
+                    best[low] = (rank, {"rel": f"{rel_top}/{f}" if rel_top else f}, os.path.join(top, f), st)
+            n += len(dnames) + len(fnames)
+            if n > FG_SCAN_MAX:
+                cut = True
+                dnames[:] = []
+            elif depth >= FG_DEPTH - 1:
+                dnames[:] = []
+            else:
+                dnames[:] = [d for d in dnames if d.lower() not in skip]
+    except OSError:
+        cut = True
+    found = {}
+    for low, (_rank, item, path, st) in best.items():
+        found[low] = dict(item, version=_dll_version(path, st))
+    # cut short: a file not found may be in the part not searched, so nothing is ruled out (the listing stays)
+    out = (found, not cut)
+    if len(_FG_FOUND) > 32:
+        _FG_FOUND.clear()
+    _FG_FOUND[key] = (now, out)
+    return out
+
+
+def fg_caps(ctx, e: dict, install: str | None) -> dict | None:
+    """optigames.fg_caps for the setup's exe folder, or None when the files could not be searched or the game is
+    not DirectX 12 (no frame generation there)."""
+    folder = e.get("dir")
+    if not folder or e.get("api", "dx12") != "dx12" or not os.path.isdir(folder):
+        return None
+    found, searched = _fg_found(install, os.path.realpath(folder))
+    return optigames.fg_caps(found) if searched else None
+
+
+def _with_fg_caps(ctx, appid: str, e: dict, install: str | None) -> dict:
+    """The setup's fg_inputs and fg_input narrowed to what its files allow (optigames.fg_narrow); a table entry
+    whose pinned input the files rule out gets the next one, with a note (and a log line, once)."""
+    try:
+        caps = fg_caps(ctx, e, install)
+    except Exception:
+        log.exception("optiscaler: frame-generation files of %s", appid)
+        caps = None
+    e["fg_caps"] = caps
+    if caps is None or not e.get("fg_inputs"):
+        return e
+    pinned = e["fg_input"]
+    e["fg_inputs"], e["fg_input"] = optigames.fg_narrow(tuple(e["fg_inputs"]), pinned, caps,
+                                                        e.get("kind") == "generic")
+    if e.get("kind") != "generic" and pinned != e["fg_input"]:
+        note = (f"{optigames.FG_LABELS[pinned]} isn't possible with this game's files "
+                f"({caps['why'][pinned].rstrip('.')}); OXP3 Deck uses {optigames.FG_LABELS[e['fg_input']]} instead.")
+        e["notes"] = (*e["notes"], note)
+        if (appid, pinned) not in _FG_NOTED:
+            _FG_NOTED.add((appid, pinned))
+            log.info("optiscaler: %s: input %s overridden by the game's files: %s -> %s (%s)", appid, pinned, pinned,
+                     e["fg_input"], caps["why"][pinned])
+    return e
+
+
+def input_why(e: dict, inp: str) -> str | None:
+    """Why the setup does not offer frame-generation input `inp`, or None when it does."""
+    if inp in (e.get("fg_inputs") or ()):
+        return None
+    caps = e.get("fg_caps")
+    if caps and inp in caps["why"] and inp not in caps["inputs"]:
+        return caps["why"][inp]
+    if e.get("api", "dx12") != "dx12":
+        return "frame generation needs DirectX 12"
+    return "OptiScaler's wiki does not document it for this game"
+
+
+def auto_choices(e: dict | None) -> dict | None:
+    """What the automatic setup installs: the table's auto choices with an input the files rule out replaced by the
+    setup's default input, else defaults(e)."""
+    if not e:
+        return None
+    auto = e.get("auto")
+    if auto:
+        c = dict(auto["choices"])
+        if c["fg"] and c["fg_input"] not in (e.get("fg_inputs") or ()):
+            c["fg_input"] = e["fg_input"]
+        return c
+    return defaults(e)
 
 
 def exe_dir(ctx, appid) -> tuple[str | None, str | None]:
@@ -1711,8 +1864,14 @@ def update(ctx, settings, job, appid) -> dict:
     e = resolve(ctx, appid)[0] if g is not None else None
     if g is None or e is None:
         return _result(appid, ok=False, error=check(ctx, appid, installing=False)["error"] or NO_SETUP)
-    choices, why = check_choices(e, g.get("choices"))
+    saved = g.get("choices")
+    choices, why = check_choices(e, saved)
+    if choices is None and isinstance(saved, dict):
+        # only its frame-generation input is no longer offered (the game's files rule it out): keep the upscaler and
+        # the multiplier, with the setup's default input, as migrate_auto does
+        choices = check_choices(e, dict(saved, fg_input=e["fg_input"]))[0]
     choices = choices or defaults(e)
+    picked = bool(g.get("picked"))
     old_launch = g.get("launch")
     got = fetch(ctx, job, e["build"])          # first: a failed download leaves the old build in place
     if not got["ok"]:
@@ -1725,6 +1884,12 @@ def update(ctx, settings, job, appid) -> dict:
                                               "see Details", kept=r["kept"], removed=r["removed"],
                        launch=old_launch, folder=r["folder"])
     res = install(ctx, settings, job, appid, choices, origin=g.get("origin") if g.get("origin") == "auto" else "user")
+    if res.get("ok") and picked:
+        with _LOCK:                          # choices picked by hand stay so: migrate_auto leaves them alone
+            ng = _game_rec(ctx, appid)
+            if ng is not None:
+                ng["picked"] = True
+                _put_game(ctx, appid, ng)
     res["removed"] = r["removed"]
     res["launch_before"] = old_launch
     return res
@@ -1789,28 +1954,39 @@ def set_choices(ctx, appid, choices, settings=None) -> dict:
 
 
 def migrate_auto(ctx, appid) -> bool:
-    """An automatic install (origin "auto") still holding choices an older OXP3 Deck picked automatically (GAMES
-    auto "before") that the user never changed by hand (no "picked"): OptiScaler.ini and the record get the table's
-    automatic choices. Not while the game runs. True when it rewrote; errors are logged (the next plan tries again)."""
+    """An automatic install (origin "auto") that the user never changed by hand (no "picked"), while the game does
+    not run, gets new choices when (a) it still holds choices an older OXP3 Deck picked automatically (the table's
+    auto "before"): the table's automatic choices (auto_choices), or (b) its saved frame-generation input is one
+    the game's files rule out (check_choices refuses it): the same choices with the setup's default input. True
+    when it rewrote OptiScaler.ini and the record; errors are logged (the next plan tries again)."""
     appid = str(appid or "")
-    auto = (entry(appid) or {}).get("auto") or {}
-    if not auto.get("before") or steamlib.running_game(ctx) == appid:
+    if not _APPID.match(appid) or steamlib.running_game(ctx) == appid:
         return False
     try:
         with _LOCK:
             g = _game_rec(ctx, appid)
-            if g is None or g.get("partial") or g.get("origin") != "auto" or g.get("picked") or \
-                    g.get("choices") not in auto["before"]:
+            if g is None or g.get("partial") or g.get("origin") != "auto" or g.get("picked"):
                 return False
+            saved = g.get("choices")
             e, _why = resolve(ctx, appid)
-            choices, why = check_choices(e, auto["choices"]) if e else (None, _why)
-            if why or not check(ctx, appid, installing=False)["ok"]:
+            if e is None:
+                return False
+            before = ((entry(appid) or {}).get("auto") or {}).get("before") or ()
+            if saved in before:
+                want = auto_choices(e)
+            else:
+                ok, _w = check_choices(e, saved)
+                if ok is not None or not isinstance(saved, dict) or saved.get("fg_input") not in optigames.FG_INPUTS:
+                    return False
+                want = dict(saved, fg_input=e["fg_input"])
+            choices, why = check_choices(e, want)
+            if why or choices == saved or not check(ctx, appid, installing=False)["ok"]:
                 return False
             _rewrite_ini(ctx, appid, g, e, choices, dict(_load(ctx)["global"]))
             g["choices"] = choices
             g["launch"] = launch_plan(e, choices)
             _put_game(ctx, appid, g)
-        log.info("optiscaler: %s: automatic choices moved to %s", appid, choices)
+        log.info("optiscaler: %s: automatic choices moved from %s to %s", appid, saved, choices)
         return True
     except Exception:
         log.exception("optiscaler: migrate_auto %s", appid)
@@ -1835,6 +2011,10 @@ def options(ctx, opts) -> dict:
                 later.append(appid)
                 continue
             choices, _why = check_choices(e, g.get("choices"))
+            if choices is None and e.get("api", "dx12") == "dx12":
+                # an input the game's files rule out (info: choices_stale): OptiScaler.ini keeps the saved choices
+                # until the user writes others ("Write these choices"); only the overlay key changes
+                choices = check_choices(dict(e, fg_inputs=optigames.FG_INPUTS), g.get("choices"))[0]
             try:
                 _rewrite_ini(ctx, appid, g, e, choices or defaults(e), rec["global"])
                 done.append(appid)
@@ -1888,7 +2068,8 @@ def info(ctx, appid, settings=None) -> dict:
            "fg_ok": bool(e) and e.get("api", "dx12") == "dx12",
            "upscaler_found": e.get("has_upscaler") if e else None,
            "fit": e.get("fit") if e else None,
-           "optifg_ini": dict(e.get("optifg_ini") or {}) if e else {}, "choices_stale": False}
+           "optifg_ini": dict(e.get("optifg_ini") or {}) if e else {}, "choices_stale": False,
+           "fg_caps": copy.deepcopy(e.get("fg_caps")) if e else None}
     if e is None and g is None:
         out["why"] = check(ctx, appid, installing=True)["why"] or rwhy
         return {"ok": True, "error": None, "opti": out}

@@ -2535,8 +2535,10 @@ automatic setup made (`origin: "auto"`) whose choices are still the old automati
 on the game page makes it Manual) is moved to the new automatic choices by `optiscaler.migrate_auto` on the game's
 next plan (switch on, game not running); `PLAN_VERSION` 2 makes the library scan plan it again. Any other install
 (installed by hand, or its choices changed by hand) is left as it is: the game page shows the defaults with a "Write
-these choices" button that writes them. The sections below keep the original 0.5 plan where they describe it; the code follows
-this paragraph.
+these choices" button that writes them. The same now holds for every game, decided from its files rather than by
+hand per entry, and the automatic installs it rules out are moved the same way (`PLAN_VERSION` 3): see
+"Frame-generation inputs from the files". The sections below keep the original 0.5 plan where they describe it; the
+code follows this paragraph.
 
 ### Which OptiScaler
 
@@ -2931,7 +2933,7 @@ had a setup. Now every Steam game's row has the OptiScaler part, with one of thr
 |---|---|---|---|
 | `tested` | The Witcher 3 (`optiscaler.GAMES`, unchanged) | the section above | XeSS, XeFG 2x, input XeFG (`xefg`) |
 | `known` | 42 games OptiScaler's wiki documents (`optigames.KNOWN`; 5 of them marked `fit: "poor"`) | the game's wiki page (named in the entry's `sources`) and GameConfigs.cpp | XeSS, frame generation off, the wiki's first FG input |
-| `generic` | any other game: **experimental** | the game's own files (below) | XeSS, frame generation off, input OptiFG (`upscaler`) |
+| `generic` | any other game: **experimental** | the game's own files (below) | XeSS, frame generation off, input: the first the files allow of `xefg`, `fsrfg`, `dlssg`, else OptiFG (`upscaler`; 0.6.x, "Frame-generation inputs from the files") |
 
 **Why the table is small.** OptiScaler v10 sets most per-game `OptiScaler.ini` defaults itself, keyed by lower-case
 exe name or Unreal project name (`OptiScaler/misc/GameConfigs.cpp`, about 150 exes; only while the ini key is
@@ -3023,7 +3025,7 @@ one game, so they are not checked.
   refuses `fg` > 0 otherwise ("OptiScaler: frame generation needs DirectX 12; <Game> runs in Vulkan"), and the
   plan never sets `XESS_FG`. With frame generation off any of the four inputs is accepted (kept for later); on, it
   must be one of the setup's `fg_inputs` (known: the wiki's plus OptiFG; generic DirectX 12: `dlssg`, `fsrfg`,
-  `xefg`, `upscaler`). `fsrfg` is new (OptiScaler's FSR frame-generation input; Lies of P, The Last of Us Part I).
+  `xefg`, `upscaler`; since 0.6.x narrowed to what the game's files allow, "Frame-generation inputs from the files"). `fsrfg` is new (OptiScaler's FSR frame-generation input; Lies of P, The Last of Us Part I).
 - Not set: `ProcessFilter_TargetProcessName` (INI_VAL refuses exe names; a launcher next to the exe is a later
   step), `dxvk.conf` spoofing (Wukong on Linux), `d3dcompiler_47` for RCAS shaders on Linux.
 
@@ -3065,6 +3067,85 @@ one game, so they are not checked.
 
 On the device (owner), not done: a generic DirectX 12 Unreal game with DLSS, a known game (Cyberpunk 2077), a
 Vulkan game (No Man's Sky), and whether XeSS on Vulkan reaches the XMX cores through xess-xmx-linux.
+
+## Frame-generation inputs from the files (0.6.x)
+
+Owner: "ensure any fixes are applied broadly". The Witcher 3 correction (Streamline 1, so OptiScaler's `dlssg` input
+cannot work and the game's DLSS frame generation stays greyed) holds for every game, so the inputs OXP3 Deck offers
+no longer come from the table alone: each setup's inputs are checked against the game's own files
+(`optiscaler._with_fg_caps`, called by `resolve` for the tested, known, generic and installed setups alike).
+
+**What is looked at** (`optiscaler._fg_found`, `optigames.FG_FILES`): `libxess_fg.dll`,
+`amd_fidelityfx_framegeneration_dx12.dll`, `amd_fidelityfx_dx12.dll`, `sl.interposer.dll`, `sl.dlss_g.dll`,
+`nvngx_dlssg.dll`, each with its file version (`pe.file_version`, cached per path, size and mtime). The copy in the
+exe folder wins; else the shallowest under the install folder, walked `FG_DEPTH` 10 levels deep (an Unreal plugin's
+Streamline is in `Engine/Plugins/Runtime/Nvidia/Streamline/Binaries/ThirdParty/Win64`), no link followed, at most
+`FG_SCAN_MAX` 60000 entries, never inside `OptiScaler/`, `.oxp3deck-optiscaler/` or `D3D12_Optiscaler/` (OptiScaler's
+own `libxess_fg.dll` is not the game's). Kept 30 s like the listing. A walk cut short (the entry limit or an error)
+counts as not searched (`fg_caps` null) even when it found some files, since a missing file may be in the part not
+searched: the setup keeps its inputs (review fix). The exe folder's own files are read directly when the walk cannot
+reach it (an exe folder outside the install folder, or behind a link).
+
+**The rules** (pure `optigames.fg_caps`; DirectX 12 only, the only API with OptiScaler frame generation):
+
+| Input | Possible when | Source |
+|---|---|---|
+| `xefg` | `libxess_fg.dll` (any version; reported) | OptiScaler hooks the game's own libxess_fg (dllmain.cpp, XeFG_Proxy.h) |
+| `fsrfg` | `amd_fidelityfx_framegeneration_dx12.dll` (FidelityFX 3.1.4+), or `amd_fidelityfx_dx12.dll` (3.1.0-3.1.3 holds upscaling and frame generation in one DLL) | OptiScaler DllNames.h `ffxDx12` / `ffxDx12FG`, OptiScaler.ini FGOutput fsrfg. The DLL's version is the FidelityFX SDK's (1.x), not FSR's, so it is reported, not judged; a game using it for upscaling only has no FSR frame generation setting, and the in-game help says what to do then |
+| `dlssg` | `sl.interposer.dll` whose file-version major is **2 or more**, and `sl.dlss_g.dll` or `nvngx_dlssg.dll`; an unreadable version is not ruled out | wiki Frame-Generation-Options ("Only supports DX12 and Streamline 2+ games", its SL1 list: The Witcher 3, Returnal, A Plague Tale Requiem, …, "It's not possible to update SL1 games to SL2"); Config.cpp `FGCanFollowGame` (`streamlineVersion.major >= 2`), and Streamline_Hooks.cpp takes that major from sl.interposer.dll's file version |
+| `upscaler` (OptiFG) | always | wiki OptiFG ("for games without any FG support, or as a last resort"): `OptiFG_HUDFix=true`, HUDLimit at OptiScaler's default 1 (wiki: "usually 1-9; Unreal generally 1") unless the table sets it (The Witcher 3: also resource blocking), the Steam overlay and Steam Input kept (`Hotfix_DisableOverlays=false`) |
+
+OptiScaler master carries some Streamline 1 DLSSG code (`IsSL1AndFGActive`), but the owner's device shows DLSS frame
+generation greyed in The Witcher 3 with the pinned nightly and the wiki says SL1 is not supported: the rule follows
+the wiki and the device.
+
+**Order of preference for the automatic default** (`optigames.FG_ORDER`): `xefg`, `fsrfg`, `dlssg`, `upscaler`.
+XeSS frame generation first: on this Intel device OptiScaler's output is XeFG anyway, so taking over the game's own
+XeFG keeps the game's HUD-less image, motion vectors and XeLL with the least translation (The Witcher 3's
+`XeFGCameraMotionFill` quirk exists for exactly this input). Then the game's FSR 3.1 and DLSS frame generation: both
+native inputs with a HUD-less image (wiki: "Always best to use native FG inputs"); FSR before DLSS because a
+Streamline game can hide its DLSS options on Intel without the GPU spoof OXP3 Deck keeps off, while FSR shows on any
+GPU. OptiFG last, as the wiki says.
+
+**Where it applies** (`optigames.fg_narrow`):
+- **Generic** setups offer exactly what the files allow, in `FG_ORDER`, and default to the first.
+- **Known and tested** entries keep their documented inputs and order minus the ones the files rule out; the files
+  never add an input the wiki does not document (Cyberpunk 2077's FSR frame generation stays out: the wiki says to
+  avoid it). An entry whose pinned input the files rule out gets the first remaining one in `FG_ORDER`, with a note
+  in OptiInfo ("DLSS frame generation isn't possible with this game's files (…); OXP3 Deck uses … instead.") and one
+  log line per game and input. The Witcher 3 without `libxess_fg.dll` (an old copy) therefore gets OptiFG.
+- **Choices**: `check_choices` refuses frame generation on an input not offered ("OptiScaler: DLSS frame generation
+  (dlssg) isn't possible for <Game>: Streamline 1 (…)"); with frame generation off any input is still kept. A record
+  holding such an input reads as `choices_stale` (the "Write these choices" button), as the old `dlssg` did. Such
+  choices are never replaced behind the user's back: the overlay switch (`options`) rewrites the ini with the saved
+  choices, not the defaults, and Update keeps the upscaler and multiplier with the setup's default input (it must
+  install something possible) and keeps the record's `picked` mark, so `migrate_auto` still leaves hand-picked
+  choices alone afterwards (review fix).
+- **Automatic setup**: `optiscaler.auto_choices(e)` (the table's `auto.choices` with an input the files rule out
+  replaced by the setup's default; else `defaults(e)`) for the plan's `opti` and the install job.
+  `optiscaler.migrate_auto` also moves an automatic install whose saved input the files cannot support, with the
+  same rules as before: only `origin: "auto"`, never `picked` (chosen by hand), the game Automatic (the plan calls
+  it), not while it runs; it keeps the upscaler and multiplier and takes the setup's default input.
+  `autosetup.PLAN_VERSION` 3 plans every seen game again.
+- **OptiInfo** gains `fg_caps: {inputs, why, line, sl1, files: [{name, rel, version, input}]} | null`; `fg_inputs`
+  and `defaults` are the narrowed ones.
+- **UI** (OptiControls, Games tab): "Game setting it replaces" lists only `fg_inputs` (`opti.offeredInputs`); under
+  it one line "From the game's files" (`opti.capsLine`, ≤ 80 characters: "Streamline 1: DLSS frame generation isn't
+  possible here.", "The game's files have XeSS and DLSS frame generation.", "No frame generation in the game's
+  files: OptiScaler makes its own."); its Details (`opti.capsDetails`) say for each input whether it is offered and
+  why, the order of preference, and list the files with their versions. The checklist's help adds a line for the
+  chosen input (`opti.INPUT_HELP`: what to do when that game setting is missing or greyed; OptiFG: in-game XeSS is
+  no input in Unreal games, wiki).
+
+**Tests**: `AnyGameTest` fake game folders (Streamline 1 with DLSS-G: OptiFG only and the SL1 line; Streamline 2 with
+`sl.dlss_g.dll`: `dlssg`; XeFG plus Streamline 2: `xefg` first; FSR 3.1.4 frame generation; FSR 3.1 with Streamline 2
+but no DLSS-G; none: OptiFG only), Streamline nine levels down in an Unreal plugin, OptiScaler's own
+`libxess_fg.dll` ignored, a known entry's pinned `dlssg` overridden with its note and log line, The Witcher 3 with
+and without its `libxess_fg.dll` (the shared fixture now has the game's `libxess_fg.dll`, Streamline 1
+`sl.interposer.dll` and `nvngx_dlssg.dll`); `AutoTest`: an automatic install on a ruled-out input moved once, one
+installed by the user left alone; `OptigamesTest`: `fg_caps`, `fg_narrow`; test_autosetup: the plan's OptiFG choices
+without `libxess_fg.dll`, `PLAN_VERSION`; node: `offeredInputs`, `capsLine`, `capsDetails`, `readCaps`, the steps and
+help per input, the wiring in OptiControls.
 
 ## Automatic setup (0.6)
 
@@ -3121,7 +3202,9 @@ is moved.
   and `auto_never: tuple[ManagedKey]` (never added automatically). 2246340: `auto_drop ("XESS_FG", "FSR", "FSR_FG")`,
   `auto_never ("XESS", "FSR")` (its detail: XESS=latest swaps files too). 292030: `auto_drop ("FSR", "FSR_FG")`,
   `auto_never ("FSR",)`. Both fields default to `()`; `known_issues()` copies them.
-- `autosetup.PLAN_VERSION = 2` (2: the Witcher 3 automatic choices moved to `xefg`): raised whenever these tables change, so the library scan looks at seen games again.
+- `autosetup.PLAN_VERSION = 3` (2: the Witcher 3 automatic choices moved to `xefg`; 3: every game's inputs checked
+  against its files, "Frame-generation inputs from the files"): raised whenever these tables change, so the library
+  scan looks at seen games again.
 
 ### The Proton move
 

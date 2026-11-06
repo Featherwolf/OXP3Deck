@@ -24,7 +24,8 @@ from . import context, games, optigames, optiscaler, steamlib, xess
 log = logging.getLogger("oxp3deck")
 
 VERSION = 1
-PLAN_VERSION = 2          # raised whenever the tables (below, games, optigames) change: seen games are planned again
+PLAN_VERSION = 3          # raised whenever the tables (below, games, optigames) change: seen games are planned again
+                          # (2: Witcher 3's automatic input xefg; 3: inputs checked against the game's files)
 STATE_NAME = "auto.json"
 READ_MAX = 1 << 20
 MAX_GAMES = 400
@@ -565,7 +566,8 @@ def _build_plan(ctx, settings, appid: str, g: dict, facts: dict, opti_rec: dict 
         elif opti_blocked:
             out["opti_why"] = "OptiScaler was undone after a quick exit; tap Try again to use it again."
         elif chk and chk["ok"]:
-            out["opti"] = {"choices": dict(auto["choices"]), "why": auto["why"], "short": auto["short"]}
+            out["opti"] = {"choices": _opti_choices(ctx, appid) or dict(auto["choices"]), "why": auto["why"],
+                           "short": auto["short"]}
         else:
             out["opti_why"] = chk["why"] if chk else None
     opti_in = opti_rec is not None or out["opti"] is not None
@@ -683,7 +685,8 @@ def plan(ctx, settings, appid, facts) -> dict:
                 _save(ctx, st)
             g = copy.deepcopy(g)
             on = st["on"]
-        # an automatic OptiScaler install on choices the table has since replaced gets the new ones (not by hand)
+        # an automatic OptiScaler install on choices the table has since replaced, or on a frame-generation input the
+        # game's files rule out, gets new ones (never one changed by hand; optiscaler.migrate_auto)
         if on and g["mode"] == "auto" and opti_rec is not None and opti_rec.get("origin") == "auto" and \
                 optiscaler.migrate_auto(ctx, a):
             opti_rec = optiscaler.game_record(ctx, a)
@@ -1000,13 +1003,11 @@ def session(ctx, appid, event) -> dict:
 # ---- the automatic OptiScaler install ------------------------------------------------------------------------------
 
 def _opti_choices(ctx, appid: str) -> dict | None:
+    """The table's automatic choices (else the setup's defaults), with a frame-generation input the game's files rule
+    out replaced by the setup's default (optiscaler.auto_choices on the resolved setup)."""
     base = optiscaler.entry(appid)
-    auto = (base or {}).get("auto")
-    if auto:
-        return dict(auto["choices"])
     e, _why = optiscaler.resolve(ctx, appid, fresh=True)
-    e = e or base
-    return optiscaler.defaults(e) if e else None
+    return optiscaler.auto_choices(e or base)
 
 
 def opti_precheck(ctx, settings, appid, accepted=False) -> str | None:

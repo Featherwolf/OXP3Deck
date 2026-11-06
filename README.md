@@ -373,6 +373,14 @@ which one a game gets:
   over an existing file). The steps in the game are the generic ones: pick DLSS, FSR or XeSS (and its frame
   generation, if you turn that on) in the game's graphics settings.
 
+**Which game setting OptiScaler takes over is checked from the game's own files, for every game.** XeSS frame
+generation needs the game's `libxess_fg.dll`, FSR frame generation its FidelityFX 3.1 DLL, and DLSS frame generation
+Streamline 2 or newer (`sl.interposer.dll` 2.x) with its DLSS-G files: a Streamline 1 game (The Witcher 3, Returnal,
+A Plague Tale: Requiem, …) shows "Streamline 1: DLSS frame generation isn't possible here." and does not offer it.
+Only the settings the files support are offered; the default is the first of XeSS, FSR and DLSS frame generation the
+game has, else OptiFG. Details list the files and versions found. An automatic install on a setting the files rule
+out is moved on its next automatic check (not one you changed by hand).
+
 DirectX 11 and Vulkan games get the upscaler only: OptiScaler's frame generation needs DirectX 12. Not offered, with
 the reason in the row: games with anti-cheat files (EasyAntiCheat, BattlEye, EA AntiCheat, ACE, …), online games
 (Counter-Strike 2, Dota 2, Path of Exile 2, …; OptiScaler's guide says not to use it with online games), games whose

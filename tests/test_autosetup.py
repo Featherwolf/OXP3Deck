@@ -45,6 +45,8 @@ class AutoBase(GameBase):
         write(os.path.join(self.game, "bin/x64_dx12/witcher3.exe"), b"MZ dx12")
         self.dll("bin/x64_dx12/libxess.dll", (1, 3, 1, 0))
         self.dll("bin/x64_dx12/libxell.dll", (1, 2, 1, 13))
+        self.dll("bin/x64_dx12/libxess_fg.dll", (1, 1, 0, 39))        # the game's XeSS frame generation
+        self.dll("bin/x64_dx12/sl.interposer.dll", (1, 5, 10, 0))     # Streamline 1
         write(w.sys("/usr/bin/7z"), "#!/bin/sh\n", 0o755)
         write(os.path.join(self.pkg, "tools", "fsr-fg.sh"), "#!/bin/sh\n")      # FSR=xess (20261104 and newer)
         self.mh, _ = w.app(MH_WILDS, "MonsterHunterWilds")
@@ -352,8 +354,19 @@ class PlanTest(AutoBase):
             self.plan(WITCHER)
         self.assertFalse(m.called)                                  # the switch off: nothing changes
 
+    def test_witcher_without_xess_fg_plans_optifg(self):
+        """The check is general: without libxess_fg.dll the automatic choices take OptiFG, not a greyed input."""
+        os.unlink(os.path.join(self.game, "bin/x64_dx12/libxess_fg.dll"))
+        optiscaler.forget_listing()
+        self.on()
+        p = self.plan(WITCHER)
+        self.assertEqual(p["opti"]["choices"], {"upscaler": "xess", "fg": 2, "fg_input": "upscaler"})
+        self.assertEqual(autosetup._opti_choices(self.ctx, WITCHER), p["opti"]["choices"])
 
-class RecordTest(AutoBase):
+    def test_plan_version_covers_the_files_check(self):
+        self.assertGreaterEqual(autosetup.PLAN_VERSION, 3)
+
+
     def test_validation(self):
         self.on()
         self.assertFalse(autosetup.record(self.ctx, PLAIN, {"kind": "launch"})["ok"])     # not planned yet

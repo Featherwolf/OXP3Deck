@@ -381,8 +381,57 @@ test("OptiControls: every game's row, the setup's texts", () => {
   const s = src("components/OptiControls.tsx");
   assert.match(s, /description=\{explainWhen\(installLine\(info\), EFFECTS\["game\.opti"\]/);
   assert.match(s, /checklistLine\(choices\.fg_input, choices\.fg, setup\)/);
-  assert.match(s, /checklist\(choices\.fg_input, choices\.fg, setup\), \.\.\.checklistHelp\(setup\)/);
+  assert.match(s, /checklist\(choices\.fg_input, choices\.fg, setup\), \.\.\.checklistHelp\(setup, choices\.fg_input, choices\.fg\)/);
+  // only the inputs the game's files allow, with the one line saying which and why
+  assert.match(s, /const inputs = offeredInputs\(info\);/);
+  assert.match(s, /rgOptions=\{inputs\}/);
+  assert.match(s, /<Note label="From the game's files" details=\{inputD\}>\{caps\}<\/Note>/);
   assert.match(s, /readyToast\(app\.name, choices\.fg_input, choices\.fg, setup\)/);
   // the games backend answers opti_entry for every Steam game; the component still checks it (older backends)
   assert.match(s, /if \(!isSteamApp\(appid\) \|\| !game\?\.opti_entry\) return null;/);
+});
+
+// ---- frame-generation inputs from the game's files (DESIGN.md "Frame-generation inputs from the files") ----------
+
+const CAPS_SL1 = {
+  inputs: ["xefg", "upscaler"], sl1: true, line: "Streamline 1: DLSS frame generation isn't possible here.",
+  why: { xefg: "libxess_fg.dll 1.1.0.39: the game has XeSS frame generation.",
+    fsrfg: "No amd_fidelityfx_framegeneration_dx12.dll or amd_fidelityfx_dx12.dll: the game has no FSR 3.1 frame generation.",
+    dlssg: "Streamline 1 (sl.interposer.dll 1.5.10.0): OptiScaler's DLSS frame generation input needs Streamline 2 or newer, so it isn't possible here.",
+    upscaler: "Always possible in DirectX 12: OptiScaler makes the frames from the upscaler's input." },
+  files: [{ name: "libxess_fg.dll", rel: "bin/x64_dx12/libxess_fg.dll", version: "1.1.0.39", input: "xefg" },
+    { name: "sl.interposer.dll", rel: "bin/x64_dx12/sl.interposer.dll", version: "1.5.10.0", input: "dlssg" }],
+};
+
+test("only the inputs the files allow are offered, with one line and Details", () => {
+  const info = { fg_inputs: ["xefg", "upscaler"], fg_caps: CAPS_SL1, kind: "tested" };
+  assert.deepEqual(o.offeredInputs(info).map((i) => i.data), ["xefg", "upscaler"]);
+  assert.deepEqual(o.offeredInputs({ fg_inputs: [] }).map((i) => i.data), ["dlssg", "fsrfg", "xefg", "upscaler"]);
+  assert.equal(o.capsLine(info), "Streamline 1: DLSS frame generation isn't possible here.");
+  assert.ok(o.capsLine(info).length <= 80);
+  assert.equal(o.capsLine({ fg_caps: null }), null);
+  assert.equal(o.capsLine({}), null);                                  // an older backend
+  const d = o.capsDetails(info);
+  assert.ok(d.body.some((b) => b.startsWith("DLSS frame generation: not offered. Streamline 1")));
+  assert.ok(d.body.some((b) => b.startsWith("XeSS frame generation: offered. libxess_fg.dll 1.1.0.39")));
+  assert.deepEqual(d.lines, ["bin/x64_dx12/libxess_fg.dll 1.1.0.39", "bin/x64_dx12/sl.interposer.dll 1.5.10.0"]);
+  // a known game whose files allow more than its wiki page documents
+  const known = o.capsDetails({ fg_inputs: ["dlssg", "upscaler"], kind: "known",
+    fg_caps: { ...CAPS_SL1, sl1: false, inputs: ["xefg", "dlssg", "upscaler"], line: "x" } });
+  assert.ok(known.body.some((b) => b === "XeSS frame generation: not offered: OptiScaler's wiki does not document it for this game."));
+  assert.equal(o.readCaps({ line: 3 }), null);
+  assert.equal(o.readCaps({ ...CAPS_SL1, inputs: ["xefg", "bogus"] }).inputs.length, 1);
+});
+
+test("in-game steps per input", () => {
+  const generic = { kind: "generic", api: "dx12", pick: null };
+  for (const [input, fg] of [["dlssg", "DLSS Frame Generation"], ["fsrfg", "FSR Frame Generation"], ["xefg", "XeSS Frame Generation"]]) {
+    assert.ok(o.checklist(input, 2, generic).some((st) => st.includes(`Frame Generation: ${fg} on.`)), input);
+    assert.ok(o.checklistHelp(generic, input, 2).includes(o.INPUT_HELP[input]), input);
+    assert.ok(o.checklistLine(input, 2, generic).length <= 80);
+  }
+  assert.ok(o.checklist("upscaler", 2, generic).some((st) => st.includes("off in the game; OptiScaler makes the frames itself")));
+  assert.ok(o.checklistHelp(generic, "upscaler", 2).includes(o.INPUT_HELP.upscaler));
+  assert.ok(!o.checklistHelp(generic, "dlssg", 0).includes(o.INPUT_HELP.dlssg));          // frame generation off
+  assert.deepEqual(o.checklistHelp(o.TESTED, "xefg", 2), o.CHECKLIST_HELP);               // The Witcher 3 as before
 });

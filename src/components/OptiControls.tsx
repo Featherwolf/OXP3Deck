@@ -9,8 +9,8 @@ import { blockedBy, started, useAction } from "../actions";
 import { get_setting, opti_info, opti_install, opti_options, opti_remove, opti_set, opti_update, set_setting } from "../backend";
 import { EFFECTS } from "../effects";
 import {
-  API_LABELS, checklist, checklistHelp, checklistLine, choiceLabels, confirmInstall, confirmRemove, DEFAULT_CHOICES, FGS, fgPossible,
-  fitLog, INPUTS, installLine, optiFgIni, LOG_KEY, OptiConfirm, OptiLog, OptiLogEntry, pendingEntry, planLines, readChoices, readLog, readyToast,
+  API_LABELS, capsDetails, capsLine, checklist, checklistHelp, checklistLine, choiceLabels, confirmInstall, confirmRemove, DEFAULT_CHOICES, FGS,
+  fgPossible, fitLog, installLine, offeredInputs, optiFgIni, LOG_KEY, OptiConfirm, OptiLog, OptiLogEntry, pendingEntry, planLines, readChoices, readLog, readyToast,
   setupOf, statusLine, syncPlan, upscalerIni, UPSCALERS, warningRows,
 } from "../opti";
 import { getLaunchOptions, isRunning, isSteamApp, RunningApp, setLaunchOptions } from "../steam";
@@ -116,7 +116,10 @@ export const OptiRows: FC<{ app: RunningApp; quick?: boolean; running: boolean; 
   const choices = installed ? readChoices(info?.choices) ?? pick : pick;
   const setup = setupOf(info);
   const fgOk = fgPossible(setup) && info?.fg_ok !== false;
-  const inputs = INPUTS.filter((i) => !info?.fg_inputs?.length || info.fg_inputs.includes(i.data));
+  // only the inputs the game's files allow (the backend narrows fg_inputs; DESIGN.md "Frame-generation inputs from the files")
+  const inputs = offeredInputs(info);
+  const caps = capsLine(info);
+  const capsD = capsDetails(info);
   const fgs = fgOk ? FGS : FGS.filter((f) => f.data === 0);
   const proxy = info?.proxy ?? "dxgi";
 
@@ -279,14 +282,15 @@ export const OptiRows: FC<{ app: RunningApp; quick?: boolean; running: boolean; 
       "FSR frame generation: pick FSR 3.1 (or what the game offers) and its frame generation in the game.",
       `XeSS frame generation${setup.kind === "tested" ? " (default here)" : ""}: pick XeSS and XeSS frame generation in the game, in a borderless window; OptiScaler takes the game's XeSS frame generation over and runs its own XeFG (FGInput=xefg, FGOutput=xefg).`,
       `None: OptiScaler makes the frames from the upscaler's input itself (OptiFG). Pick ${setup.kind === "tested" ? "XeSS or DLSS" : "the upscaler"} in the game with its frame generation off, and keep the game's gamma and brightness at their defaults; the HUD fix is on${info?.optifg_ini && Object.keys(info.optifg_ini).length ? " (with the HUD limit and resource blocking OptiScaler's wiki gives for this game)" : ""}, and the Steam overlay and Steam Input stay on.`,
-      setup.kind === "tested" ? null : "Only the choices OptiScaler's wiki documents for this game are listed (all four for a game it does not document).",
+      setup.kind === "generic" ? "Only the settings the game's files show are listed." : "Only the settings OptiScaler's wiki documents for this game and its files show are listed.",
+      ...capsD.body,
       "Takes effect: Restart the game.",
     ]),
-    lines: [`FrameGen FGInput=${choices.fg_input}`], linesTitle: "Technical:",
+    lines: [`FrameGen FGInput=${choices.fg_input}`, ...capsD.lines], linesTitle: "Technical:",
   };
   const listD: DetailsSpec = {
     title: "In the game, once",
-    body: paragraphs([...checklist(choices.fg_input, choices.fg, setup), ...checklistHelp(setup)]),
+    body: paragraphs([...checklist(choices.fg_input, choices.fg, setup), ...checklistHelp(setup, choices.fg_input, choices.fg)]),
   };
   const overlayD: DetailsSpec = {
     title: "Show OptiScaler's FPS counter",
@@ -341,6 +345,7 @@ export const OptiRows: FC<{ app: RunningApp; quick?: boolean; running: boolean; 
                 description={explainWhen(lab.input, EFFECTS["game.opti_input"], why)} />
             </WithDetails>
           )}
+          {!quick && fgOk && caps && <Note label="From the game's files" details={inputD}>{caps}</Note>}
         </>
       )}
       {installed && info?.choices_stale && (
