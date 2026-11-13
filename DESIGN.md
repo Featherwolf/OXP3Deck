@@ -2400,6 +2400,154 @@ without `%command%` only when they need no re-quoting), keeps the log under the 
 through `tests/js/tsresolve.mjs` (an extensionless-import resolve hook). New `PowerRange` / `hw` / `now` fields are
 optional in types.ts, for an older backend.)
 
+## Quick Access groups
+
+Owner request: "Quick menu settings need to be grouped and groups able to be collapsed/expanded easily with
+controller." The quick panel becomes a short list of groups, each with one header row that A opens and closes. This
+section replaces the order in "Frontend → Quick Access panel" and the placement in "Frontend 0.4" item 1 (the "Live"
+row moves out of Power); the rows themselves, their texts, tags and Details stay as specified there.
+
+### Groups, in order
+
+| # | id | Header | Shown when | Rows (open) | Default |
+|---|---|---|---|---|---|
+| 0 | — | none (always shown, no header) | always | device status, "Do not reboot yet" (red), "Reboot to finish", the running job (`JobView quick`) | — |
+| 1 | `live` | "Live" | always | one row per readout (`liveRows`, as the Power tab's "Live readouts") | closed |
+| 2 | `game` | "This game" | a game runs | AutoSetupSwitch, the "XeSS settings for this game" note, "Separate profile for <game>" (moved here from Power, power control on and per-game profiles allowed), `GameControls quick running` | open |
+| 3 | `power` | "Power" | always | the power status line, "Power control (TDP)", Paused, Sustained power, Boost power, GPU maximum speed, GPU power saving, the Power red rows (below) | open |
+| 4 | `cpu` | "CPU" | power control on with a CPU control, or the scheduler mode exists | CPU speed cap, CPU vs GPU balance, CPU minimum speed, Show advanced CPU options (+ per-core rows), CPU boost, CPU now, CPU scheduler mode | closed |
+| 5 | `battery` | "Fan & battery" | any of fan / charge limit / charge behaviour exists (`ExtrasState`) | Fan, Battery charge limit, Run from charger | closed |
+| 6 | `xess` | "XeSS" | overview loaded | the XeSS status row, Install / Update / Repair or "Check for XeSS update" | closed |
+| 7 | `fixes` | "Device fixes" | overview loaded | the whole `Oxp3Section` (fixes tool status, install/update, warnings, recommended, Apply recommended, attention) | closed |
+| — | — | none | always | "All settings" button, last | — |
+
+Why this order and these cuts:
+- **Live is second** (not after CPU): closed, its header's summary is today's "Live" line (`liveLine`), so the panel
+  opens with the readout one glance down, as now; opening it shows each value on its own row.
+- **CPU is its own group**: the quick Power section had grown to ~14 rows; TDP and GPU are what is changed per game,
+  the CPU rows are tuned once. GPU power saving stays in Power (it is a GPU control, though CpuControls renders it:
+  CpuControls gets a `part: "gpu" | "cpu"` prop). CPU scheduler mode moves from the fan's row group to CPU
+  (`ProfileExtras` gets `only: "fan" | "scx"`).
+- **"Separate profile for <game>" moves to This game**: it is a per-game choice; Power's status line still names the
+  profile in use ("Cyberpunk 2077 · on AC").
+- **No "Updates" group**: an update belongs next to the thing it updates (the XeSS status and its Repair, the fixes
+  tool and its fixes); a separate group would split them or repeat them. An available update shows in that group's
+  closed summary instead ("Update available").
+- **Status has no header**: it is short (one to four rows) and holds the rows that must never be missed.
+
+### The header row (`components/Group.tsx`)
+
+```tsx
+export type GroupId = "live" | "game" | "power" | "cpu" | "battery" | "xess" | "fixes";
+export const Group: FC<{ id: GroupId; title: string; summary: string; alert?: string | null;
+  alerts?: ReactNode; children: ReactNode }>
+```
+- Renders `<PanelSection>` **without a title** (`PanelSectionProps.title` is a plain string and is not focusable in
+  @decky/ui 4.16), then the header as the section's first `PanelSectionRow`: `<Field focusable highlightOnFocus
+  bottomSeparator="standard" label={…} description={…} onActivate={toggle} onOKActionDescription={open ? "Close" :
+  "Open"} />`. The footer shows "A Close" / "A Open" while the header is focused.
+- Label: a chevron (`react-icons/fa` `FaChevronDown` open, `FaChevronRight` closed, 0.8em, `marginRight: 8`; an SVG,
+  so no font glyph question) then the title, bold. With an alert: a red ✗ before the title and the title in `RED`.
+- Description: closed: `summary` (≤ 80, `fit`), or with an alert the alert's line in `RED`; open: nothing (the rows
+  say it), except the alert line, which stays.
+- No ⓘ, no Details, no effect tag: the header changes nothing on the device.
+- **Focus stays on the header**: the header element is always rendered, first, with a stable `key`; a toggle only adds
+  or removes the rows after it, so Steam's focus tree keeps the focused node. Nothing wraps the header in a parent
+  whose element type or key depends on `open`. No programmatic focus is needed (none is used).
+- Open: the header, then `children`. Closed: the header, then `alerts` (below). The body is not mounted while closed
+  (no `display: none`): a closed group runs none of its rows' hooks, and D-pad down goes straight to the next header.
+- Touch: tapping the header toggles too (`onActivate` fires for a click on a focusable Field).
+- Not used: X on a row inside to close its group (would need moving focus to the header by code, unverified in Steam's
+  focus tree, and X is free to the controls today); auto-scrolling. Revisit only if the owner asks.
+
+### Remembered state
+
+- `remember` (util.ts: localStorage, already try/catch, per device) key `quickGroups`: JSON `{[id]: boolean}` holding
+  **only the groups the user toggled**; a missing id uses its default (game and power open, the rest closed). Read
+  once, synchronously, at the first render (so the panel never flashes the defaults first); written on each toggle.
+  Junk or an unknown id → ignored (pure `parseGroups(raw)` in `src/quickgroups.ts`).
+- Why not a settings.json `ui_*` key: `get_setting` is async, so the first render would show the defaults and then
+  jump, moving rows under the controller's focus. The choice is a per-device convenience, so losing it (a cleared
+  browser store) costs only the defaults.
+- The open state is per group, not per game; "This game" keeps its state between games.
+
+### Alerts are never hidden
+
+Each group passes `alert` (the first alert's label and line, for the header) and `alerts` (the alert rows themselves,
+the same components as in the open body, so "Fix for me", "Take control again" and Undo work from a closed group).
+Closed, they render right under the header; open, the body shows them at their usual place (the components take an
+`only="alerts"` prop for the closed render, so nothing is rendered twice). The group does **not** open by itself: the
+user's choice stays, and the pinned red rows plus the red header are the "red line". An alert that clears removes
+its rows; the header goes back to the summary.
+
+| Group | Alerts (pinned while closed) | Not alerts (summary only) |
+|---|---|---|
+| power | Power control paused + its conflict rows; Something changed your power limits + Take control again; CPU speed policy is Performance; firmware-locked limits (`capRows`); Power control unavailable; a refused enable's "Turn off <x> first" + rows; any Power `Problem` | Left to another program ("Left to <x>" in the summary), GPU held back by power limit |
+| cpu | the lockers' conflict rows under CPU boost / energy preference; Something else changed the scheduler mode + Take control; a CPU `Problem` | "Uses the per-core caps." |
+| battery | Something else changed the fan + Take control; a charge `Problem` | Fan Quiet reverted to Auto (its reason in the summary) |
+| game | Undone after a quick exit + Try again; Automatic setup error; a `Problem` from the game's controls (launch options, OptiScaler) | XeSS fast mode not installed, waiting changes, offers |
+| xess | a XeSS `Problem` | Log out needed, failed driver check (✗ in the summary), update available |
+| fixes | fixes tool missing or too old + its Install / Update button; oxp3-tool warnings; Fixes need attention (button); a fixes `Problem` | recommended fixes (count in the summary) |
+| live | — | "Couldn't read." in the summary |
+
+A `Problem` from an action the user just took shows in the open group (the user is in it); it is pinned only so it
+survives a close.
+
+### Summaries (closed header, ≤ 80 chars, pure functions in `src/quickgroups.ts`, node-tested)
+
+| Group | Summary | Examples |
+|---|---|---|
+| live | `liveLine(live)` | "18.4 W · 62 °C · GPU 87 % · 3 h 10 min left" |
+| game | name · setup mode · own profile | "Cyberpunk 2077 · Automatic · Own power profile" / "Hades II · Manual" |
+| power | off: "Off · device defaults"; on: sustained · boost · GPU range · profile, "default" for a null field | "15 W · boost 25 W · GPU 300–2300 MHz · Default" / "Paused · Power Profiles changes limits" |
+| cpu | cap · boost · scheduler; power control off: "Power control off" + scheduler | "Cap 60 % · Boost off · Scheduler Gaming" |
+| battery | fan · charge limit · charger | "Fan Auto · Charge to 80 % · Battery idle on charger" |
+| xess | `xessLine` without its "XeSS fast mode: " prefix, + update | "On (20261104) · Update available" / "Log out needed" |
+| fixes | applied · recommended | "7 applied · 2 recommended" / "Fixes tool not installed" |
+
+Power and CPU summaries show the values of the slot the sliders edit (the same values the open group shows), not the
+read-back; the read-back stays in the status line and Live. While loading: "Reading…". `fit` cuts at a word.
+
+### Data (where hooks live)
+
+Collapsed groups must still have their summaries and alerts, so the reads move up into `QuickPanel` once and are
+passed down: `usePower(visible)` (one `usePowerState` poller, not one per group), `useExtrasState()`,
+`useLive(visible)` (reads every second while the panel shows, open or closed, as the Live row does today), the
+overview and `oxp3_status` (as now), and the automatic-setup state of the running game (for its alerts). XeSS's
+`xess_state` and GameControls' launch-option reads stay inside their groups' bodies: their closed summaries come from
+the overview (`o.xess`) and the running app. `PowerSection` splits into `PowerGroup` and `CpuGroup` bodies taking
+`{info, state}` props; `clearRecentFixes` on panel close stays where it is.
+
+### Code and tests
+
+- New: `components/Group.tsx` (`Group`, `useGroups()` → `{open(id), toggle(id)}`), `src/quickgroups.ts` (`GROUPS` with
+  ids, titles, defaults; `parseGroups`; the summary functions; `alertOf(...)`).
+- Quick.tsx keeps the names `Oxp3Section` and `XessSection` (tests/js/pages.test.mjs slices the source between them);
+  each becomes a group body.
+- As built: the bodies are `PowerBody`, `CpuBody` and `BatteryBody` (with `PowerAlerts`, `CpuAlerts` and
+  `BatteryBody alerts` for the closed render) in PowerControls.tsx; `ValuesEditor` takes `part: "gpu" | "cpu"` and
+  passes it to `CpuControls`; `ExtrasRows` / `ProfileExtras` take `only: "fan" | "scx"` and `alerts`; `ChargeRows`,
+  `PowerStatusRows`, `EnableToggle`, `AutoSetupRows` and `Oxp3Section` take `only="alerts"`. A refused enable's
+  conflicts live in a small module store (`useRefused`), so they survive a close.
+- Pinned Problems: `usePinned(error)` (Group.tsx) records an action's last error (every `useAction`, and the power
+  drafts) for the group whose open body it renders in; a closed group shows those as red rows and in its header,
+  and opening the group clears them. A row that unmounts while its group is open (the panel was left, the row went
+  away) drops its pin, so an open group never keeps a red header nobody can clear; another running game clears This
+  game's pins. GameControls' launch-option error, OptiScaler's launch error and the automatic setup's switch and
+  pass errors are pinned too. The quick drafts (`useDraft(…, own)`) show a refused `power_set` only in the editor that
+  made the last write, so the Power and CPU groups do not both show it.
+- A refused enable's alert uses `refusedLive` (quickgroups.ts, also EnableToggle's rows): it ends when Fix for me
+  removes the conflict or power control is on. CPU shows whenever power control is on (its "CPU now" row).
+- `cpuBlockers` moved to quickgroups.ts (PowerControls.tsx re-exports it), `xessLine` too (Quick.tsx re-exports
+  it).
+- Node tests (`tests/js/quickgroups.test.mjs`): defaults (game, power open); `parseGroups` on junk, unknown ids, a
+  partial object; every summary ≤ 80 for long game names and every value at null; an alert wins over the summary.
+- pages.test.mjs additions: each `Group` header is a `Field focusable` with `onActivate`; no `title=` on a group's
+  `PanelSection`; the closed render includes `alerts`.
+- On the device: A toggles and the focus stays on the header (also for the last group on screen); D-pad down from a
+  closed header lands on the next header; a paused power control shows red with Power closed and Fix for me works
+  there; the open/closed state survives closing and reopening Quick Access and a Steam restart.
+
 ## Tests 0.4
 
 **Builder 1** (`tests/powerfake.py` grows `perf(ctx, max=100, min=9)`, `types(ctx, p="0-3", atom="4-11",

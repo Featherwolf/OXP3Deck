@@ -68,7 +68,7 @@ OXP3_STILL_RUNNING = ("the plugin restarted while oxp3-tool was running; it may 
 OXP3_OUTPUT = re.compile(r"[a-z][a-z0-9-]*-\d{8}-\d{6}-[0-9a-f]{6}\.(?:out|err|tar\.gz)")
 # userexec.run(detach=True)'s output file of an xess-xmx-linux script there: user-<date>-<time>-<hex>.log
 SCRIPT_OUTPUT = re.compile(r"user-\d{8}-\d{6}-[0-9a-f]{6}\.log")
-NO_OXP3 = {"installed": False, "path": None, "version": None, "json_ok": False, "min_version": "0.4.1",
+NO_OXP3 = {"installed": False, "path": None, "version": None, "json_ok": False, "min_version": "0.4.2",
            "bundled_version": None}   # min_version: oxp3tool.MIN_VERSION_TEXT (a test keeps them equal)
 
 

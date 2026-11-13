@@ -51,7 +51,7 @@ def fixture(name):
         return f.read()
 
 
-def fake_tool(version="0.4.1"):
+def fake_tool(version="0.4.2"):
     return FAKE_TOOL.replace("@VERSION@", version if " " in version or not version[:1].isdigit()
                              else "oxp3-tool " + version).encode()
 
@@ -86,7 +86,7 @@ class Base(unittest.TestCase):
         self.answers = {"list": {"stdout": fixture("list.json")}}
         self.install_tool()
 
-    def install_tool(self, version="0.4.1", path=None):
+    def install_tool(self, version="0.4.2", path=None):
         path = path or os.path.join(self.bindir, "oxp3-tool")
         with open(path, "wb") as f:
             f.write(fake_tool(version))
@@ -116,8 +116,8 @@ class Base(unittest.TestCase):
 class FindAndVersionTest(Base):
     def test_installed(self):
         inst = oxp3tool.installed(self.ctx)
-        self.assertEqual(inst, {"installed": True, "path": os.path.join(self.bindir, "oxp3-tool"), "version": "0.4.1",
-                                "json_ok": True, "min_version": "0.4.1", "bundled_version": None})
+        self.assertEqual(inst, {"installed": True, "path": os.path.join(self.bindir, "oxp3-tool"), "version": "0.4.2",
+                                "json_ok": True, "min_version": "0.4.2", "bundled_version": None})
 
     def test_version_is_cached_until_the_file_changes(self):
         real = sysexec.run
@@ -138,13 +138,24 @@ class FindAndVersionTest(Base):
         self.install_tool("0.3.9")
         bundled = os.path.join(self.ctx.plugin_dir, "bin", "oxp3-tool")
         os.makedirs(os.path.dirname(bundled))
-        self.install_tool("0.4.1", bundled)
+        self.install_tool("0.4.2", bundled)
         os.chmod(bundled, 0o644)   # the zip's copy needs no x bit: it runs through python3
         inst = oxp3tool.installed(self.ctx)
-        self.assertEqual((inst["version"], inst["json_ok"], inst["bundled_version"]), ("0.3.9", False, "0.4.1"))
+        self.assertEqual((inst["version"], inst["json_ok"], inst["bundled_version"]), ("0.3.9", False, "0.4.2"))
         r = self.run_cmd(oxp3tool.status)
         self.assertFalse(r["ok"])
-        self.assertIn("needs 0.4.1 or newer", r["error"])
+        self.assertIn("needs 0.4.2 or newer", r["error"])
+        self.assertEqual(self.calls(), [])
+
+    def test_041_is_too_old(self):
+        # 0.4.1's `kernel keep` read Limine's last-booted record under the GUID Limine 12.9.5 left, so it could
+        # leave the stock kernel booting after a `kernel try` and still print Done.
+        self.install_tool("0.4.1")
+        inst = oxp3tool.installed(self.ctx)
+        self.assertEqual((inst["version"], inst["json_ok"], inst["min_version"]), ("0.4.1", False, "0.4.2"))
+        r = self.run_cmd(oxp3tool.kernel_keep, FakeJob())
+        self.assertFalse(r["ok"])
+        self.assertIn("version 0.4.1 is installed; OXP3 Deck needs 0.4.2 or newer", r["error"])
         self.assertEqual(self.calls(), [])
 
     def test_the_early_040_build_is_too_old_and_the_bundled_copy_is_offered(self):
@@ -154,14 +165,14 @@ class FindAndVersionTest(Base):
         self.install_tool("0.4.0")
         bundled = os.path.join(self.ctx.plugin_dir, "bin", "oxp3-tool")
         os.makedirs(os.path.dirname(bundled))
-        self.install_tool("0.4.1", bundled)
+        self.install_tool("0.4.2", bundled)
         inst = oxp3tool.installed(self.ctx)
         self.assertEqual((inst["version"], inst["json_ok"], inst["min_version"], inst["bundled_version"]),
-                         ("0.4.0", False, "0.4.1", "0.4.1"))
+                         ("0.4.0", False, "0.4.2", "0.4.2"))
         for fn in (oxp3tool.status, oxp3tool.catalog):
             r = self.run_cmd(fn)
             self.assertFalse(r["ok"])
-            self.assertIn("version 0.4.0 is installed; OXP3 Deck needs 0.4.1 or newer", r["error"])
+            self.assertIn("version 0.4.0 is installed; OXP3 Deck needs 0.4.2 or newer", r["error"])
         self.assertEqual(self.calls(), [])
 
         def get_text(url, timeout=30, max_bytes=2_000_000):
@@ -170,7 +181,7 @@ class FindAndVersionTest(Base):
         with mock.patch.object(downloads, "get_text", get_text):
             r = oxp3tool.update_check(self.ctx, self.settings)
         self.assertEqual((r["ok"], r["installed"], r["bundled"], r["online"], r["update"]),
-                         (True, "0.4.0", "0.4.1", "0.4.0", "bundled"))
+                         (True, "0.4.0", "0.4.2", "0.4.0", "bundled"))
 
     def test_find_order_and_trust(self):
         local = os.path.join(self.bindir, "oxp3-tool")
@@ -430,10 +441,10 @@ class InstallTest(Base):
     def setUp(self):
         super().setUp()
         self.dest = os.path.join(self.bindir, "oxp3-tool")
-        self.install_tool("0.4.0")   # the early 0.4.0 build (too old, OXP-1) that the bundled 0.4.1 replaces
+        self.install_tool("0.4.0")   # the early 0.4.0 build (too old, OXP-1) that the bundled 0.4.2 replaces
         self.bundled = os.path.join(self.ctx.plugin_dir, "bin", "oxp3-tool")
         os.makedirs(os.path.dirname(self.bundled))
-        self.put_bundled("0.4.1")
+        self.put_bundled("0.4.2")
 
     def put_bundled(self, version, digest=None):
         data = fake_tool(version)
@@ -464,20 +475,20 @@ class InstallTest(Base):
         self.assertEqual(oxp3tool.installed(self.ctx)["version"], "0.4.0")
         with mock.patch.object(sysexec, "which", lambda name: hook if name == "restorecon" else None):
             r, job = self.install()
-        self.assertEqual(r, {"ok": True, "error": None, "version": "0.4.1", "path": self.dest, "source": "bundled",
+        self.assertEqual(r, {"ok": True, "error": None, "version": "0.4.2", "path": self.dest, "source": "bundled",
                              "commit": None})
-        self.assertEqual(self.read_dest(), fake_tool("0.4.1"))
+        self.assertEqual(self.read_dest(), fake_tool("0.4.2"))
         self.assertEqual(stat.S_IMODE(os.stat(self.dest).st_mode), 0o755)
         self.assertEqual(sorted(os.listdir(self.bindir)), ["oxp3-tool"])
         self.assertFalse(os.path.lexists(old_lib))
         self.assertEqual(os.listdir(self.ctx.sys_path("/run/oxp3deck")), [])
         with open(os.path.join(self.tmp.name, "restorecon.args")) as f:
             self.assertEqual(f.read().strip(), self.dest)
-        self.assertEqual(oxp3tool.installed(self.ctx)["version"], "0.4.1")
-        self.assertEqual(job.log[-1], f"Installed oxp3-tool 0.4.1 to {self.dest}")
+        self.assertEqual(oxp3tool.installed(self.ctx)["version"], "0.4.2")
+        self.assertEqual(job.log[-1], f"Installed oxp3-tool 0.4.2 to {self.dest}")
 
     def test_checksum_mismatch_is_refused(self):
-        self.put_bundled("0.4.1", digest="0" * 64)
+        self.put_bundled("0.4.2", digest="0" * 64)
         r, _ = self.install()
         self.assertFalse(r["ok"])
         self.assertIn("bin/oxp3-tool.sha256 says " + "0" * 64, r["error"])
@@ -485,8 +496,8 @@ class InstallTest(Base):
 
     def test_version_gate(self):
         self.install_tool("0.3.0")   # differs from every refused copy below, so a write would show
-        for version, why in (("0.3.9", "it is oxp3-tool 0.3.9; OXP3 Deck needs 0.4.1 or newer"),
-                             ("0.4.0", "it is oxp3-tool 0.4.0; OXP3 Deck needs 0.4.1 or newer"),   # OXP-1
+        for version, why in (("0.3.9", "it is oxp3-tool 0.3.9; OXP3 Deck needs 0.4.2 or newer"),
+                             ("0.4.0", "it is oxp3-tool 0.4.0; OXP3 Deck needs 0.4.2 or newer"),   # OXP-1
                              ("hello world", "the file is not oxp3-tool: hello world")):
             self.put_bundled(version)
             r, _ = self.install()
@@ -507,7 +518,7 @@ class InstallTest(Base):
         with open(victim) as f:
             self.assertEqual(f.read(), "keep me")
         self.assertFalse(os.path.islink(self.dest))
-        self.assertEqual(self.read_dest(), fake_tool("0.4.1"))
+        self.assertEqual(self.read_dest(), fake_tool("0.4.2"))
 
     def test_a_failed_write_leaves_the_old_binary(self):
         real = os.replace
@@ -574,7 +585,7 @@ class InstallTest(Base):
 class UpdateCheckTest(Base):
     def check(self, installed, bundled, online="0.4.0", fail=False):
         inst = {"installed": installed is not None, "path": None, "version": installed, "json_ok": True,
-                "min_version": "0.4.1", "bundled_version": bundled}
+                "min_version": "0.4.2", "bundled_version": bundled}
         fetched = []
 
         def get_text(url, timeout=30, max_bytes=2_000_000):
@@ -590,11 +601,11 @@ class UpdateCheckTest(Base):
             return oxp3tool.update_check(self.ctx, self.settings), fetched
 
     def test_which_update(self):
-        for installed, bundled, online, want in (("0.4.0", "0.4.1", "0.5.0", "bundled"),
+        for installed, bundled, online, want in (("0.4.0", "0.4.2", "0.5.0", "bundled"),
                                                  (None, "0.4.0", "0.5.0", "bundled"),
-                                                 ("0.4.1", "0.4.1", "0.5.0", "online"),
+                                                 ("0.4.2", "0.4.2", "0.5.0", "online"),
                                                  (None, None, "0.4.0", "online"),
-                                                 ("0.5.0", "0.4.1", "0.5.0", None),
+                                                 ("0.5.0", "0.4.2", "0.5.0", None),
                                                  ("0.10.0", "0.9.0", "0.9.9", None)):
             self.settings.set(oxp3tool.ONLINE_KEY, None)
             r, _ = self.check(installed, bundled, online)
@@ -618,7 +629,7 @@ class UpdateCheckTest(Base):
         self.assertFalse(r["ok"])
         self.assertIn("online check:", r["error"])
         self.assertEqual((r["online"], r["update"]), (None, None))
-        r, _ = self.check("0.4.0", "0.4.1", fail=True)   # the plugin's copy needs no network
+        r, _ = self.check("0.4.0", "0.4.2", fail=True)   # the plugin's copy needs no network
         self.assertEqual((r["ok"], r["error"], r["update"]), (True, None, "bundled"))
 
 

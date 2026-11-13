@@ -28,7 +28,9 @@ log = logging.getLogger("oxp3deck")
 
 # 0.4.1: an early 0.4.0 build (commit 7fbcb93, served by get.sh for a while) has --json but no button_keys,
 # min_refresh.default, fix pending, status reboot_pending / rebuild_unfinished; it must read as too old.
-MIN_VERSION = (0, 4, 1)
+# 0.4.2: 0.4.1's `kernel keep` read Limine's record of the last booted entry under the vendor GUID Limine 12.9.5
+# left, so after a `kernel try` it could leave the stock kernel booting at every power-on and still say Done.
+MIN_VERSION = (0, 4, 2)
 MIN_VERSION_TEXT = ".".join(map(str, MIN_VERSION))
 LOCK = threading.Lock()          # held by every oxp3-tool run and by install
 
@@ -700,7 +702,7 @@ def _put_binary(ctx, data: bytes) -> str:
 
 def install(ctx, settings, job, source) -> dict:
     """Install or update /usr/local/bin/oxp3-tool from the plugin's copy ("bundled") or from GitHub ("online"),
-    the way get.sh does: checked sha256, `python3 -I FILE --version` must say oxp3-tool 0.4.1 or newer, then an
+    the way get.sh does: checked sha256, `python3 -I FILE --version` must name oxp3-tool MIN_VERSION or newer, then an
     atomic replace, the old /usr/local/lib/oxp3-tool removed, restorecon. {ok, error, version, path, source}."""
     if source not in ("bundled", "online"):
         return _fail(f"install: source must be 'bundled' or 'online', not {source!r}")

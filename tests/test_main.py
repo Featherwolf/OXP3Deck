@@ -596,8 +596,8 @@ class OverviewTest(Base):
 
     def setUp(self):
         super().setUp()
-        self.inst = {"installed": True, "path": "/usr/local/bin/oxp3-tool", "version": "0.4.1", "json_ok": True,
-                     "min_version": "0.4.1", "bundled_version": "0.4.1"}
+        self.inst = {"installed": True, "path": "/usr/local/bin/oxp3-tool", "version": "0.4.2", "json_ok": True,
+                     "min_version": "0.4.2", "bundled_version": "0.4.2"}
         self.marker = None
         self.fake("oxp3tool", installed=lambda ctx: self.inst, rebuild_unfinished=lambda ctx: self.marker,
                   status=lambda ctx: {"ok": True, "error": None, "status": {"reboot_pending": self.pending}})

@@ -28,6 +28,7 @@ import type { AutoApplied, AutoChange, AutoFacts, AutoGame, AutoMode, AutoOffer,
 import { toast, when } from "../util";
 import { loadLog, LegacyAutoRows, useAutoSettings } from "./AutoLaunch";
 import { confirm, DetailsSpec, paragraphs } from "./confirm";
+import { usePinned } from "./Group";
 import { explainWhen, label, Note, Problem, Status, WithDetails } from "./Hint";
 import { JobView } from "./JobView";
 import { optiApplyPending, resetOptiInflight, syncOptiLaunch } from "./OptiControls";
@@ -239,6 +240,7 @@ export const AutoSetupSwitch: FC = () => {
   const old = useAutoSettings();
   const ov = useResource<Overview>("overview", get_overview);
   const [err, setErr] = useState<string | null>(null);
+  usePinned(err);
   const [busy, setBusy] = useState(false);
   const [rev, setRev] = useState(0);
   const on = !!(st.data?.ok && st.data.on);
@@ -282,7 +284,7 @@ export const AutoSetupSwitch: FC = () => {
 const MODES: { data: AutoMode; label: string }[] = [{ data: "auto", label: "Automatic" }, { data: "manual", label: "Manual" }];
 
 /** Rolled-back changes still to show: newer than any later change of the same kind. */
-const rolledBackRows = (g: AutoGame | null | undefined): AutoChange[] => {
+export const rolledBackRows = (g: AutoGame | null | undefined): AutoChange[] => {
   const all = g?.changes ?? [];
   return all.filter((c) => c.state === "rolled_back" && !all.some((o) => o.kind === c.kind && o.at > c.at));
 };
@@ -301,20 +303,23 @@ const changeDetails = (c: AutoChange): DetailsSpec => {
 
 /**
  * A game's automatic setup rows (GameControls, above the XeSS options), plus an old 0.4 record's "Added: …" row.
- * `onWritten(text)`: the launch options changed here (GameControls shows them).
+ * `onWritten(text)`: the launch options changed here (GameControls shows them). only="alerts": the "Undone after a
+ * quick exit" rows (with Try again) and the error alone, from the cached state (the quick panel's closed This game).
  */
-export const AutoSetupRows: FC<{ app: RunningApp; running: boolean; onWritten: (text: string | null) => void }> = ({ app, running, onWritten }) => {
+export const AutoSetupRows: FC<{ app: RunningApp; running: boolean; onWritten: (text: string | null) => void; only?: "alerts" }> = ({ app, running, onWritten, only }) => {
   const appid = app.appid;
   const steam = isSteamApp(appid);
+  const alerts = only === "alerts";
   const st = useAutoState();
   const on = !!(st.data?.ok && st.data.on);
-  const planRes = useResource<AutoPlanRes>(on && steam ? planKey(appid) : null, () => loadPlan(appid), { fresh: true });
+  const planRes = useResource<AutoPlanRes>(on && steam && !alerts ? planKey(appid) : null, () => loadPlan(appid), { fresh: true });
   const plan = planRes.data?.ok ? planRes.data.plan : null;
   const game: AutoGame | null = st.data?.games?.[appid] ?? plan?.game ?? null;
   const act = useAction();
   const cur = useCurrentJob();
   const [rev, setRev] = useState(0);
   const [passErr, setPassErr] = useState<string | null>(null);
+  usePinned(passErr);
   const tried = useRef<string | null>(null);
   // what the launch-option step would change now (for "Will be set up when you quit" and Details)
   const [launchNow, setLaunchNow] = useState<AutoApplied | null>(null);
@@ -337,7 +342,7 @@ export const AutoSetupRows: FC<{ app: RunningApp; running: boolean; onWritten: (
 
   // opening the controls of a game that does not run: a pass, once per mount
   useEffect(() => {
-    if (!on || running || !steam || tried.current === appid) return;
+    if (!on || running || !steam || alerts || tried.current === appid) return;
     tried.current = appid;
     autoPass(appid, app.name, "open").then(afterPass, () => undefined);
   }, [appid, on, running]);
@@ -405,6 +410,7 @@ export const AutoSetupRows: FC<{ app: RunningApp; running: boolean; onWritten: (
     );
   });
   const removeJob = cur && cur.kind === "opti-remove" && act.busy?.startsWith("undo-") ? cur : null;
+  if (alerts && !on) return null;
   if (!on) {
     // switch off: no passes; past changes keep their rows and Undo
     return <>{legacy}{changeRows}{removeJob && <JobView job={removeJob} />}<Problem what="Automatic setup" error={act.error} /></>;
@@ -433,6 +439,22 @@ export const AutoSetupRows: FC<{ app: RunningApp; running: boolean; onWritten: (
   const waiting = running && !skipped && mode === "auto" ? plannedLabels(plan, launchNow ?? { set: {}, dropped: {}, args: [] }) : [];
   const note = plan?.proton_note ? protonLine(plan.proton_note) : null;
   const lastRun = game?.session?.last_run_s;
+  const rolledBack = rolledBackRows(game).map((c) => (
+    <div key={`rb-${c.id}`}>
+      <Status ok={false} red label="Undone after a quick exit" detail={rollbackText(c, app.name)} details={{
+        title: "Undone after a quick exit",
+        body: paragraphs([game?.notice, lastRun !== null && lastRun !== undefined ? `The last run lasted ${Math.round(lastRun)} s.` : null,
+          "A run shorter than 60 s right after an automatic change undoes that change before the next start; three quick exits in a row undo the newest change. Quitting quickly yourself counts too.",
+          "Try again applies it once more; a single quick exit then no longer undoes it."]),
+      }} />
+      <ButtonItem layout="below" disabled={!!act.busy || running} onClick={() => retry(c)}
+        description={explainWhen("Applies it again; it won't be undone for a quick exit again.", EFFECTS["game.auto_retry"], quit)}>
+        {act.busy === `retry-${c.id}` ? "Working…" : "Try again"}
+      </ButtonItem>
+    </div>
+  ));
+  const problem = <Problem what="Automatic setup" error={act.error ?? passErr ?? game?.last_error ?? (planRes.data && !planRes.data.ok ? planRes.data.error : null)} />;
+  if (alerts) return <>{rolledBack}{problem}</>;
 
   return (
     <>
@@ -452,20 +474,7 @@ export const AutoSetupRows: FC<{ app: RunningApp; running: boolean; onWritten: (
       {waiting.length > 0 && (
         <Status ok={null} label={fit(`Will be set up when you quit ${app.name}`)} detail={fit(waiting.join(", "))} />
       )}
-      {rolledBackRows(game).map((c) => (
-        <div key={`rb-${c.id}`}>
-          <Status ok={false} red label="Undone after a quick exit" detail={rollbackText(c, app.name)} details={{
-            title: "Undone after a quick exit",
-            body: paragraphs([game?.notice, lastRun !== null && lastRun !== undefined ? `The last run lasted ${Math.round(lastRun)} s.` : null,
-              "A run shorter than 60 s right after an automatic change undoes that change before the next start; three quick exits in a row undo the newest change. Quitting quickly yourself counts too.",
-              "Try again applies it once more; a single quick exit then no longer undoes it."]),
-          }} />
-          <ButtonItem layout="below" disabled={!!act.busy || running} onClick={() => retry(c)}
-            description={explainWhen("Applies it again; it won't be undone for a quick exit again.", EFFECTS["game.auto_retry"], quit)}>
-            {act.busy === `retry-${c.id}` ? "Working…" : "Try again"}
-          </ButtonItem>
-        </div>
-      ))}
+      {rolledBack}
       {note && <Status ok={false} label={note.label} detail={note.line} details={{ title: note.label, body: note.detail }} />}
       {plan?.needs_xess && <Note label="Automatic setup">Install XeSS fast mode first (XeSS tab).</Note>}
       {!skipped && (plan?.offers ?? []).map((o) => (
@@ -477,7 +486,7 @@ export const AutoSetupRows: FC<{ app: RunningApp; running: boolean; onWritten: (
         </WithDetails>
       ))}
       {legacy}
-      <Problem what="Automatic setup" error={act.error ?? passErr ?? game?.last_error ?? (planRes.data && !planRes.data.ok ? planRes.data.error : null)} />
+      {problem}
     </>
   );
 };

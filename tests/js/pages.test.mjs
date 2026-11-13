@@ -66,11 +66,64 @@ test("power values go through the writer only, never power_set from a control", 
   assert.match(src("components/PowerControls.tsx"), /powerWriter\.write\(key, slot, values\)/);
 });
 
-test("the quick panel shows Power after Status and before oxp3-tool", () => {
+test("the quick panel's groups in order: Status, Live, This game, Power, CPU, Fan & battery, XeSS, Device fixes", () => {
   const s = src("pages/Quick.tsx");
   const body = s.slice(s.indexOf("export const QuickPanel"));
-  const status = body.indexOf("<StatusSection"), power = body.indexOf("<PowerSection quick"), oxp3 = body.indexOf("<Oxp3Section");
-  assert.ok(status > 0 && power > status && oxp3 > power, "Status, Power, oxp3-tool");
+  const at = [body.indexOf("<StatusSection"),
+    ...["live", "game", "power", "cpu", "battery", "xess", "fixes"].map((id) => body.indexOf(`<Group id="${id}"`)),
+    body.indexOf(">All settings<")];
+  for (let n = 1; n < at.length; n++) assert.ok(at[n - 1] > 0 && at[n] > at[n - 1], `group ${n} out of order: ${at}`);
+  assert.match(body, /<PowerBody \{\.\.\.pd\} \/>/);
+  assert.match(body, /<Oxp3Section o=\{o\} st=\{st\.data\} loading=\{st\.loading\} \/>/);
+});
+
+// ---- Quick Access groups (DESIGN.md "Quick Access groups") ---------------------------------------------------------
+
+test("a group's header is a focusable Field that A toggles; no title on its PanelSection; closed: alerts, no body", () => {
+  const g = src("components/Group.tsx");
+  const header = g.slice(g.indexOf('<PanelSectionRow key="header">'));
+  assert.match(header, /^<PanelSectionRow key="header">\s*<Field focusable highlightOnFocus bottomSeparator="standard"\s*onActivate=\{\(\) => g\.toggle\(id\)\} onOKActionDescription=\{open \? "Close" : "Open"\}/);
+  assert.doesNotMatch(g, /<PanelSection title=/);
+  assert.match(g, /\{open \? \(\s*<GroupCtx\.Provider key="body" value=\{id\}>\{children\}<\/GroupCtx\.Provider>\s*\) : \(\s*<Fragment key="alerts">\s*\{alerts\}/);
+  assert.doesNotMatch(g, /display: ?"none"/, "a closed body is not mounted, not hidden");
+  assert.doesNotMatch(g, /\.focus\(\)/, "no programmatic focus");
+  // remembered per device, read synchronously at the first render
+  assert.match(g, /const current = \(\): GroupState => \(state \?\?= parseGroups\(remember\.get\(GROUPS_KEY\)\)\);/);
+  assert.match(g, /remember\.set\(GROUPS_KEY, JSON\.stringify\(state\)\);/);
+  // the quick panel's sections are groups now: no titled sections left but none
+  const q = src("pages/Quick.tsx");
+  assert.doesNotMatch(q, /<PanelSection title=/);
+  // an action's error survives a close
+  assert.match(src("actions.tsx"), /usePinned\(error\);/);
+  assert.match(src("components/PowerControls.tsx"), /usePinned\(error\);/);
+  // the game's own write errors too (launch options, OptiScaler, automatic setup)
+  assert.match(src("components/GameControls.tsx"), /usePinned\(err\);/);
+  assert.match(src("components/OptiControls.tsx"), /usePinned\(launchErr\);/);
+  assert.match(src("components/AutoSetup.tsx"), /usePinned\(err\);/);
+  assert.match(src("components/AutoSetup.tsx"), /usePinned\(passErr\);/);
+  // a row that unmounts while its group is open drops its pin; another game clears This game's pins
+  assert.match(g, /useEffect\(\(\) => \(\) => \{ if \(g && pins\.drop\(g, id\.current, isOpen\(current\(\), g\)\)\) pinChanged\(\); \}, \[g\]\);/);
+  assert.match(q, /if \(pinnedGame !== null && pinnedGame !== app\.appid\) clearPinned\("game"\);/);
+  // a refused enable's alert only while its conflicts still stand
+  assert.match(q, /powerAlert\(info, s, p\.error, refusedLive\(refused, info, !!s\?\.enabled\)\)/);
+  assert.match(src("components/PowerControls.tsx"), /const live = refusedLive\(refused, info, state\.enabled\);/);
+});
+
+test("closed groups keep their red rows: every group with alerts passes them, built from the same components", () => {
+  const q = src("pages/Quick.tsx");
+  assert.match(q, /alerts=\{pAlert && <PowerAlerts \{\.\.\.pd\} \/>\}/);
+  assert.match(q, /alerts=\{cAlert && <CpuAlerts \{\.\.\.pd\} x=\{x\} \/>\}/);
+  assert.match(q, /alerts=\{bAlert && <BatteryBody \{\.\.\.pd\} x=\{x\} alerts \/>\}/);
+  assert.match(q, /alerts=\{fAlert && <Oxp3Section [^\n]*only="alerts" \/>\}/);
+  assert.match(q, /<AutoSetupRows app=\{app\} running only="alerts" onWritten=\{noop\} \/>/);
+  const pc = src("components/PowerControls.tsx");
+  assert.match(pc, /<PowerStatusRows info=\{info\} state=\{s\} quick only="alerts" \/>/);
+  assert.match(pc, /<EnableToggle state=\{s\} info=\{info\} quick only="alerts" \/>/);
+  // the reads a closed group needs are made once, in QuickPanel
+  assert.match(q, /const p = usePower\(visible\);/);
+  assert.match(q, /const lv = useLive\(visible\);/);
+  assert.match(q, /useEffect\(\(\) => \{ if \(!visible\) clearRecentFixes\(\); \}, \[visible\]\);/);
+  for (const n of ["components/PowerControls.tsx", "components/LiveRows.tsx"]) assert.doesNotMatch(src(n), /useQuickAccessVisible/, n);
 });
 
 test("the full page has the Power tab first", () => {
@@ -84,7 +137,7 @@ test("power-state is polled only while active (it wakes the GPU)", () => {
   const fn = s.slice(s.indexOf("export const usePowerState"));
   assert.match(fn, /\{ skip: !active/);
   assert.match(fn, /if \(!active\) return undefined;/);
-  assert.match(src("components/PowerControls.tsx"), /const shows = !quick \|\| visible;\n\s*const p = usePower\(shows\);/);
+  assert.match(src("pages/Quick.tsx"), /const visible = useQuickAccessVisible\(\);\n\s*const p = usePower\(visible\);/);
 });
 
 test("every power call in api.ts is wrapped in backend.ts with an empty state", () => {
@@ -271,7 +324,7 @@ test("the live readouts are read only by useLive, only while active", () => {
   assert.match(fn, /power_live\(\)/);
   assert.match(fn, /LIVE_MS/);
   assert.match(s, /export const LIVE_MS = 1000;/);
-  assert.match(src("components/PowerControls.tsx"), /<LiveRow active=\{shows\} \/>/);
+  assert.match(src("pages/Quick.tsx"), /<LiveRows live=\{lv\.live\} error=\{lv\.error\} \/>/);
 });
 
 test("the charge behaviour is never inhibit-charge (only auto and inhibit-charge-awake)", () => {
@@ -308,8 +361,10 @@ test("review fixes: greyed-out reasons, pending rows after success, one error, o
   const a = src("actions.tsx");
   assert.match(a, /afterJob\(r\.job\.id, \(j\) => \{\n\s*if \(j\.state === "done"\)/);
   assert.doesNotMatch(a, /if \(!err\) for \(const f of fixes\)/);
-  // one Problem row per refused power_set
-  assert.match(src("components/PowerControls.tsx"), /errors=\{!s\.enabled\}/);
+  // one Problem row per refused power_set: the quick panel's groups show it only where the write was made
+  assert.match(src("components/PowerControls.tsx"), /if \(!own \|\| lastWriter === me\.current \|\| !e\) setError\(e\);/);
+  assert.match(src("components/PowerControls.tsx"), /lastWriter = me\.current;\n\s*setError\(null\);/);
+  assert.match(src("components/PowerControls.tsx"), /const d = useDraft\(profileKey, slot, stored, !!part\);/);
   assert.match(src("pages/Power.tsx"), /battery=\{false\} errors=\{false\}/);
   // the Live Details do not repeat the GPU clock and the reason
   assert.doesNotMatch(src("components/LiveRows.tsx"), /Why it is slow/);
@@ -351,7 +406,7 @@ test("the CPU status line shows the values in effect, and the quick panel shows 
   assert.equal(cpuNowLine({ epp: null, turbo: null, soc: null }), "Cap ? % · Min ? % · Energy: ? · Boost: ?");
   assert.match(src("pages/Power.tsx"), /label="CPU" detail=\{cpuNowLine\(n\)\}/);
   assert.match(src("components/PowerControls.tsx"), /label="CPU now" detail=\{cpuNowLine\(state\.now\)\}/);
-  assert.match(src("components/PowerControls.tsx"), /\{state\.blocked && \(\s*<PanelSectionRow>\s*<Status ok=\{false\} label="Paused" detail="Changes are saved and apply once the other program stops\."/);
+  assert.match(src("components/PowerControls.tsx"), /\{state\.blocked && gpuPart && \(\s*<PanelSectionRow>\s*<Status ok=\{false\} label="Paused" detail="Changes are saved and apply once the other program stops\."/);
   assert.match(src("components/PowerControls.tsx"), /state\.now\.governor === "performance" && \(/);
   const cpu = src("components/CpuControls.tsx");
   assert.match(cpu, /On battery: the device's own floor \(\$\{minR\.lo\} %\) runs now\./);
@@ -386,4 +441,14 @@ test("Start in DirectX 12: a per-game toggle that writes only its argument, with
   // the frame generation check: the log's time in the check's Details, how to turn the log on without one
   assert.match(s, /The log was written \$\{when\(c\.at\)\}/);
   assert.match(s, /turn on Save XeSS logs \(XESS_LOG=1\)/);
+});
+
+test("Kernel tab: Keep is offered whenever Limine would boot another kernel, and says what it does", () => {
+  const k = src("pages/Kernel.tsx");
+  // after a keep by oxp3-tool 0.4.1 (no try left, Limine still booting the stock kernel) Keep must still show
+  assert.match(k, /const elsewhere = !!k && !!runningPkg && !oneshot && k\.next_boot\.package !== runningPkg;/);
+  assert.match(k, /\{\(k\.trying \|\| oneshot \|\| elsewhere\) && \(/);
+  assert.match(k, /the one every power-on boots\. It cancels a pending one-time boot/);
+  assert.match(k, /records \$\{now\} there\./);
+  assert.doesNotMatch(k, /so Limine keeps booting the kernel running now/);
 });

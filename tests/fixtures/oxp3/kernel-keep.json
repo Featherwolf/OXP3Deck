@@ -45,15 +45,15 @@
   },
   {
    "stream": "out",
-   "text": "Then every power-on boots linux-cachyos-deckify."
+   "text": "Then every power-on boots linux-cachyos-deckify, the kernel running now."
   },
   {
    "stream": "out",
-   "text": "Done."
+   "text": "Done: every power-on boots linux-cachyos-deckify, the kernel running now."
   }
  ],
  "ok": true,
  "rc": 0,
  "schema": 1,
- "version": "0.4.1"
+ "version": "0.4.2"
 }

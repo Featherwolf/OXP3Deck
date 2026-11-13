@@ -53,8 +53,8 @@ the **☰** (Options) button for its **Details** window (on a status line, **A**
 setting takes effect, what to watch out for, how to fix a problem, and the technical names (PL1, EPP, service names,
 paths). Steam Game Mode has no mouse hover, so there are no tooltips.
 
-1. Open **OXP3 Deck** in Quick Access. **Status** shows the device and the system.
-2. If the fixes tool (oxp3-tool) is missing or too old (the plugin needs 0.4.1 or later), tap **Install fixes tool**
+1. Open **OXP3 Deck** in Quick Access. The top rows show the device and the system.
+2. If the fixes tool (oxp3-tool) is missing or too old (the plugin needs 0.4.2 or later), tap **Install fixes tool**
    or **Update fixes tool**. It puts
    oxp3-tool at `/usr/local/bin/oxp3-tool`, where `get.sh` puts it, so `sudo oxp3-tool` keeps working in Konsole.
 3. Tap **Apply recommended** under **Device fixes**. It shows the plan and asks first. If a fix needs a reboot,
@@ -69,21 +69,28 @@ paths). Steam Game Mode has no mouse hover, so there are no tooltips.
 
 ## The pages
 
-**Quick panel** (Quick Access):
+**Quick panel** (Quick Access): the status at the top, then groups. Press A on a group's header to open or close
+it; a closed group shows a one-line summary ("15 W · boost 25 W · GPU 300–2300 MHz · Default"), and D-pad down goes
+straight to the next header. This game and Power start open, the others closed; OXP3 Deck remembers your choice on
+this device. Red lines (another power program in the way, a fix that needs attention, an action that did not work)
+stay visible in a closed group, with their buttons, and turn its header red.
 
-- **Status:** the device and OS. A red **Do not reboot yet** line when oxp3-tool could not finish rebuilding the
-  boot entries (its Details say what to run). **Reboot to finish** when a change waits for a reboot. The running
-  task and its last log line (the whole log in its Details).
-- **Power:** a **Live** line ("18.4 W · 62 °C · GPU 87 % · 3 h 10 min left"), the power limits now ("15 W steady ·
-  25 W boost") and the active profile. **Power control (TDP)** on or off, then **Separate profile for <game>**,
-  **Sustained power**, **Boost power**, **GPU maximum speed**, the [CPU and GPU controls](#cpu-and-gpu-controls) and
-  **CPU boost**; then **Fan**, **CPU scheduler mode**, **Battery charge limit** and **Run from charger** where this
-  system has them. Red lines when another power program is in the way, each with **Fix for me** where OXP3 Deck can
-  turn it off for you (see [Other power managers](#other-power-managers)).
+- **Status** (no header): the device and OS. A red **Do not reboot yet** line when oxp3-tool could not finish
+  rebuilding the boot entries (its Details say what to run). **Reboot to finish** when a change waits for a reboot.
+  The running task and its last log line (the whole log in its Details).
+- **Live:** closed, the live line ("18.4 W · 62 °C · GPU 87 % · 3 h 10 min left"); open, one value per row.
+- **This game** (only while a game runs): **Set up games automatically**, **Separate profile for <game>**, the XeSS
+  settings as dropdowns, and tips for that game.
+- **Power:** the power limits now ("15 W steady · 25 W boost") and the active profile, **Power control (TDP)** on or
+  off, **Sustained power**, **Boost power**, **GPU maximum speed** and **GPU power saving**. Red lines when another
+  power program is in the way, each with **Fix for me** where OXP3 Deck can turn it off for you (see
+  [Other power managers](#other-power-managers)).
+- **CPU:** the [CPU controls](#cpu-and-gpu-controls), **CPU boost**, what the CPU runs now and **CPU scheduler
+  mode**.
+- **Fan & battery:** **Fan**, **Battery charge limit** and **Run from charger**, where this system has them.
+- **XeSS:** **XeSS fast mode: On / Off / Log out needed**, and Install, Update or Repair.
 - **Device fixes:** Install or Update the fixes tool when it is missing or old. The recommended fixes not applied
   yet, with **Apply recommended**.
-- **XeSS:** **XeSS fast mode: On / Off / Log out needed**, and Install, Update or Repair.
-- **This game** (only while a game runs): the XeSS settings as dropdowns, and tips for that game.
 - **All settings:** the full page, with these tabs.
 
 **Power:** the power limits now (each interface in Details), the GPU speed, energy preference, boost and the power
@@ -484,7 +491,7 @@ give the same zip. `--out FILE` writes it elsewhere.
 `vendor/oxp3-tool` is a copy of `dist/oxp3-tool` from [OXP3-Tool-for-Bazzite](https://github.com/Featherwolf/OXP3-Tool-for-Bazzite). To bundle a newer one:
 
 ```bash
-python3 tools/vendor_oxp3_tool.py                  # the newest on GitHub (or --ref v0.4.1)
+python3 tools/vendor_oxp3_tool.py                  # the newest on GitHub (or --ref v0.4.2)
 python3 tools/vendor_oxp3_tool.py --from ../OXP3-Tool-for-Bazzite   # a local checkout
 pnpm zip
 ```

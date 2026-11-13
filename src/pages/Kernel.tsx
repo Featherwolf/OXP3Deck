@@ -38,7 +38,10 @@ const tryKernel = async (k: Oxp3KernelEntry, now: string): Promise<string | null
 const keepKernel = async (now: string): Promise<string | null> => {
   const ok = await confirm({
     title: `Keep booting ${now}?`, ok: "Keep", effect: EFFECTS["kernel.keep"],
-    text: "oxp3-tool puts limine.conf's remember_last_entry and default_entry back as they were and cancels a pending one-time boot, so Limine keeps booting the kernel running now.",
+    text: paragraphs([
+      `oxp3-tool makes ${now}, the kernel running now, the one every power-on boots. It cancels a pending one-time boot and puts limine.conf's remember_last_entry and default_entry back as they were. If Limine's record of the last booted kernel (LimineLastBootedEntry) names another kernel, it records ${now} there.`,
+      "It changes nothing if it cannot make the running kernel the one that boots, and says why. Its last line says which kernel boots.",
+    ]),
   });
   if (!ok) return null;
   return started(await oxp3_kernel_keep());
@@ -54,6 +57,9 @@ export const KernelTab: FC = () => {
   const k = kr.data?.ok ? kr.data.kernel : null;
   const now = k?.kernels.find((x) => x.running)?.package ?? "the running kernel";
   const oneshot = k?.next_boot.why === "one-shot";
+  // Keep is offered while a try is set up, and whenever Limine would boot another kernel than the running one.
+  const runningPkg = k?.kernels.find((x) => x.running)?.package;
+  const elsewhere = !!k && !!runningPkg && !oneshot && k.next_boot.package !== runningPkg;
   return (
     <>
       <TaskSection />
@@ -93,8 +99,8 @@ export const KernelTab: FC = () => {
                 Reboot now
               </ButtonItem>
             )}
-            {(k.trying || oneshot) && (
-              <WithDetails details={{ title: "Keep this kernel", body: `Keeps booting ${now}, the kernel running now${oneshot ? ", and cancels the pending one-time boot" : ""}. Takes effect at the next reboot; asks first.` }}>
+            {(k.trying || oneshot || elsewhere) && (
+              <WithDetails details={{ title: "Keep this kernel", body: `Makes ${now}, the kernel running now, the one every power-on boots${oneshot ? ", and cancels the pending one-time boot" : ""}${elsewhere ? ` (Limine would boot ${k.next_boot.package ?? "another kernel"} now)` : ""}. Takes effect at the next reboot; asks first.` }}>
                 <ButtonItem layout="below" disabled={!!act.busy || running}
                   onClick={() => act.run("keep", async () => blockedBy() ?? keepKernel(now))}
                   description={explainWhen("Always boot the kernel running now.", EFFECTS["kernel.keep"], running ? "Wait for the running task." : null)}>

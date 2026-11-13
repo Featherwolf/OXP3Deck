@@ -5,6 +5,7 @@ import { useState } from "react";
 
 import { oxp3_apply, oxp3_install, oxp3_plan, oxp3_revert, reboot, xess_install, xess_state, xess_uninstall } from "./backend";
 import { confirm } from "./components/confirm";
+import { usePinned } from "./components/Group";
 import { EFFECTS, EffectSpec, fixEffect, strongest } from "./effects";
 import { afterJob, currentJob, notePending, noteJob } from "./store";
 import type { ApplyOpts, Job, JobStart, XessState } from "./types";
@@ -16,6 +17,7 @@ export const useAction = () => {
   const [busy, setBusy] = useState<string | null>(null);
   const [error, setError] = useState<string | null>(null);
   const [job, setJob] = useState<Job | null>(null);
+  usePinned(error);       // in a quick panel group: stays shown once the group is closed
   const run = async (name: string, fn: () => Promise<string | null | void>) => {
     if (busy) return;
     setBusy(name);

@@ -59,9 +59,11 @@ const SCX_OPTS: { data: ScxMode | null; label: string }[] = [{ data: null, label
 
 /**
  * Fan mode and scheduler mode of one profile slot; `write` is the profile's draft writer. `active`: the slot runs now,
- * so a scheduler change applies at once (asks first while a game runs).
+ * so a scheduler change applies at once (asks first while a game runs). `only`: the fan or the scheduler mode alone
+ * (the quick panel's groups); `alerts`: only their "Something else changed" rows (a closed group).
  */
-export const ProfileExtras: FC<{ v: PowerValues; write: (values: Partial<PowerValues>) => void; x: ExtrasState | null; active?: boolean }> = ({ v, write, x, active = true }) => {
+export const ProfileExtras: FC<{ v: PowerValues; write: (values: Partial<PowerValues>) => void; x: ExtrasState | null; active?: boolean;
+  only?: "fan" | "scx"; alerts?: boolean }> = ({ v, write, x, active = true, only, alerts }) => {
   const app = useRunningApp();
   const [rev, setRev] = useState(0);      // remounts the dropdown after a cancelled change
   if (!x) return null;
@@ -81,13 +83,15 @@ export const ProfileExtras: FC<{ v: PowerValues; write: (values: Partial<PowerVa
   ], ["org.scx.Loader SwitchScheduler (scx_loader)", "scx_lavd --autopilot / --performance / --powersave", scx.scheduler ? `running: ${scx.scheduler}${scx.mode ? ` (${scx.mode})` : ""}` : "no scheduler"]);
   return (
     <>
-      {fan.available && (
+      {fan.available && only !== "scx" && (
         <>
-          <WithDetails details={fanD}>
-            <DropdownItem label={label("Fan", fanD)} rgOptions={FAN_OPTS} selectedOption={v.fan_mode ?? "auto"}
-              onChange={(o) => write({ fan_mode: o.data as FanMode })}
-              description={explainWhen(fan.reverted ? fan.reverted : "Auto, Quiet or Max. Quiet goes back to Auto if the CPU gets too hot.", EFFECTS["extras.fan"])} />
-          </WithDetails>
+          {!alerts && (
+            <WithDetails details={fanD}>
+              <DropdownItem label={label("Fan", fanD)} rgOptions={FAN_OPTS} selectedOption={v.fan_mode ?? "auto"}
+                onChange={(o) => write({ fan_mode: o.data as FanMode })}
+                description={explainWhen(fan.reverted ? fan.reverted : "Auto, Quiet or Max. Quiet goes back to Auto if the CPU gets too hot.", EFFECTS["extras.fan"])} />
+            </WithDetails>
+          )}
           {fan.overridden && (
             <>
               <Status ok={false} red label="Something else changed the fan"
@@ -98,19 +102,21 @@ export const ProfileExtras: FC<{ v: PowerValues; write: (values: Partial<PowerVa
           )}
         </>
       )}
-      {scx.shown && (
+      {scx.shown && only !== "fan" && (
         <>
-          <WithDetails details={scxD}>
-            <DropdownItem key={`scx-${rev}`} label={label("CPU scheduler mode", scxD)} rgOptions={SCX_OPTS} selectedOption={v.scx_mode ?? null}
-              disabled={!scx.available}
-              onChange={async (o) => {
-                const m = o.data as ScxMode | null;
-                if (m === (v.scx_mode ?? null)) return;
-                if (await scxGoAhead(app, active)) write({ scx_mode: m });
-                else setRev((n) => n + 1);
-              }}
-              description={explainWhen(SCX_WARN.line, EFFECTS["extras.scx"], scx.available ? null : scx.why)} />
-          </WithDetails>
+          {!alerts && (
+            <WithDetails details={scxD}>
+              <DropdownItem key={`scx-${rev}`} label={label("CPU scheduler mode", scxD)} rgOptions={SCX_OPTS} selectedOption={v.scx_mode ?? null}
+                disabled={!scx.available}
+                onChange={async (o) => {
+                  const m = o.data as ScxMode | null;
+                  if (m === (v.scx_mode ?? null)) return;
+                  if (await scxGoAhead(app, active)) write({ scx_mode: m });
+                  else setRev((n) => n + 1);
+                }}
+                description={explainWhen(SCX_WARN.line, EFFECTS["extras.scx"], scx.available ? null : scx.why)} />
+            </WithDetails>
+          )}
           {scx.overridden && (
             <>
               <Status ok={false} red label="Something else changed the scheduler mode" detail="Likely CachyOS's power switch."
@@ -136,8 +142,11 @@ const useSettled = <T,>(send: (v: T) => void, ms = 400) => {
   };
 };
 
-/** Battery charge limit and "Run from charger": global, not per profile (they follow the battery). */
-export const ChargeRows: FC<{ x: ExtrasState | null }> = ({ x }) => {
+/**
+ * Battery charge limit and "Run from charger": global, not per profile (they follow the battery). only="alerts":
+ * their "Something else changed" rows and the battery's error alone (a closed quick panel group).
+ */
+export const ChargeRows: FC<{ x: ExtrasState | null; only?: "alerts" }> = ({ x, only }) => {
   const act = useAction();
   const [draft, setDraft] = useState<number | null>(null);
   const c = x?.charge;
@@ -154,20 +163,23 @@ export const ChargeRows: FC<{ x: ExtrasState | null }> = ({ x }) => {
     "While the device is awake and plugged in, it runs from the charger and leaves the battery alone: less heat when docked. It still charges normally while asleep.",
     "Takes effect: Now.",
   ], ["power_supply BAT charge_behaviour: inhibit-charge-awake / auto"]);
+  const alerts = only === "alerts";
   return (
     <>
-      <WithDetails details={limD}>
-        <SliderField label={label("Battery charge limit", limD)} value={limit} min={50} max={100} step={5} showValue valueSuffix=" %"
-          onChange={(n) => { const v = Math.min(100, Math.max(50, Math.round(n))); setDraft(v); sendLimit(v); }}
-          description={explainWhen("Stops charging at this level. Slows battery wear when often plugged in.", EFFECTS["extras.charge_limit"])} />
-      </WithDetails>
+      {!alerts && (
+        <WithDetails details={limD}>
+          <SliderField label={label("Battery charge limit", limD)} value={limit} min={50} max={100} step={5} showValue valueSuffix=" %"
+            onChange={(n) => { const v = Math.min(100, Math.max(50, Math.round(n))); setDraft(v); sendLimit(v); }}
+            description={explainWhen("Stops charging at this level. Slows battery wear when often plugged in.", EFFECTS["extras.charge_limit"])} />
+        </WithDetails>
+        )}
       {c.overridden.limit && (
         <>
           <Status ok={false} red label="Something else changed the charge limit" detail={c.overridden.limit} />
           <TakeControl what="charge_limit" label="Take control of the charge limit" />
         </>
       )}
-      {canAwake && (
+      {canAwake && !alerts && (
         <WithDetails details={awakeD}>
           <ToggleField label={label("Run from charger (battery idle)", awakeD)} checked={awake} disabled={!!act.busy}
             onChange={(on) => act.run("behaviour", async () => noteExtras(await extras_set({ charge_behaviour: on ? "inhibit-charge-awake" : "auto" })))}
@@ -180,7 +192,7 @@ export const ChargeRows: FC<{ x: ExtrasState | null }> = ({ x }) => {
           <TakeControl what="charge_behaviour" label="Take control of Run from charger" />
         </>
       )}
-      <Problem what="Battery" error={act.error ?? c.error ?? null} />
+      <Problem what="Battery" error={(alerts ? null : act.error) ?? c.error ?? null} />
     </>
   );
 };

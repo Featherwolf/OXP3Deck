@@ -46,8 +46,8 @@ class VendorTest(unittest.TestCase):
         self.assertEqual(self.v.min_version(), tuple(oxp3tool.MIN_VERSION))
 
     def test_good_tool_is_installed(self):
-        tool = fake_tool("0.4.1")
-        self.assertEqual(self.v.check(tool, sums_of(tool), (0, 4, 1)), "0.4.1")
+        tool = fake_tool("0.4.2")
+        self.assertEqual(self.v.check(tool, sums_of(tool), (0, 4, 2)), "0.4.2")
         self.v.install(tool, sums_of(tool), self.vendor)
         self.assertEqual((self.vendor / "oxp3-tool").read_bytes(), tool)
         self.assertEqual((self.vendor / "oxp3-tool.sha256").read_text(), sums_of(tool))
@@ -55,16 +55,16 @@ class VendorTest(unittest.TestCase):
         self.assertEqual(sorted(os.listdir(self.vendor)), ["oxp3-tool", "oxp3-tool.sha256"])   # no temp files
 
     def test_refusals(self):
-        tool = fake_tool("0.4.1")
+        tool = fake_tool("0.4.2")
         for data, sums, why in (
             (tool, "0" * 64 + "  oxp3-tool\n", "does not match"),
             (tool, "nonsense\n", "is not '<sha256>  oxp3-tool'"),
-            (fake_tool("0.4.0"), sums_of(fake_tool("0.4.0")), "needs 0.4.1 or newer"),
+            (fake_tool("0.4.0"), sums_of(fake_tool("0.4.0")), "needs 0.4.2 or newer"),
             (b"#!/usr/bin/python3 -I\nprint('something else')\n",
              sums_of(b"#!/usr/bin/python3 -I\nprint('something else')\n"), "--version said"),
         ):
             with self.assertRaisesRegex(self.v.VendorError, why):
-                self.v.check(data, sums, (0, 4, 1))
+                self.v.check(data, sums, (0, 4, 2))
 
     def test_local_checkout_needs_dist(self):
         with self.assertRaisesRegex(self.v.VendorError, "is missing"):

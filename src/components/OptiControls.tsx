@@ -19,6 +19,7 @@ import type { GameInfo, Job, LaunchPlan, OptiChoices, OptiInfo, OptiInfoRes, Opt
 import { toast, when } from "../util";
 import { confirm, DetailsSpec, paragraphs } from "./confirm";
 import { Pending } from "./Effect";
+import { usePinned } from "./Group";
 import { explain, explainWhen, label, Note, Problem, Status, WithDetails } from "./Hint";
 import { JobView } from "./JobView";
 import { markManual } from "../autostate";
@@ -101,6 +102,7 @@ export const OptiRows: FC<{ app: RunningApp; quick?: boolean; running: boolean; 
   const act = useAction();
   const cur = useCurrentJob();
   const [launchErr, setLaunchErr] = useState<string | null>(null);
+  usePinned(launchErr);
   const [waiting, setWaiting] = useState(false);
   const info: OptiInfo | null = res.data?.ok ? res.data.opti ?? null : null;
   const [pick, setPick] = useState<OptiChoices>(DEFAULT_CHOICES);

@@ -34,17 +34,18 @@ const useAdvanced = () => {
 
 export const CpuControls: FC<{
   state: PowerState; info: PowerInfo | null; v: PowerValues; write: (values: Partial<PowerValues>) => void;
-  active: boolean; quick?: boolean;
-}> = ({ state, info, v, write, active, quick }) => {
+  active: boolean; quick?: boolean; part?: "gpu" | "cpu";      // part: GPU power saving alone, or the CPU rows alone
+}> = ({ state, info, v, write, active, quick, part }) => {
   const adv = useAdvanced();
   const [switching, setSwitching] = useState(false);
   const cpu = info?.hw.cpu ?? null;
   const r = state.range;
   const now = state.now;
-  const perf = !!cpu?.perf_pct;
-  const soc = !!info?.hw.soc && now.soc !== null;
-  const gpuProfile = !!info?.hw.gpu?.power_profile;
-  const types = (cpu?.types ?? []).filter((t) => r.core_types?.[t]);
+  const cpuPart = part !== "gpu";
+  const perf = cpuPart && !!cpu?.perf_pct;
+  const soc = cpuPart && !!info?.hw.soc && now.soc !== null;
+  const gpuProfile = part !== "cpu" && !!info?.hw.gpu?.power_profile;
+  const types = cpuPart ? (cpu?.types ?? []).filter((t) => r.core_types?.[t]) : [];
   const pctLock = lockedWhy("cpu_pct", state, info);
   const capsLock = lockedWhy("cpu_caps", state, info);
   const socLock = lockedWhy("soc", state, info);
@@ -164,7 +165,7 @@ export const CpuControls: FC<{
           </WithDetails>
         </PanelSectionRow>
       )}
-      {(types.length > 0 || (cpu?.epp_choices.length ?? 0) > 0) && (perf || types.length > 0) && (
+      {cpuPart && (types.length > 0 || (cpu?.epp_choices.length ?? 0) > 0) && (perf || types.length > 0) && (
         <PanelSectionRow>
           <WithDetails details={advD}>
             <ToggleField label={label("Show advanced CPU options", advD)} checked={adv.on} onChange={(c) => adv.set(c)}

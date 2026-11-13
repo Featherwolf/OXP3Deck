@@ -2,17 +2,18 @@
 // page's Power tab share. Profile values go through the store's one writer (powerWriter), never straight to
 // power_set, so a slider drag reaches the backend in order and a late answer cannot move a slider back. Every row
 // shows one plain line; the rest is in its Details (☰).
-import { ButtonItem, DropdownItem, PanelSection, PanelSectionRow, SliderField, ToggleField } from "@decky/ui";
-import { FC, useEffect, useMemo, useRef, useState } from "react";
+import { ButtonItem, DropdownItem, PanelSectionRow, SliderField, ToggleField } from "@decky/ui";
+import { FC, useEffect, useMemo, useReducer, useRef, useState } from "react";
 
 import { useAction } from "../actions";
 import { power_enable, power_info, power_profile, power_take_control } from "../backend";
 import { friendlyName, lockedLine } from "../conflicts";
 import { EFFECTS } from "../effects";
 import {
-  blockers, capRows, clampW, cpuNowLine, editSlot, EMPTY, eppOptions, GOVERNOR_PERFORMANCE, RESET, fwValues, gpuNotches,
+  blockers, capRows, clampW, cpuNowLine, eppOptions, GOVERNOR_PERFORMANCE, RESET, fwValues, gpuNotches,
   limitsLine, pl1Change, pl2Floor, profileLine, reasonText, shown, Slot, suspects, watts, yieldedText,
 } from "../power";
+import { cpuBlockers, editedSlot, refusedLive } from "../quickgroups";
 import { RunningApp } from "../steam";
 import { invalidate, notePower, powerWriter, usePowerErrors, usePowerState, useResource } from "../store";
 import { firstSentence } from "../text";
@@ -20,13 +21,12 @@ import type {
   Epp, ExtrasState, PowerChangeRes, PowerConflict, PowerInfo, PowerInfoRes, PowerState, PowerValues,
 } from "../types";
 import { listText, remember } from "../util";
-import { clearRecentFixes, ConflictRows, FixedRows } from "./ConflictRow";
+import { ConflictRows, FixedRows } from "./ConflictRow";
 import { confirm, DetailsSpec, paragraphs } from "./confirm";
 import { CpuControls } from "./CpuControls";
-import { ChargeRows, ProfileExtras, useExtrasState } from "./ExtrasControls";
+import { ChargeRows, ProfileExtras } from "./ExtrasControls";
 import { explainWhen, label, Problem, Status, WithDetails } from "./Hint";
-import { useQuickAccessVisible } from "./JobView";
-import { LiveRow } from "./LiveRows";
+import { usePinned } from "./Group";
 
 /** The cached power info and the live state (polled only while `active`): the state of power_state, else info's. */
 export const usePower = (active: boolean) => {
@@ -50,13 +50,7 @@ export const settle = (r: PowerChangeRes): string | null => notePower(r);
 
 const names = (cs: PowerConflict[]) => listText(cs.map((c) => friendlyName(c.id, c.name)));
 
-/** The conflicts behind cpu_blocked (cpu_blocked_by; an older backend: every cpu conflict not handled). */
-export const cpuBlockers = (state: PowerState, info: PowerInfo | null): PowerConflict[] => {
-  if (!state.cpu_blocked) return [];
-  const all = info?.conflicts ?? [];
-  const by = state.cpu_blocked_by ?? [];
-  return by.length ? all.filter((c) => by.includes(c.id)) : all.filter((c) => c.kind === "cpu" && !c.ignored);
-};
+export { cpuBlockers };
 
 const statusDetails = (state: PowerState): DetailsSpec => {
   const n = state.now;
@@ -81,7 +75,8 @@ const TAKE_D: DetailsSpec = {
 };
 
 /** The status line and the red rows: blocked, overridden (with "Take control again"), what did not take. */
-export const PowerStatusRows: FC<{ info: PowerInfo | null; state: PowerState; quick?: boolean }> = ({ info, state, quick }) => {
+export const PowerStatusRows: FC<{ info: PowerInfo | null; state: PowerState; quick?: boolean; only?: "alerts" }> = ({ info, state, quick, only }) => {
+  const alerts = only === "alerts";      // a closed quick panel group: the red rows only
   const act = useAction();
   const o = state.overridden;
   const caps = capRows(state.last, state.now.zones);
@@ -94,11 +89,13 @@ export const PowerStatusRows: FC<{ info: PowerInfo | null; state: PowerState; qu
     : friendlyName(id, info?.conflicts.find((c) => c.id === id)?.name)));
   return (
     <>
-      <PanelSectionRow>
-        <Status ok={!state.enabled ? null : !o && !state.blocked}
-          label={limitsLine(state)} details={statusDetails(state)}
-          detail={state.enabled ? `${profileLine(state)}${gpuHeld ? " · GPU held back by power limit" : ""}` : "Device defaults"} />
-      </PanelSectionRow>
+      {!alerts && (
+        <PanelSectionRow>
+          <Status ok={!state.enabled ? null : !o && !state.blocked}
+            label={limitsLine(state)} details={statusDetails(state)}
+            detail={state.enabled ? `${profileLine(state)}${gpuHeld ? " · GPU held back by power limit" : ""}` : "Device defaults"} />
+        </PanelSectionRow>
+      )}
       {state.enabled && state.blocked && (
         <PanelSectionRow>
           <Status ok={false} red label="Power control paused"
@@ -134,7 +131,7 @@ export const PowerStatusRows: FC<{ info: PowerInfo | null; state: PowerState; qu
               lines: ["cpufreq scaling_governor: performance (OXP3 Deck expects powersave with intel_pstate active)"] }} />
         </PanelSectionRow>
       )}
-      {state.enabled && yielded && (
+      {state.enabled && yielded && !alerts && (
         <PanelSectionRow>
           <Status ok={false} label="Left to another program" detail={yielded}
             details={{ title: "Left to another program", body: paragraphs([
@@ -152,12 +149,27 @@ export const PowerStatusRows: FC<{ info: PowerInfo | null; state: PowerState; qu
         </PanelSectionRow>
       )}
       {/* the Power tab lists every record under "Other power programs"; the quick panel only what it just fixed */}
-      {quick && <PanelSectionRow><FixedRows info={info} quick /></PanelSectionRow>}
+      {quick && !alerts && <PanelSectionRow><FixedRows info={info} quick /></PanelSectionRow>}
     </>
   );
 };
 
 const ENABLE_SEEN = "powerEnableConfirmed";
+
+// a refused enable's blocking conflicts: kept here, not in the toggle, so a closed quick panel group still shows them
+let refusedNow: PowerConflict[] = [];
+const refusedSubs = new Set<() => void>();
+const setRefused = (cs: PowerConflict[]) => {
+  if (!cs.length && !refusedNow.length) return;
+  refusedNow = cs;
+  refusedSubs.forEach((f) => { try { f(); } catch { /* a dead subscriber */ } });
+};
+/** The conflicts the last refused "Power control (TDP)" enable named ([] after a later try). */
+export const useRefused = (): PowerConflict[] => {
+  const [, bump] = useReducer((n: number) => n + 1, 0);
+  useEffect(() => { refusedSubs.add(bump); return () => { refusedSubs.delete(bump); }; }, []);
+  return refusedNow;
+};
 
 const ENABLE_DETAILS: DetailsSpec = {
   title: "Power control (TDP)",
@@ -171,9 +183,9 @@ const ENABLE_DETAILS: DetailsSpec = {
 };
 
 /** The "Power control (TDP)" toggle: the first enable asks first; a refused one lists each blocking conflict and its fix. */
-export const EnableToggle: FC<{ state: PowerState; info: PowerInfo | null; quick?: boolean }> = ({ state, info, quick }) => {
+export const EnableToggle: FC<{ state: PowerState; info: PowerInfo | null; quick?: boolean; only?: "alerts" }> = ({ state, info, quick, only }) => {
   const act = useAction();
-  const [refused, setRefused] = useState<PowerConflict[]>([]);
+  const refused = useRefused();
   const r = state.range;
   const rangeText = r.spec === "oxp3"
     ? `${r.pl1_min}–${r.pl1_max_battery} W on battery, up to ${r.pl1_max_ac} W plugged in`
@@ -206,17 +218,18 @@ export const EnableToggle: FC<{ state: PowerState; info: PowerInfo | null; quick
   const problems = info?.hw.problems ?? [];
   const noRapl = !state.enabled && info !== null && !info.hw.rapl && !info.hw.mmio;
   // a refused enable: the rows from the fresh power-info once it has them (a fix there updates them), else the answer's
-  const live = refused.map((c) => info?.conflicts.find((x) => x.id === c.id) ?? c)
-    .filter((c) => info?.conflicts.some((x) => x.id === c.id) || !(info?.fixed ?? []).some((f) => f.id === c.id));
+  const live = refusedLive(refused, info, state.enabled);
   return (
     <PanelSectionRow>
-      <WithDetails details={ENABLE_DETAILS}>
-        <ToggleField label={label("Power control (TDP)", ENABLE_DETAILS)} checked={state.enabled}
-          disabled={!!act.busy || noRapl}
-          onChange={toggle}
-          description={explainWhen(state.enabled ? "Uses your profile below." : "Device defaults. Turn on to set power here.",
-            EFFECTS["power.enable"], noRapl ? "This system doesn't expose power limits." : null)} />
-      </WithDetails>
+      {only !== "alerts" && (
+        <WithDetails details={ENABLE_DETAILS}>
+          <ToggleField label={label("Power control (TDP)", ENABLE_DETAILS)} checked={state.enabled}
+            disabled={!!act.busy || noRapl}
+            onChange={toggle}
+            description={explainWhen(state.enabled ? "Uses your profile below." : "Device defaults. Turn on to set power here.",
+              EFFECTS["power.enable"], noRapl ? "This system doesn't expose power limits." : null)} />
+        </WithDetails>
+      )}
       {problems.length > 0 && (
         <Status ok={false} label="Power control unavailable" detail={firstSentence(problems[0])}
           details={{ title: "Power control unavailable", body: paragraphs(problems) }} />
@@ -228,10 +241,16 @@ export const EnableToggle: FC<{ state: PowerState; info: PowerInfo | null; quick
   );
 };
 
+let draftSeq = 0;
+let lastWriter = 0;        // the useDraft that wrote last (a refused power_set is its answer)
+
 /** Values typed by the user that the stored profile does not show yet (an answer still on its way). */
-export const useDraft = (key: string, slot: Slot, stored: PowerValues) => {
+export const useDraft = (key: string, slot: Slot, stored: PowerValues, own = false) => {
   const [draft, setDraft] = useState<Partial<PowerValues>>({});
   const [error, setError] = useState<string | null>(null);
+  const me = useRef(0);      // own: show a refused write only in the editor that made the last write (the quick panel's groups)
+  if (!me.current) me.current = ++draftSeq;
+  usePinned(error);
   useEffect(() => { setDraft({}); setError(null); }, [key, slot]);
   // a draft value the stored one has caught up with is done
   useEffect(() => {
@@ -240,8 +259,9 @@ export const useDraft = (key: string, slot: Slot, stored: PowerValues) => {
       return Object.keys(left).length === Object.keys(d).length ? d : left;
     });
   }, [JSON.stringify(stored)]);
-  usePowerErrors((e) => { setDraft({}); setError(e); });
+  usePowerErrors((e) => { setDraft({}); if (!own || lastWriter === me.current || !e) setError(e); });
   const write = (values: Partial<PowerValues>) => {
+    lastWriter = me.current;
     setError(null);
     setDraft((d) => ({ ...d, ...values }));
     powerWriter.write(key, slot, values);
@@ -259,13 +279,16 @@ const det = (title: string, body: (string | null | undefined | false)[], lines?:
 
 /**
  * The sliders and choices of one profile slot. quick: sustained, boost, GPU max and CPU boost only. `active`: the
- * slot runs now, so null fields show the applied firmware values; otherwise the boot values.
+ * slot runs now, so null fields show the applied firmware values; otherwise the boot values. `part` (the quick
+ * panel's groups): "gpu" the power and GPU rows (Power), "cpu" the CPU rows (CPU); unset: all of them.
  */
 export const ValuesEditor: FC<{
   state: PowerState; info: PowerInfo | null; profileKey: string; slot: Slot; stored: PowerValues; active: boolean;
-  label: string; quick?: boolean;
-}> = ({ state, info, profileKey, slot, stored, active, label: what, quick }) => {
-  const d = useDraft(profileKey, slot, stored);
+  label: string; quick?: boolean; part?: "gpu" | "cpu";
+}> = ({ state, info, profileKey, slot, stored, active, label: what, quick, part }) => {
+  const d = useDraft(profileKey, slot, stored, !!part);
+  const gpuPart = part !== "cpu";
+  const cpuPart = part !== "gpu";
   const v = d.values;
   const r = state.range;
   const sh = shown(v, active ? shown(state.applied_values, fwValues(state)) : fwValues(state));
@@ -306,12 +329,13 @@ export const ValuesEditor: FC<{
   const resetD = det("Reset to device defaults", [`Every value of ${what} goes back to the device's own.`, active ? "Applies at once." : "Saved now; used when this profile is active."]);
   return (
     <>
-      {state.blocked && (
+      {state.blocked && gpuPart && (
         <PanelSectionRow>
           <Status ok={false} label="Paused" detail="Changes are saved and apply once the other program stops."
             details={det("Paused", [state.blocked, "Power control is paused while another program changes the power limits. Changes here are saved in the profile and written as soon as it stops (Fix for me under Power control paused)."])} />
         </PanelSectionRow>
       )}
+      {gpuPart && (<>
       <PanelSectionRow>
         <WithDetails details={pl1D}>
           <SliderField label={label("Sustained power", pl1D)} value={pl1} min={r.pl1_min} max={Math.max(r.pl1_min, r.pl1_max)} step={1}
@@ -329,7 +353,8 @@ export const ValuesEditor: FC<{
               pl2Max <= pl2Min ? "Sustained power is at the maximum." : null)} />
         </WithDetails>
       </PanelSectionRow>
-      {gpu && !quick && (
+      </>)}
+      {gpu && !quick && gpuPart && (
         <PanelSectionRow>
           <WithDetails details={gminD}>
             <SliderField label={label("GPU minimum speed", gminD)} value={gmin} min={gpu.lo} max={gpu.hi} step={50} showValue valueSuffix=" MHz"
@@ -339,7 +364,7 @@ export const ValuesEditor: FC<{
           </WithDetails>
         </PanelSectionRow>
       )}
-      {gpu && (
+      {gpu && gpuPart && (
         <PanelSectionRow>
           <WithDetails details={gmaxD}>
             <SliderField label={label("GPU maximum speed", gmaxD)} value={gmax} min={gpu.lo} max={gpu.hi} step={50} showValue valueSuffix=" MHz"
@@ -349,8 +374,8 @@ export const ValuesEditor: FC<{
           </WithDetails>
         </PanelSectionRow>
       )}
-      <CpuControls state={state} info={info} v={v} write={d.write} active={active} quick={quick} />
-      {!quick && cpu && cpu.epp_choices.length > 0 && (
+      <CpuControls state={state} info={info} v={v} write={d.write} active={active} quick={quick} part={part} />
+      {!quick && cpuPart && cpu && cpu.epp_choices.length > 0 && (
         <PanelSectionRow>
           <WithDetails details={eppD}>
             <DropdownItem label={label("Energy preference", eppD)} disabled={!!cpuOff}
@@ -361,7 +386,7 @@ export const ValuesEditor: FC<{
           {cpuRows}
         </PanelSectionRow>
       )}
-      {cpu?.turbo && (
+      {cpu?.turbo && cpuPart && (
         <PanelSectionRow>
           <WithDetails details={turboD}>
             {quick ? (
@@ -378,7 +403,7 @@ export const ValuesEditor: FC<{
           {(quick || !(cpu && cpu.epp_choices.length > 0)) && cpuRows}
         </PanelSectionRow>
       )}
-      {quick && cpu && active && (
+      {quick && cpuPart && cpu && active && (
         <PanelSectionRow>
           <Status ok={null} label="CPU now" detail={cpuNowLine(state.now)}
             details={det("CPU now", ["The CPU values in effect now: speed cap, minimum, energy preference, CPU boost and the CPU vs GPU balance (with the power mode it counts in).",
@@ -434,52 +459,96 @@ export const GameProfileToggle: FC<{ app: RunningApp; info: PowerInfo }> = ({ ap
   );
 };
 
-/** The quick panel's Power section. */
-export const PowerSection: FC<{ quick?: boolean; app?: RunningApp | null }> = ({ quick, app }) => {
-  const visible = useQuickAccessVisible();
-  const shows = !quick || visible;
-  const p = usePower(shows);
-  const ex = useExtrasState();
-  useEffect(() => { if (quick && !visible) clearRecentFixes(); }, [quick, visible]);
-  const s = p.state;
-  const profiles = p.info?.profiles;
-  const slot = s ? editSlot(s, p.info?.options) : "main";
-  const prof = s && profiles ? profiles[s.active.key] : undefined;
-  const stored = s ? (s.active.slot === slot ? s.values : (slot === "ac" ? prof?.ac ?? prof?.main : prof?.main) ?? s.values) : EMPTY;
+type PowerData = { info: PowerInfo | null; state: PowerState | null; error: string | null };
+
+/** The quick panel's Power group: the status line, Power control (TDP), sustained and boost power, the GPU rows. */
+export const PowerBody: FC<PowerData> = ({ info, state: s, error }) => {
+  if (!s) {
+    return (
+      <PanelSectionRow>
+        {!error && <Status ok={null} label="Reading the power limits…" />}
+        <Problem what="Power" error={error} />
+      </PanelSectionRow>
+    );
+  }
+  const e = editedSlot(s, info);
   return (
-    <PanelSection title="Power">
-      {quick && <LiveRow active={shows} />}
-      {!s && (
+    <>
+      <PowerStatusRows info={info} state={s} quick />
+      <EnableToggle state={s} info={info} quick />
+      {s.enabled && (
+        <ValuesEditor state={s} info={info} profileKey={s.active.key} slot={e.slot} stored={e.stored}
+          active quick part="gpu" label={e.label} />
+      )}
+    </>
+  );
+};
+
+/** The Power group's red rows while it is closed (the same rows, so Fix for me and Take control work there). */
+export const PowerAlerts: FC<PowerData> = ({ info, state: s, error }) => (
+  <>
+    {s && <PowerStatusRows info={info} state={s} quick only="alerts" />}
+    {s && <EnableToggle state={s} info={info} quick only="alerts" />}
+    {error && <PanelSectionRow><Problem what="Power" error={error} /></PanelSectionRow>}
+  </>
+);
+
+/** The CPU group: the CPU controls (while power control is on) and the scheduler mode. */
+export const CpuBody: FC<PowerData & { x: ExtrasState | null }> = ({ info, state: s, x }) => {
+  if (!s) return null;
+  const e = editedSlot(s, info);
+  return (
+    <>
+      {s.enabled && (
+        <ValuesEditor state={s} info={info} profileKey={s.active.key} slot={e.slot} stored={e.stored}
+          active quick part="cpu" label={e.label} />
+      )}
+      <ExtrasRows profileKey={s.active.key} slot={e.slot} stored={e.stored} x={x} battery={false} only="scx" />
+    </>
+  );
+};
+
+/** The CPU group's red rows while it is closed: the programs that lock the CPU controls, the scheduler taken over. */
+export const CpuAlerts: FC<PowerData & { x: ExtrasState | null }> = ({ info, state: s, x }) => {
+  if (!s) return null;
+  const e = editedSlot(s, info);
+  const lockers = s.enabled ? cpuBlockers(s, info) : [];
+  return (
+    <>
+      {lockers.length > 0 && (
         <PanelSectionRow>
-          {!p.error && <Status ok={null} label="Reading the power limits…" />}
-          <Problem what="Power" error={p.error} />
+          <Status ok={false} red label="CPU controls locked" detail={lockedLine(lockers.map((c) => friendlyName(c.id, c.name)))}
+            details={{ title: "CPU controls locked", body: paragraphs([s.cpu_blocked, "Fix for me turns the other program off; the CPU controls then work again."]) }} />
+          <ConflictRows rows={lockers} info={info} quick />
         </PanelSectionRow>
       )}
-      {s && <PowerStatusRows info={p.info} state={s} quick={quick} />}
-      {s && <EnableToggle state={s} info={p.info} quick={quick} />}
-      {s && s.enabled && app && p.info?.options.per_game && <GameProfileToggle app={app} info={p.info} />}
-      {s && s.enabled && (
-        <ValuesEditor state={s} info={p.info} profileKey={s.active.key} slot={slot} stored={stored} active quick={quick}
-          label={`${s.active.key === "default" ? "the default profile" : `the profile of ${s.active.name || `app ${s.active.key}`}`}${p.info?.options.split_ac ? (slot === "ac" ? " (plugged-in values)" : " (battery values)") : ""}`} />
-      )}
-      {s && <ExtrasRows profileKey={s.active.key} slot={slot} stored={stored} x={ex.x} errors={!s.enabled} />}
-    </PanelSection>
+      <ExtrasRows profileKey={s.active.key} slot={e.slot} stored={e.stored} x={x} battery={false} errors={false} only="scx" alerts />
+    </>
   );
+};
+
+/** The Fan & battery group: the fan mode (per profile), the charge limit and Run from charger. */
+export const BatteryBody: FC<PowerData & { x: ExtrasState | null; alerts?: boolean }> = ({ info, state: s, x, alerts }) => {
+  const e = s ? editedSlot(s, info) : null;
+  if (!s || !e) return <PanelSectionRow><ChargeRows x={x} only={alerts ? "alerts" : undefined} /></PanelSectionRow>;
+  return <ExtrasRows profileKey={s.active.key} slot={e.slot} stored={e.stored} x={x} errors={!alerts} only="fan" alerts={alerts} />;
 };
 
 /**
  * Fan mode and scheduler mode of a profile slot (also while power control is off), then the battery's own rows.
  * errors: show a refused power_set here too (false where a ValuesEditor beside it already shows the same error).
+ * only: the fan or the scheduler mode alone (the quick panel's groups); alerts: only their red rows (a closed group).
  */
-export const ExtrasRows: FC<{ profileKey: string; slot: Slot; stored: PowerValues; x: ExtrasState | null; battery?: boolean; errors?: boolean; active?: boolean }> =
-  ({ profileKey, slot, stored, x, battery = true, errors = true, active = true }) => {
-    const d = useDraft(profileKey, slot, stored);
+export const ExtrasRows: FC<{ profileKey: string; slot: Slot; stored: PowerValues; x: ExtrasState | null; battery?: boolean; errors?: boolean;
+  active?: boolean; only?: "fan" | "scx"; alerts?: boolean }> =
+  ({ profileKey, slot, stored, x, battery = true, errors = true, active = true, only, alerts }) => {
+    const d = useDraft(profileKey, slot, stored, !!only);
     if (!x) return null;
     return (
       <PanelSectionRow>
-        <ProfileExtras v={d.values} write={d.write} x={x} active={active} />
-        {battery && <ChargeRows x={x} />}
-        {errors && <Problem what="Power" error={d.error} />}
+        <ProfileExtras v={d.values} write={d.write} x={x} active={active} only={only} alerts={alerts} />
+        {battery && <ChargeRows x={x} only={alerts ? "alerts" : undefined} />}
+        {errors && !alerts && <Problem what="Power" error={d.error} />}
       </PanelSectionRow>
     );
   };

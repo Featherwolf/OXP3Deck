@@ -22,6 +22,7 @@ import { AutoSetupRows } from "./AutoSetup";
 import { CopyLaunchRows } from "./CopyLaunch";
 import { OptiRows } from "./OptiControls";
 import { Pending } from "./Effect";
+import { usePinned } from "./Group";
 import { Code, explain, explainWhen, label, Note, Problem, Status, WithDetails } from "./Hint";
 
 type Opt = { data: string; label: string };
@@ -99,6 +100,7 @@ export const GameControls: FC<{ app: RunningApp; quick?: boolean; running?: bool
   const [draft, setDraft] = useState("");          // what to paste, when the plugin cannot write it itself
   const [busy, setBusy] = useState(false);
   const [err, setErr] = useState<string | null>(null);
+  usePinned(err);       // in the quick panel's This game: stays shown once it is closed
   const [saved, setSaved] = useState(false);
   const [wanted, setWanted] = useState<string | null>(null);   // the last write Steam refused or changed: to copy
   const [rev, setRev] = useState(0);              // remounts the dropdowns when the value is not what was picked
