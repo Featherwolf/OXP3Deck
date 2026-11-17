@@ -2210,7 +2210,7 @@ after a change that is not immediate, in a pending row.
 | `power.cpu_max_pct`, `power.soc`, `power.gpu_profile`, `power.cpu_min_pct`, `power.cpu_caps`, `power.epp_split` | new controls | Now |
 | `power.take_control`, `power.fix`, `power.unfix`, `power.ignore`, `power.import` | conflict and override buttons, import | Now |
 | `extras.fan`, `extras.scx`, `extras.lpmd`, `extras.charge_limit`, `extras.charge_behaviour` | extras | Now |
-| `fix.buttons`, `fix.xbox-key`, `fix.volume-keys`, `fix.inputplumber-suspend` | Fixes: Apply / Undo | Now |
+| `fix.buttons`, `fix.xbox-key`, `fix.volume-keys`, `fix.inputplumber-suspend`, `fix.speaker-profile` | Fixes: Apply / Undo | Now |
 | `fix.gyro`, `fix.nvme-resume`, `fix.xe-panel-replay-off`, `fix.xe-hdr-backlight`, `fix.xe-dsb-off` | Fixes: Apply / Undo | Reboot |
 | `fix.oled-profile` (and its "Lowest refresh rate") | Fixes | Log out of Game Mode or reboot |
 | `fix.nvme-resume.any_ssd` | Apply even without the problem | Reboot |

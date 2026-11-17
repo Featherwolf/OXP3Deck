@@ -64,7 +64,8 @@ test("effectText, confirmLine and the pending texts", () => {
 test("fixEffect: the table for every fixture fix, the text for an unknown one", () => {
   const list = JSON.parse(readFileSync(new URL("../fixtures/oxp3/list.json", import.meta.url), "utf8"));
   const want = { buttons: "now", "xbox-key": "now", "volume-keys": "now", gyro: "reboot", "inputplumber-suspend": "now",
-    "nvme-resume": "reboot", "oled-profile": "session", "xe-panel-replay-off": "reboot", "xe-hdr-backlight": "reboot", "xe-dsb-off": "reboot" };
+    "nvme-resume": "reboot", "oled-profile": "session", "xe-panel-replay-off": "reboot", "xe-hdr-backlight": "reboot", "xe-dsb-off": "reboot",
+    "speaker-profile": "now" };
   const fixes = list.fixes ?? list.catalog?.fixes;
   assert.ok(fixes.length >= 10);
   for (const f of fixes) assert.equal(fixEffect(f), want[f.id], f.id);

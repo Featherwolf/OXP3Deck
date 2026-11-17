@@ -126,6 +126,15 @@
     "summary": "xe.enable_dsb=0 to stop 'DSB poll error' log floods and cursor trails",
     "takes_effect": "after reboot",
     "title": "Disable DSB (xe)"
+   },
+   {
+    "details": "Linux plays the OXP3's speakers raw: no Windows sound enhancements, so they\nsound quiet, and turning the volume above 100% only adds software gain that\nclips. This installs a PipeWire filter, \"OXP3 Speakers\", that only the built-in\nspeaker output passes through: a 4th-order high-pass at 180 Hz (keeps the small\ndrivers from distorting on bass they cannot play), a gentle loudness EQ (+2 dB\nat 300 Hz, +2.5 dB at 3 kHz, +2 dB from 8 kHz), +8 dB of gain, and a look-ahead\npeak limiter at -1.5 dBFS with a hard ceiling at -0.3 dBFS, so loud scenes are\nturned down instead of clipping. It uses only PipeWire's builtin filters (no\nplugin packages). It adds 13 ms of audio latency on the speakers.\nWirePlumber's smart-filter policy puts it in front of the speaker sink, so the\nspeaker stays the default output, Steam's and KDE's volume still control it,\nand headphones, HDMI and Bluetooth bypass it. Keep the built-in speaker (not\n\"OXP3 Speakers\") selected as the output, and the speaker volume at 100% or\nbelow. Works in Game Mode and Desktop Mode.\nFile: /etc/pipewire/pipewire.conf.d/80-oxp3-speaker-profile.conf. PipeWire restarts for every\nlogged-in user (sound stops for a moment; a running game may need a restart to\nget its sound back); with --no-restart it loads at the next login.\nOptional: it changes how the speakers sound, and is tuned by measurement of\nthe filters, not of OXP3 speakers.",
+    "group": "audio",
+    "id": "speaker-profile",
+    "level": "optional",
+    "summary": "PipeWire speaker EQ: high-pass, loudness EQ, +8 dB and a limiter (speakers only)",
+    "takes_effect": "immediately (PipeWire restarts for each logged-in user; with --no-restart at the next login)",
+    "title": "Louder built-in speakers that do not clip"
    }
   ],
   "fps_limit": {
@@ -144,5 +153,5 @@
  "ok": true,
  "rc": 0,
  "schema": 1,
- "version": "0.4.2"
+ "version": "0.4.3"
 }

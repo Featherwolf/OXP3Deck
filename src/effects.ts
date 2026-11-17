@@ -31,7 +31,7 @@ export const EFFECTS: Record<string, EffectSpec> = {
   "fix.buttons": NOW, "fix.xbox-key": NOW, "fix.volume-keys": NOW, "fix.inputplumber-suspend": NOW,
   "fix.gyro": "reboot", "fix.nvme-resume": "reboot", "fix.xe-panel-replay-off": "reboot", "fix.xe-hdr-backlight": "reboot",
   "fix.xe-dsb-off": "reboot",
-  "fix.oled-profile": "session", "fix.oled-profile.min_refresh": "session",
+  "fix.oled-profile": "session", "fix.oled-profile.min_refresh": "session", "fix.speaker-profile": NOW,
   "fix.nvme-resume.any_ssd": "reboot",
   "buttons.layout": NOW, "buttons.layout_reboot": "reboot", "buttons.restart": NOW,
   "xess.install": XESS_PKG, "xess.update": XESS_PKG, "xess.repair": XESS_PKG, "xess.uninstall": XESS_PKG,

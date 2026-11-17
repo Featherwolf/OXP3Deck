@@ -5,7 +5,7 @@ Lake, Arc B390) on **CachyOS** (the Handheld Edition) and **Bazzite**. From one 
 installs, sets up and updates two things, and it sets the power limits:
 
 1. **oxp3-tool**, from [OXP3-Tool-for-Bazzite](https://github.com/Featherwolf/OXP3-Tool-for-Bazzite): the controller,
-   sleep and display fixes, the button layout and the kernel switch. The plugin runs `oxp3-tool` as root and shows
+   sleep, display and speaker fixes, the button layout and the kernel switch. The plugin runs `oxp3-tool` as root and shows
    what it says. It has no fixes of its own.
 2. **xess-xmx-linux**, by [HHHHanasak1](https://github.com/HHHHanasak1/xess-xmx-linux): XeSS super resolution and
    frame generation on the GPU's XMX cores instead of the slower DP4a path, with patched Mesa drivers. The plugin
@@ -102,7 +102,9 @@ low-power daemon in games**), **Battery**, **Turned off by OXP3 Deck**
 (with Undo), the device's own values, and **Import from SimpleDeckyTDP**.
 
 **Fixes:** every oxp3-tool fix with its state, notes and when it takes effect. Apply and Revert for each one. Both
-show the plan first.
+show the plan first. With oxp3-tool 0.4.3 or later (bundled), a **Sound** section has `speaker-profile`: louder
+built-in speakers through a PipeWire EQ and limiter that never clips (optional; keep the built-in speaker as the
+output and its volume at 100%).
 
 **Buttons:** what each key does (keyboard, Home, ONEX and Xbox keys), the frame-limit value, and **Apply layout**.
 That applies the `buttons` fix, and `xbox-key` too when your Xbox key needs its helper.

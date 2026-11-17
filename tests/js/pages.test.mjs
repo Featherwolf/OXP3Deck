@@ -452,3 +452,11 @@ test("Kernel tab: Keep is offered whenever Limine would boot another kernel, and
   assert.match(k, /records \$\{now\} there\./);
   assert.doesNotMatch(k, /so Limine keeps booting the kernel running now/);
 });
+
+test("the Fixes tab shows every group oxp3-tool reports: controller, display and (0.4.3) audio", () => {
+  const s = src("pages/Fixes.tsx");
+  for (const g of ["controller", "display", "audio"]) assert.match(s, new RegExp(`group\\("${g}"\\)\\.map`), g);
+  const list = JSON.parse(readFileSync(new URL("../fixtures/oxp3/list.json", import.meta.url), "utf8"));
+  const groups = new Set((list.fixes ?? list.catalog?.fixes).map((f) => f.group));
+  assert.deepEqual([...groups].sort(), ["audio", "controller", "display"]);
+});

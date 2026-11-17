@@ -187,6 +187,11 @@ export const FixesTab: FC = () => {
               </PanelSectionRow>
             )}
           </PanelSection>
+          {group("audio").length > 0 && (
+            <PanelSection title="Sound">
+              {group("audio").map((f) => <FixRow key={f.id} f={f} c={byId.get(f.id)} cat={catalog} canChange={status.can_change} running={running} />)}
+            </PanelSection>
+          )}
         </>
       )}
     </>

@@ -41,7 +41,7 @@ export type FixState = "applied" | "damaged" | "recommended" | "optional" | "exp
   | "incomplete" | "unknown";
 
 export type Oxp3Fix = {
-  id: string; group: "controller" | "display"; level: "recommended" | "optional" | "experimental";
+  id: string; group: "controller" | "display" | "audio"; level: "recommended" | "optional" | "experimental";
   title: string; summary: string; takes_effect: string; state: FixState;
   notes: string[]; applied_at: string | null; options: Record<string, any>;
   pending: "reboot" | "inputplumber-restart" | null;
@@ -58,7 +58,7 @@ export type Oxp3Status = {
 };
 
 export type Oxp3CatalogFix = {
-  id: string; group: "controller" | "display"; level: "recommended" | "optional" | "experimental";
+  id: string; group: "controller" | "display" | "audio"; level: "recommended" | "optional" | "experimental";
   title: string; summary: string; details: string; takes_effect: string;
 };
 export type ButtonKey = "onex" | "keyboard" | "home" | "xbox";
