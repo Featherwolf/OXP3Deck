@@ -769,7 +769,7 @@ The facts this section rests on (kernel 7.2 source and measurements on the owner
   word `balanced` into the `profile` file of the platform-profile class device named "SoC Power Slider", **only when
   that file already reads `balanced`** (rewriting it is what makes the slider take effect; "Power → New CPU and GPU
   controls"). Never PL4 (`peak_power`), never `psys`, `core`, `uncore` or `dram` zones, never a zone's `enabled`
-  (writing it changes PL2's enable and clamp bits too), never `time_window_us`, never the media GT, never the
+  (writing it changes PL2's enable and clamp bits too), never `time_window_us` (read only, for display: "Performance batch → B"), never the media GT, never the
   governor, `intel_pstate/status`, `scaling_min_freq`, SMT, the legacy `/sys/firmware/acpi/platform_profile`, any
   other platform-profile handler, and never the profiles `performance`, `low-power` or `custom` (power-profiles-daemon
   owns the choice of profile; OXP3 Deck only re-asserts `balanced` while it is already chosen). The extras
@@ -1799,7 +1799,7 @@ an int, `0` (Off) or 2..60; anything else refused. Default 2 = the 0.3 behaviour
 
 - main.py's watch loop stays at `TICK_S = 2` (AC, resume, game, the conflict recheck, the boot apply and the extras'
   safety checks keep their timing whatever `poll_s` is).
-- tick step 5 (the drift check) runs only when `poll_s > 0` and `now − p.last_poll ≥ poll_s` (then `last_poll = now`).
+- tick step 5 (the drift check) runs only when `poll_s > 0` and `now − p.last_poll ≥ poll_s` (then `last_poll = now`). (In game with no panel open the period can be longer: "Performance batch → E, Overhead budget".)
   Inside a grace window (after AC or resume) it runs every tick regardless, as 0.3 does. Off: no drift check outside
   grace windows (an override then shows only when `state()` runs while a panel is open, for the GPU clocks, or at the
   next apply's read-back).
@@ -2420,6 +2420,9 @@ row moves out of Power); the rows themselves, their texts, tags and Details stay
 | 6 | `xess` | "XeSS" | overview loaded | the XeSS status row, Install / Update / Repair or "Check for XeSS update" | closed |
 | 7 | `fixes` | "Device fixes" | overview loaded | the whole `Oxp3Section` (fixes tool status, install/update, warnings, recommended, Apply recommended, attention) | closed |
 | — | — | none | always | "All settings" button, last | — |
+
+(Performance batch: Power gains the preset row, the low-battery row and the VRR row; This game gains the power
+tip rows: "Performance batch → A, C, D, E".)
 
 Why this order and these cuts:
 - **Live is second** (not after CPU): closed, its header's summary is today's "Live" line (`liveLine`), so the panel
@@ -3728,3 +3731,601 @@ plan creates the game with `plan_version` 0 (the scan still plans it); a quick e
 rollback; `autosetup.pending(ctx, None)` (not reachable from main.py) reads the manifests
 (`steamlib.installed_apps`); optiscaler `game_record(ctx, appid)` is public; `optiscaler.update` keeps the record's
 `origin`.)
+
+## Performance batch (ROADMAP N-1, N-2 + N-5 read, T1-2, N-4, T1-11 + N-7)
+
+Owner choice: "performance items first". Five items, built by three builders in parallel (Builders at the end of
+this section). Everything here follows the rules above: root backend, `{ok, error}` answers, long work is a job,
+one line up front and the rest in Details, an effect tag on every control that changes something, fake-sysfs tests.
+Nothing in this batch is measured on the device yet: every wattage below is a **provisional starting point**, and the
+UI says so until the self-test's measurement (B) has run on the device.
+
+Decisions at a glance:
+
+| # | Decision | Why |
+|---|---|---|
+| A1 | `vrr_safe` comes from the existing `dc_balance_risk` (`not risk`; `None` stays `None`); the positive advice is a new sentence in `advice()` | One rule for "bug applies", no second detection to drift apart |
+| A2 | The plugin adds no VRR logic: it shows oxp3-tool's `refresh.vrr_safe` (already passed through by `oxp3_status`) as one dismissible row in the Power group | DESIGN rule "the plugin adds no logic of its own to what oxp3-tool does" |
+| B1 | The self-test needs "TDP control" on, no game, no job, not paused or overridden | "Nothing is written until the user turns TDP control on"; conflicts are already checked then |
+| B2 | Each probe is atomic under power.py's lock: read, write a step **down** (or up where down is impossible), read back, write the old value, read back | The watch loop and the UI never see a probe value, so no drift and no fight |
+| B3 | The 60 s measurement is read-only and allowed with power control off | It writes nothing |
+| B4 | Results persist in `selftest.json` (settings folder); the diagnose job writes them as a sidecar JSON next to oxp3-tool's archive | Device facts outlive a reboot; oxp3-tool's archive is not rewritten (and `tarfile` in Decky's Python is unverified) |
+| C1 | Presets are pure TypeScript (`power.ts`), written with one `powerWriter.write`; no preset id is stored: the shown preset is derived from the values | No new backend; "Custom" is simply "matches none" |
+| C2 | Battery 10/15 W, Balanced 17/25 W, Performance 28 W/firmware boost, Max = the slot's ceiling/`pl2_max` | OEM presets 5/17/35 W, MSR boot PL1 25 W, battery 35 W, AC 40 W |
+| D1 | Low-battery is **on by default** (when TDP control is on), for the Default profile only; a game with its own profile keeps its values unless "Also for games with their own profile" is on, and then a status line says so | It never overrides a per-game choice silently (below) |
+| D2 | The low slot never raises a limit: numeric limits are `min(normal, low)` | A user's 8 W profile must not become 10 W at 20 % |
+| E1 | The sampler runs only while a game runs **and** TDP control is on, every 5 s, with no `min/max/cur/act_freq` read | N-7; the advice is a W value for power control |
+| E2 | Advice texts are built in the frontend from backend data; nothing is written until "Use N W" is tapped | Up-front texts live in one place; "read-only until tapped" |
+| E3 | In game with no panel open and no recent drift, the drift check runs every 10 s instead of `poll_s` | N-7: today ~45 sysfs reads every 2 s all session long |
+
+### A. VRR guidance (N-1)
+
+**oxp3-tool (`oxp3_tool/display.py`, `detect.py`, `cli.py`)**
+
+- `RefreshState` gains:
+  - `vrr_range: Optional[tuple[int, int]] = None`: read by `detect.refresh_state` from
+    `{DEBUGFS_DRI}/<n>/<connector>/vrr_range` (drm core debugfs, root only, text `Min: 48\nMax: 144`), parsed by a
+    new pure `parse_vrr_range(text) -> Optional[tuple[int, int]]` (both numbers, `0 < min < max`, else None).
+    Unverified on xe: a missing file is simply None, never a problem line.
+  - property `vrr_safe -> Optional[bool]`: `None` when `dc_balance_risk is None`, else `not dc_balance_risk`.
+  - property `vrr_reason -> str`, one code:
+
+    | Code | When (first match) | `vrr_safe` |
+    |---|---|---|
+    | `xe_not_loaded` | `dc_balance_param is None` | None |
+    | `predates` | kernel < 7.0 | True |
+    | `fixed` | `dc_balance_param` and not `dc_balance_on` | True |
+    | `param_on` | `dc_balance_on` (and the risk) | False |
+    | `no_firmware` | `dmc_loaded is False` | True |
+    | `firmware_unknown` | `dmc_version is None` | None |
+    | `old_firmware` | DMC < v2.33 | True |
+    | `bug` | otherwise (7.0..7.2.9 with DMC ≥ v2.33) | False |
+
+  - `vrr_why -> str`: the code as one plain sentence (`fixed`: "the kernel has the variable-refresh fix (7.2.10 or
+    later)"; `predates`: "the kernel predates VRR DC balance (7.0)"; `old_firmware`: "this display firmware has no
+    DC-balance handler"; `no_firmware`: "the display firmware did not load"; `bug`: "on this kernel with this display
+    firmware, variable refresh holds the screen far below {full} Hz"; `param_on`: "xe.enable_dc_balance=1 turns the
+    bug back on"; `firmware_unknown`: "the display firmware version is unknown (run with sudo)"; `xe_not_loaded`: "xe
+    is not loaded").
+- `advice()` positive case, added after the existing `risk` branch, only when `vrr_safe is True` and `dmc_loaded is
+  not False` (with no firmware the DMC line is the advice):
+  - Game Mode (`game_mode`): "Variable refresh (VRR) is safe on this kernel ({vrr_why}): turn it on in Game Mode for
+    smooth frames at any frame rate below {full} Hz (Steam: Settings > Display > Enable VRR, where Steam offers it)."
+    With `vrr_range`: + " Below {min} fps the screen repeats frames, so keep a frame limit at {min} fps or above."
+  - Desktop Mode, only when a KWin output of the panel has `vrr_policy` None or "Never": "In Desktop Mode, Adaptive
+    sync can be set to Automatic in System Settings > Display & Monitor."
+  - The Steam menu path is **unverified** (it differs between Steam builds); the wording says "where Steam offers it"
+    and nothing more specific is invented.
+- `summary()`: when `vrr_range` is known, the DMC line gets "; variable refresh range {min}–{max} Hz".
+- `status --json` (`cli.status_data`): `refresh` gains `"vrr_safe": bool | null, "vrr_reason": str, "vrr_why": str,
+  "vrr_range_hz": [min, max] | null`. `refresh` stays `null` when the refresh checks do not run (`show_refresh`
+  false). `diagnose` gets the new advice line through `advice()` unchanged. No schema bump (new keys only).
+- README (the display row, line ~72): one sentence: "From kernel 7.2.10 `status` says when variable refresh is safe
+  to turn on."
+- Tests (`tests/test_refresh.py`, `tests/test_json.py`, `tests/fakeroot.py` gains `vrr_range(min, max)`): the 8
+  reason codes from fake trees; `parse_vrr_range` on good, reversed, junk, empty text; the Game Mode sentence with
+  `fixed` and with a range (the "{min} fps" sentence), not with `bug`/`param_on`/`firmware_unknown`/`no_firmware`; the
+  Desktop sentence only with a Never/unsaved KWin policy; `status --json` carries the four keys with the right types;
+  the existing `test_kernel_with_fix_gives_no_vrr_warning` still passes.
+- (Built: oxp3-tool part as above, released as oxp3-tool 0.4.4 and vendored into OXP3Deck 0.5.0. One change: the range is its own
+  `summary()` line, "variable refresh range {min}–{max} Hz", because added to the DMC line it went past 120 columns.
+  `param_on` is used only while the risk holds, so with `dc_balance_on` and old or missing firmware the reason is
+  `old_firmware` or `no_firmware`, which keeps it in line with `dc_balance_risk`.)
+
+**Plugin backend**: no new code. `oxp3tool.status` already returns oxp3-tool's object as it is. Builder 2 adds one
+test (`tests/test_oxp3tool.py`): a fake `status --json` with the four keys reaches `status.refresh` unchanged and
+through `main._sendable`. An older oxp3-tool without them: the frontend treats a missing `vrr_safe` as `null`.
+
+**Plugin frontend**: `types.ts` `Oxp3Status.refresh` gains `vrr_safe?: boolean | null; vrr_reason?: string;
+vrr_why?: string; vrr_range_hz?: [number, number] | null`. One row in the Quick Access **Power** group (last row of
+the open body; not an alert, not in the summary), and the same row on the Fixes page under "Display refresh":
+
+- Shown when `status.refresh?.vrr_safe === true` and not hidden. Hidden = `remember` key `vrrTip` equals the
+  running kernel (`status.os.kernel`): hiding is per kernel, so a kernel change that makes it newly safe shows it
+  again.
+- Label "Variable refresh is safe ⓘ"; one line "Turn it on in Steam for smooth frames at any frame rate." No effect
+  tag (the plugin changes nothing). A and ☰ open a `confirm` with OK "Don't show again" (sets `vrrTip`) and Cancel
+  "Close"; its text (`vrrDetails(refresh)` in a new pure `src/display.ts`, node-tested):
+  1. "This kernel is safe for variable refresh: {vrr_why}."
+  2. "Turn it on in Steam: Settings > Display > Enable VRR. Some Steam versions also show it in Quick Access >
+     Performance. "Allow tearing" is a separate switch and is not needed." (Unverified naming: the text says "Some
+     Steam versions".)
+  3. "With variable refresh on, a frame limit that does not divide 144 (40, 45, 50 fps) is smooth too. Set the limit a
+     little below what the game holds steadily." With `vrr_range_hz`: "Below {min} fps the screen repeats frames, so
+     keep the limit at {min} fps or above."
+  4. "OLED screens can flicker slightly in dark scenes at low frame rates with variable refresh. If you see that, set
+     a higher frame limit. (Not checked on this screen yet.)"
+  5. Technical lines: the `refresh.summary` lines.
+
+### B. Device self-test and 60 s measurement (N-2, N-5 read part)
+
+**Time windows (read only)**: `powerhw.time_windows(ctx, hw) -> {zone_id: {"pl1_us": int | None, "pl2_us": int |
+None}}` reads `constraint_<n>_time_window_us` of each zone's pl1 and pl2 constraint (`n` from `Hw`). Called by
+`power.info()` (the Power tab) and by the self-test, **never by tick**. The Power rule "never `time_window_us`" stays:
+it is read, never written. `PowerInfo.hw.time_windows: TimeWindows`.
+
+**New module `py_modules/oxp3deck/selftest.py`** (state file `DECKY_PLUGIN_SETTINGS_DIR/selftest.json`,
+`context.Settings`):
+
+```python
+PROBE_W = 1                 # RAPL step (W)
+PROBE_MHZ = 50              # GPU step
+PROBE_PCT = 5               # max_perf_pct step (min_perf_pct: 1)
+PROBE_CAP_MHZ = 200         # per-core cap step
+MEASURE_S = 60
+MEASURE_STEP_S = 2
+MEASURE_MIN_S = 20          # an interrupted measurement shorter than this is not stored
+KEEP_MEASURES = 10
+
+def precheck(ctx, what: str, mode: str | None = None) -> str | None   # why not now (None: go); what "test"|"measure"
+def run_test(ctx, job) -> dict      # {ok, error, selftest: SelftestResult}
+def run_measure(ctx, job, mode: str) -> dict   # {ok, error, measure: MeasureResult}; mode "idle" | "game"
+def info(ctx) -> dict               # PowerSelftestInfo (for power.info; no hardware read)
+def report(ctx) -> dict             # everything stored + sampler.report(ctx), for diagnose
+```
+
+`precheck("test")` refuses, in this order: "Turn on power control first." (not enabled); "Power control is paused:
+<blocked>"; "Something else changes the power limits: take control first." (overridden); "Quit the game first."
+(`power.game_now(ctx)["app"]` set); "The charger just changed: wait 20 s and try again." (inside an AC/resume grace
+window). `precheck("measure", mode)`: mode not "idle"/"game" → refused; "game" with no game running → "Start the game
+first."; "idle" while a game runs → "A game is running: tap Measure 60 s again to measure it." (The job runner already
+refuses a second job.)
+
+Fix-integrate review additions: each probe reads its control again under the lock before writing, and a value that
+no longer equals the plan's `before` (a slider, a preset, the low-battery slot or a retry wrote in between) is
+"skipped" with "changed during the check", so the restore never puts back a stale value. A failure that is only
+`transient` (the GPU asleep, a GuC hiccup) is "skipped" with "GPU busy or asleep, try again", not "unsupported". On
+plugin unload `selftest.stop()` ends a running check before its next probe and waits up to 1.5 s for its `finally`
+(the re-apply), inside Decky's 5 s. The idle measurement reads `throttle/reasons` only once the GPU was seen busier
+than `sampler.BUSY_FOR_REASONS` (that read may take xe's runtime-PM reference and would inflate an idle figure); the
+game measurement reads it every sample.
+
+**power.py hooks** (builder 2 owns both files; selftest.py never touches `_Power` directly):
+
+```python
+def game_now(ctx) -> dict    # no sysfs read: {app, enabled, blocked, overridden, grace, ac (the last tick's),
+                             #  key, slot, pl1_w (min over ours' "<zone>/pl1", W, or None), pl1_min, pl1_max,
+                             #  pl1_max_ac (None until a snapshot exists), low (bool), testing (bool)}
+def probe_plan(ctx) -> list[dict]   # under the lock: read now, build the probes (below)
+def probe(ctx, item: dict) -> dict  # under the lock: one probe, atomic (below)
+def selftest_mark(ctx, on: bool) -> dict   # p.testing; on: takes the boot snapshot first (_ensure_snapshot);
+                                           # off: _apply when writing is allowed (writes only what differs)
+```
+
+**Probes** (`probe_plan`; each `{id, label, probe: Target, restore: Target, before, tried}`; the restore target is the
+value read just before, not the snapshot, so "previous" is what comes back):
+
+| id | Probe value | Skipped when |
+|---|---|---|
+| `<zone>/pl1` (each zone alone) | PL1 − 1 W; if that is below 5 W, + 1 W (≤ PL2) | id in run `locked` (outcome `locked`, "locked earlier this boot") |
+| `<zone>/pl2` | PL2 − 1 W, not below PL1; else + 1 W (≤ 52 W) | locked; no pl2 constraint |
+| `gpu/max`, `gpu/min` | max − 50 MHz (≥ min); min + 50 (≤ max), or − 50 when that is ≥ rpn and min + 50 > max | no xe GPU |
+| `epp` (policy0 only, dict target) | the neighbour in `EPP_CHOICES` (balance_performance ↔ balance_power, performance → balance_performance, power → balance_power) | governor `performance`; group `epp` blocked or yielded |
+| `turbo` | off, then back on | turbo reads off now ("not tried: CPU boost is off"); group blocked |
+| `cpu/max_pct`, `cpu/min_pct` | max − 5 (≥ 30, ≥ min); min + 1 (≤ max, ≤ 50) | no perf_pct; group `cpu_pct` blocked |
+| `cpu/cap/<first policy of each type>` | cap − 200 MHz (≥ scaling_min_freq) | `cpu_caps` blocked |
+| `soc/balance` | balance ± 1 inside 1..5 (the profile rewrite only when it reads `balanced`, as apply does) | no SoC slider; `soc` blocked |
+| `gpu/profile` | the other of base / power_saving | no power_profile file |
+
+`probe(item)`: under `_LOCK`: `powerhw.apply(hw, item.probe, locked)` then `powerhw.apply(hw, item.restore, locked)`;
+a new `locked` id goes into the run state's `locked` (the existing rule: not tried again this boot); `ours` is not
+touched (the restore read-back equals it). The turbo probe's restore also compares the per-core caps with `before`
+(intel_pstate clamps them while boost is off). Outcome per probe:
+
+| Outcome | When |
+|---|---|
+| `ok` | the probe value read back within tolerance and the old value read back after the restore |
+| `locked` | `PermissionError` (EACCES/EPERM) on the probe write |
+| `ignored` | the write "succeeded" but the read-back did not change (an MMIO lock, firmware) |
+| `unsupported` | EINVAL / a missing file / the driver refused |
+| `skipped` | the table's "skipped when", with `why` |
+| `not_restored` | the restore read-back differs: `probe` then runs `_apply` at once when writing is allowed, and the row is red |
+
+`run_test(job)`: `selftest_mark(True)`; plan; for each probe: stop when `game_now()` shows a game ("A game started:
+stopped. Everything is back as it was."), an AC change or a resume (`grace`) ("The charger changed: stopped. Run it
+again."); `job.say(<label>: <outcome>)`; then `time_windows`; **finally** (also on an exception) `selftest_mark(False)`
+and store. A plugin killed in the middle of a probe leaves at most a 1 W / 50 MHz step: the next start's boot apply
+writes the profile again (the test only runs while TDP control is on).
+
+`run_measure(job, mode)`: read-only, no lock. Every `MEASURE_STEP_S` for `MEASURE_S`, through
+`readouts.cheap(ctx, st, reasons=True)` (below, its own state): package W (Δ`energy_uj` of the MSR package zone),
+GPU busy % (Δ`gtidle/idle_residency_ms`), battery W (`power_now` while Discharging), GPU throttle reasons, CPU
+thermal-throttle ms. Mode "game": stops when the game ends or changes (`interrupted: "the game ended"`, stored only
+when ≥ `MEASURE_MIN_S`). The profile and effective PL1/PL2 at the start come from `game_now`.
+
+**selftest.json**
+
+```json
+{"version": 1, "test": SelftestResult | null, "measures": [MeasureResult, ...]}   // newest first, ≤ KEEP_MEASURES
+```
+
+**Diagnose**: `oxp3tool.diagnose(ctx, job, extra: dict | None = None)`: after the archive is saved, when `extra` is
+given, `json.dumps(extra, indent=1)` goes to `<archive name without .tar.gz>-oxp3deck.json` in the same folder via
+`userexec.write_new` (0600); the job result gains `extra_path: str | null` (a failed sidecar write is a `job.say`
+line, not a failed job). main.py passes `extra=_mod("selftest").report(self.ctx)` (exceptions → `{"error": text}`).
+
+**Frontend**: a "Device check" section on the Power tab, after "Firmware":
+
+- Button "Check power controls": one line "Changes each setting a little, reads it back, puts it back (about 20 s)."
+  tag `power.selftest` = `"idle"`. Greyed with why: "Turn on power control first." / "Quit the game first." / "Wait
+  for <job title>." / "Power control is paused." Confirm: title "Check power controls?", text "OXP3 Deck moves each
+  power setting it controls by a small step, reads what the device took, and puts the old value back at once.
+  Nothing stays changed. Locked and missing controls are listed.", effect `"idle"`.
+- Button "Measure 60 s" (no tag: it changes nothing): no game: "Measures power use for one minute with no game
+  running."; a game runs: "Measures this game for one minute: go back to the game now." Calls `power_measure(game ?
+  "game" : "idle")`.
+- The running job shows in `JobView` as any job; when it ends `done`, `invalidate("power")` (`afterJob`).
+- Row "Last check ⓘ" (`selftestLine(test)`, power.ts): "11 of 12 work · 1 locked by firmware · 23 Nov 14:02";
+  red when any `not_restored`. Details: one line per probe ("Sustained power (MSR): locked by firmware", "GPU
+  maximum speed: works (2250 → 2300 MHz)"), then the time windows, then "Technical:" ids.
+- Row "Last measurement ⓘ" (`measureLine(m)`): "Idle on battery: 4.1 W average, 6.0 W peak, GPU 3 %" / "Cyberpunk
+  2077 at 25 W: 24.6 W average, GPU 98 %, power-limited 92 %". Details: every field, the date, the profile and the
+  older measurements (one line each).
+- Time windows: the Firmware section gets a row "Power time windows ⓘ" "Sustained over 28 s, boost over 2.4 ms"
+  (`tauText(us)`: ≥ 10 s "28 s", ≥ 1 s one decimal "2.5 s", ≥ 1 ms "2.4 ms", else "µs"); Details per zone (MSR and
+  MMIO side by side), with: "How long the processor averages its power before the sustained limit applies. Read only:
+  OXP3 Deck never changes it." The per-zone Status rows' Details include the zone's two windows.
+- `JobView`: kind `oxp3-diagnose` also shows `extra_path` as a second "Saved" line.
+
+### C. One-tap presets (T1-2)
+
+All in `src/power.ts` (pure, node-tested), written through the existing `powerWriter.write(key, slot, values)` as
+one change.
+
+```ts
+export type PresetId = "battery" | "balanced" | "performance" | "max";
+export const PRESET_IDS: PresetId[] = ["battery", "balanced", "performance", "max"];
+export const PRESET_LABEL: Record<PresetId, string> = { battery: "Battery", balanced: "Balanced",
+  performance: "Performance", max: "Max" };
+export const PRESET_FIELDS = ["pl1_w", "pl2_w", "epp", "epp_p", "epp_e", "epp_lpe", "turbo", "gpu_power_profile"] as const;
+export type PresetCaps = { epp_choices: Epp[]; turbo: boolean; gpu_profile: boolean; cpu_blocked: boolean };
+export const presetCeiling: (range: PowerRange, slot: Slot, opts: Pick<PowerOptions, "split_ac" | "extended">) => number;
+export const presetValues: (id: PresetId, range: PowerRange, slot: Slot,
+  opts: Pick<PowerOptions, "split_ac" | "extended">, caps: PresetCaps) => Partial<PowerValues>;
+export const presetOf: (values: PowerValues, range: PowerRange, slot: Slot,
+  opts: Pick<PowerOptions, "split_ac" | "extended">, caps: PresetCaps) => PresetId | "custom" | "default";
+export const presetLine: (which: PresetId | "custom" | "default", v: Partial<PowerValues>, measured: boolean) => string;
+```
+
+`presetCeiling`: slot `ac` → `extended && extended_max != null ? extended_max : pl1_max_ac`; slot `main` with
+`split_ac` on, and slot `low` → `pl1_max_battery`; slot `main` with `split_ac` off → the AC ceiling (the stored value
+is clamped on battery at apply time, as every profile is).
+
+Values (provisional; every W clamped to `[pl1_min, ceiling]`, PL2 to `[PL1, pl2_max]`):
+
+| Field | Battery | Balanced | Performance | Max |
+|---|---|---|---|---|
+| `pl1_w` | 10 | 17 (OEM middle preset) | 28 | ceiling (35 battery / 40 AC / extended) |
+| `pl2_w` | 15 | 25 | null (firmware boost, 52 W) | `pl2_max` |
+| `epp_p` / `epp_e` / `epp_lpe` | null (with `epp`) | null | null | null |
+| `epp` | `balance_power` | `balance_performance` | `balance_performance` | `performance` |
+| `turbo` | false | null | null | true |
+| `gpu_power_profile` | `power_saving` | null | null | `base` |
+
+- Why: the OEM's own presets are 5/17/35 W; 25 W is the MSR boot PL1 (the "stock" sustained value, so Performance
+  is a step above stock, not equal to it); Max is the range's own top. Battery's GPU clock stays uncapped
+  (`gpu_efficient` is unmeasured on this unit and PL1 10 W already holds the GPU down); `power_saving` and boost off
+  trim bursts. null = the firmware's value.
+- No preset touches the GPU speed cap (`gpu_max_mhz`): a cap the user set stays (fix-integrate review: an earlier
+  draft cleared it without saying so). The per-core-type energy preferences are cleared whenever `epp` is set,
+  because `power._resolve` prefers them over `epp` (as `_merge_low` already does for the low slot); a non-null one
+  makes the slot "custom", and Undo puts them back with the other `PRESET_FIELDS`.
+- A field the device or a conflict does not allow is **left out** (not set to null): `epp` when not in `epp_choices`
+  or `cpu_blocked`; `turbo` when `!caps.turbo` or `cpu_blocked`; `gpu_power_profile` when `!caps.gpu_profile`. So a
+  preset never causes a refusal or a fight. Per-core caps, EPP per type, CPU speed cap/floor, SoC slider, GPU min,
+  fan and scheduler are never touched.
+- `presetOf`: compares only the fields `presetValues` returns for that preset with the stored slot (numbers after the
+  same clamping); a match → that id; every `PRESET_FIELDS` value null → "default"; else "custom". No preset id is
+  stored: editing any of those fields by hand makes it "Custom".
+- **Provisional**: `measured` = `info.selftest.measured` (any stored measurement). Until then the line ends in "· not
+  yet measured on this device" and the Details say "These are starting points from ONEXPLAYER's own presets and the
+  device's firmware values, not yet measured on this device." With a measurement whose `pl1_w` equals the preset's
+  PL1, the Details add it ("Measured: 60 s at 17 W, 14.2 W average, GPU 78 %").
+- **Per game or default**: the preset writes to the profile and slot the sliders edit (`state.active.key`,
+  `editSlot`), so it lands on the game's own profile when "Separate profile for <game>" is on, else Default. The
+  Power tab writes to the selected profile/slot (also `low`).
+
+UI (Quick Power group, first control after "Power control (TDP)"; Power tab profile editor, right after the
+"Profile" / "Values for" dropdowns):
+- One `Field` "Preset ⓘ" whose description is `presetLine`: "Balanced: 17 W, boost 25 W · not yet measured on this
+  device" / "Custom: set by hand" / "Device defaults" + the tag (`power.preset`, Now) via `explainWhen`.
+- Under it one `Focusable` row (`flow-children="horizontal"`) of four small `DialogButton`s (Battery, Balanced,
+  Performance, Max); the matching one is drawn selected (bold, a 2 px border in the focus colour). "Custom" is not a
+  button: it is the state the label shows (a "Custom" button would have nothing to do).
+- One tap writes; no confirm. For 30 s after a tap (or until another change) a row "Undo" restores the
+  `PRESET_FIELDS` values the slot had before (one `powerWriter.write`).
+- Greyed while TDP control is off: "Turn on power control first."
+- `powerSummary` (quickgroups.ts) puts the preset name first when one matches: "Balanced · 17 W · boost 25 W · GPU
+  default · Default" (`fit` keeps ≤ 80).
+
+### D. Low-battery slot (N-4)
+
+**Settings** (power.json; `OPTION_DEFAULTS` grows; migration-free):
+
+| Key | Type | Default | Meaning |
+|---|---|---|---|
+| `options.low_battery` | bool | **true** | use the low slot on battery at or below the threshold |
+| `options.low_battery_pct` | int 5..50 | 20 | enter at ≤ this %, leave at ≥ this + `LOW_HYST_PCT` (5) or on AC |
+| `options.low_battery_games` | bool | false | also while a game's own profile is active |
+| `profiles.default.low` | `PowerValues` \| null | null | the low slot; null = the Battery preset (`BATTERY_PRESET`) |
+
+`power_options` validates them like the others (`low_battery_pct` an int in 5..50). `set_values(key, "low", ...)`:
+only for `default` (else "power_set: only the Default profile has low-battery values"); a null `low` is first filled
+from `BATTERY_PRESET` (as `ac` is copied from `main`). `power.BATTERY_PRESET = {"pl1_w": 10, "pl2_w": 15, "epp":
+"balance_power", "turbo": False, "gpu_power_profile": "power_saving"}` (other fields null) must equal power.ts's
+Battery preset: both test suites check it against `tests/fixtures/power/presets.json` (below).
+
+**Run state**: `"low": {"since": float, "pct": int} | null` in power-run.json (survives a plugin restart, cleared at a
+new boot like the rest).
+
+**tick** (after the AC and resume steps, before the apply step): only when enabled and `low_battery`:
+- capacity from new `powerhw.battery(ctx) -> {"pct": int | None, "status": str | None}` (the first `type` Battery
+  supply's `capacity` and `status`), read every `LOW_CHECK_S = 30` s and at once after an AC change, never otherwise;
+- enter when `ac is False` (never on None) and `pct <= low_battery_pct`; leave when `ac is True` or `pct >= pct +
+  LOW_HYST_PCT`; either change sets `p.apply_at = now` (not while overridden or blocked) and saves the run state;
+- `options()` changing a `low_battery*` key re-evaluates at once (one capacity read).
+
+**`_active`**: after the existing key/slot choice, when `run.low` is set and (key is `default` or
+`low_battery_games`): slot `"low"`, values = `_merge_low(p, normal, low or BATTERY_PRESET)`:
+- `pl1_w`, `pl2_w`, `gpu_max_mhz`, `cpu_max_pct`: `min(normal, low)`, where a null normal is the firmware value from
+  the snapshot (PL1: the lowest boot PL1 over the zones; PL2: the highest boot PL2; GPU: snapshot max, else rp0;
+  CPU cap: snapshot `perf.max`), and a null low keeps the normal; unknown firmware value → the low value;
+- every other field: the low slot's value when not null, else the normal one.
+  So the low slot never raises a limit. When the conditions hold but a game's own profile is active and
+  `low_battery_games` is off, nothing changes and `state.low.held` is true.
+
+`PowerState.low: PowerLow | null` (null when `low_battery` is off); `active.slot` may be `"low"`.
+
+**Why on by default** (D1): power control itself is opt-in, so this only acts for users who turned TDP control on;
+it applies to the Default profile only, so a per-game choice is never overridden unless the user turns on "Also for
+games with their own profile"; it never raises a limit; it ends by itself on AC or at threshold + 5 %; and while it
+is active, or held back by a game's profile, a status row says so (Quick Power group and Power tab). It is never
+silent and never touches a choice made per game.
+
+**Frontend**:
+- Power tab, Control section: toggle "Save power on low battery" ("Below 20 % on battery, use battery-saving values
+  until 25 % or plugged in.", `power.low_battery`); slider "Low battery below" 10..40 step 5 " %"
+  (`power.low_battery_pct`; the stored range is wider, the slider clamps the shown value); toggle "Also for games
+  with their own profile" ("Off: a game's own profile keeps its values.", `power.low_battery_games`). All Now.
+  Details of the toggle: what it does, "never higher than the profile's own values", how it ends, the values in use.
+- Profile editor: "Values for" gains "Low battery" (Default profile only, when `low_battery` is on); its description
+  "Battery preset" while `profiles.default.low` is null (the sliders then show `BATTERY_PRESET`'s values). There is
+  no separate reset: the presets row works on the low slot like on any other, so "Battery" there writes the Battery
+  preset values (`presetValues("battery", …, "low")`).
+- `editSlot` returns `"low"` when `state.active.slot === "low"` (the quick sliders then edit what runs, and their
+  description says "Low-battery values (Default)"); `Slot` becomes `"main" | "ac" | "low"`; `power_set`'s slot type
+  too.
+- Status row (Quick Power group after the status line, and Power tab Status): active → label "Low battery ⓘ", line
+  "18 %: saving power until 25 % or plugged in."; held → "18 %: <game> keeps its own profile." (muted). Details: the
+  merged values in effect and where to change them. `powerSummary` starts with "Low battery" while active.
+
+### E. Background sampler, per-game advisor, overhead budget (T1-11, N-7)
+
+**`readouts.cheap(ctx, st, reasons: bool) -> dict`** (readouts.py, builder 2; `st = readouts.new_state()`, separate
+from the panel's state so the two never share a Δ): `{t, package_w, gpu_busy_pct, reasons: list | None,
+battery_w, battery_status, cpu_throttle_ms}` from at most 6 files: MSR `energy_uj`, render GT
+`gtidle/idle_residency_ms`, `freq0/throttle/reasons` (only when `reasons` is true), BAT `power_now` and `status`,
+`cpu0/thermal_throttle/package_throttle_total_time_ms`. Discovery reuses readouts' (cached, `REDISCOVER_S`). Never
+`min/max/cur/act_freq`.
+
+**New module `py_modules/oxp3deck/sampler.py`**:
+
+```python
+SAMPLE_S = 5            # one sample per 5 s (the watch loop runs every 2 s; tick rate-limits itself)
+LOAD_SKIP_S = 30        # the first 30 s after a game starts, a resume or a profile change are not counted
+RING_N = 120            # 10 minutes in memory (T2-4 sparkline later)
+MIN_PLAY_S = 300        # advice only after 5 min of samples at the current PL1 and power source
+SAVE_S = 60             # /run/oxp3deck/sampler-run.json at most this often (and at a game change)
+MAX_APPS = 50           # per-appid stats kept (oldest dropped)
+MAX_DISMISSED = 200     # advisor.json entries kept
+BUSY_FOR_REASONS = 5    # read throttle reasons only when the GPU was busier than this (it is awake anyway)
+
+def tick(ctx, game: dict) -> dict     # game = power.game_now(ctx); {ok, error, did: "idle"|"skipped"|"sampled"}
+def advice(ctx, appid) -> dict        # PowerAdviceRes; in memory only, no sysfs read
+def dismiss(ctx, appid, kind, pl1_w) -> dict   # {ok, error}; advisor.json
+def report(ctx) -> dict               # the per-app stats, for diagnose
+```
+
+- Samples only when `game.enabled` and `options.advisor` (new power.json option, default true, in `game_now`) and
+  `app` is set and not `blocked`/`overridden`/`testing`, and `slot != "low"` (the user did not choose those values).
+  Δt outside `[0.5 × SAMPLE_S, 3 × SAMPLE_S]` (a stall, a resume) restarts the baseline; reasons are read only when
+  the last Δ busy was above `BUSY_FOR_REASONS`.
+- Per app, per bucket `"<pl1_w>|ac"` or `"<pl1_w>|bat"` (pl1 from `game_now.pl1_w`, the effective sustained limit):
+  `{secs, n, pkg_sum, pkg_hist[0..60] (1 W bins), busy_sum, busy_hist[0..10] (10 % bins), limited_n, thermal_n,
+  bat_w_sum, bat_n}`. A sample is **limited** when reasons hold `pl1` or `pl2`, or `package_w >= pl1_w − 1`;
+  **thermal** when reasons hold `thermal`/`prochot` or the CPU throttle Δ > 0.
+- File `/run/oxp3deck/sampler-run.json` (root's, 0600, `write_atomic` into `sysexec.run_dir`, `boot_id` checked):
+  `{boot_id, apps: {appid: {at, buckets}}}`. Dismissals: `DECKY_PLUGIN_SETTINGS_DIR/advisor.json` `{version: 1,
+  dismissed: {appid: {kind, pl1_w, at}}}`, written only on a Dismiss tap.
+
+**Advice** (pure `_advise(bucket, game) -> dict | None`, for the bucket of the current pl1 and power source, only
+when `secs >= MIN_PLAY_S`; `p90` from the histograms; `limited` = `limited_n / n`):
+
+| kind | Condition (first match) | Suggest |
+|---|---|---|
+| `headroom` | limited < 10 %, GPU busy p90 < 85 %, package p90 ≤ PL1 − 4 W | `s = clamp(ceil(p90 package) + 2, pl1_min, PL1 − 3)`; only when PL1 − s ≥ 3 |
+| `raise` | limited ≥ 50 %, GPU busy mean ≥ 90 %, PL1 ≤ `pl1_max` − 2 | `min(pl1_max, PL1 + 5)` |
+| `plug` | as `raise` but at the battery ceiling, on battery, `pl1_max_ac` > PL1 | none |
+| `cpu` | as `raise` but at the ceiling otherwise | none |
+
+A dismissed `(kind, pl1_w)` for the app → `advice: null`. `PowerAdviceRes = Res & {advice: PowerAdvice | null,
+sampling: boolean, seconds: number, need_s: number}`.
+
+**Frontend** ("This game" group, after "Separate profile for <game>"; `useAdvice(appid, visible)` calls
+`power_advice(appid)` when the group opens and every 60 s while the panel shows; no sysfs cost):
+- `adviceLine(a)` (power.ts, ≤ 80): headroom "GPU has headroom: 15 W would likely keep your fps (now 25 W)"; raise
+  "Power-limited at 25 W: 30 W may give more fps"; plug "Power-limited at 25 W: plug in for up to 40 W"; cpu
+  "Power-limited at 40 W: a lower CPU speed cap leaves the GPU more".
+- A `Status` row "Power tip ⓘ" with that line, then one horizontal row: "Use 15 W" (headroom/raise only; tag
+  `power.advice_use`, Now) and "Dismiss" (no tag). Details: "Over 7 min at 25 W: 13.8 W on average (90 % of the time
+  under 15.9 W), GPU busy 62 %, held back by the power limit 3 % of the time." + "A lower limit usually keeps a
+  frame-capped game at the same fps and saves battery. If fps drops, tap Undo or move the slider." + "Technical:"
+  samples, sources.
+- "Use N W": the game has its own profile → `powerWriter.write(appid, editSlot, {pl1_w: N, ...pl1Change(N, pl2)})`,
+  no confirm; `per_game` on and no own profile → confirm "Use 15 W for <game>?" / "Makes a power profile for <game>
+  (a copy of Default) with sustained power 15 W. Other games keep Default." then `power_profile(appid, name, true)`
+  and the write; `per_game` off → confirm "Use 15 W for every game?" / "Sets sustained power 15 W in the Default
+  profile, which every game uses." Afterwards a row "Set to 15 W" with "Undo" (writes the previous `pl1_w`/`pl2_w`
+  back; a profile it created stays, said in the Undo's line) until the app changes.
+- Hidden while power control is off, the low slot is active, or `advisor` is off. Power tab Control section: toggle
+  "Power tips while playing" (`advisor`, "Measures power use while a game runs and suggests a limit.", Now).
+
+**Overhead budget (N-7), power.py tick**:
+
+```python
+GAME_POLL_S = 10       # drift-check period while a game runs, no panel shows and nothing was unsettled lately
+PANEL_RECENT_S = 10    # a power_state call within this long = a panel shows
+CALM_S = 120           # after a drift (even seen once), an apply, a pending retry: poll_s again for this long
+```
+
+- `state()` sets `p.panel_at = now`; `_apply`, `_on_drift`, the first drift sighting and a pending retry set
+  `p.unsettled_at = now`.
+- The drift check's period becomes `poll_s` when no game runs, a panel shows, inside a grace window, `p.pending` is
+  not empty, or `now − unsettled_at < CALM_S`; otherwise `max(poll_s, GAME_POLL_S)`. `poll_s` 0 (Off) stays Off.
+  AC, resume, game changes, the conflict recheck and the low-battery check keep their own timing.
+- `tests/test_budget.py`: the full OXP3 fake tree (two zones, xe gt0/gt1, 14 policies with types, SoC, gpu
+  profile, AC, battery, energy, gtidle, throttle), power enabled, `game("1091500")`, then 30 watch passes 2 s apart
+  (fake monotonic) calling `power.tick` and `sampler.tick(game_now)` like main.py, with `powerhw._read` and
+  `readouts._read` counting paths. Asserts: no path ending in `/min_freq`, `/max_freq`, `/cur_freq`, `/act_freq`
+  during that minute; the MSR `constraint_0_power_limit_uw` read ≤ 7 times (drift every 10 s) and 30 times when
+  `power.state` is called every pass (panel open); `throttle/reasons` read only on samples with busy > 5 %; total
+  reads ≤ `READ_BUDGET_PER_MIN`, a constant in the test set to the measured count + 20 % (builder records both
+  numbers in a "(Built: …)" note here). The frontend's 3 s app poll and the library scan read no sysfs and stay.
+
+(Built, backend: on the full fake tree the in-game minute reads 471 files (`MEASURED_PER_MIN`), budget 565
+(`READ_BUDGET_PER_MIN`, + 20 %); the same minute with the drift check every 2 s, as before N-7, reads 1575. Built
+choices the text above leaves open: the sampler samples at the first 2 s tick at least 5 s after the last one (so
+about every 6 s); `_merge_low` leaves a field null (firmware) when the profile's own value is null and the firmware
+value is already the lower one, a low slot's `epp` clears the profile's per-core-type EPP (it would otherwise hide
+it), and both the CPU speed cap and per-core caps set keeps the cap; the charge is not read while on AC; changing
+`advisor` alone applies nothing; the self-test also stops when power control is paused mid-run, skips the SoC slider
+probe when the platform profile is not `balanced` (the slider cannot be read back then), and a stopped test is a
+failed job with the stopped text as its error (the partial result is still stored); `game_now` also has `name` and
+`pl2_w` (for `MeasureResult`); `power.time_windows(ctx)` wraps `powerhw.time_windows` for the self-test; the
+shared fixture's shape is `{range: {battery, ac}, caps, fields, cases: [{name, slot, opts, range, ceiling,
+presets: {id: {field: value}}}]}`.)
+
+### Interfaces (main.py, api.ts, backend.ts, types.ts)
+
+**main.py** (builder 2):
+
+```python
+async def power_selftest(self)              # self._start("power_selftest", "power-selftest", "Check power controls",
+                                            #   lambda job: _mod("selftest").run_test(self.ctx, job),
+                                            #   lambda: _mod("selftest").precheck(self.ctx, "test"))
+async def power_measure(self, mode)         # self._start("power_measure", "power-measure", "Measure power for 60 s",
+                                            #   lambda job: _mod("selftest").run_measure(self.ctx, job, mode),
+                                            #   lambda: _mod("selftest").precheck(self.ctx, "measure", mode))
+async def power_advice(self, appid)         # _call: _mod("sampler").advice(self.ctx, appid)
+async def power_advice_dismiss(self, appid, kind, pl1_w)   # _call: _mod("sampler").dismiss(self.ctx, appid, kind, pl1_w)
+```
+
+- `_power_watch` gets a third part `"sampler": self._sampler_tick` = `_mod("sampler").tick(self.ctx,
+  _mod("power").game_now(self.ctx))` (same error and slow-part handling as the other two).
+- `oxp3_diagnose` passes `extra=` (B, Diagnose).
+- `power.info()` adds `hw.time_windows` and `selftest` (`selftest.info(ctx)`, imported lazily, failure → null).
+
+**types.ts** (builder 3):
+
+```ts
+export type Slot = "main" | "ac" | "low";                       // power.ts re-exports
+export type PowerOptions = { /* …existing… */ low_battery: boolean; low_battery_pct: number;
+  low_battery_games: boolean; advisor: boolean };
+export type PowerProfile = { name: string | null; main: PowerValues; ac: PowerValues | null;
+  low?: PowerValues | null };                                    // low: "default" only
+export type PowerLow = { active: boolean; held: boolean; pct: number | null; enter_pct: number; leave_pct: number;
+  since: number | null };
+// PowerState: active.slot: Slot; low: PowerLow | null
+export type TimeWindows = Record<string, { pl1_us: number | null; pl2_us: number | null }>;
+// PowerInfo: hw.time_windows: TimeWindows; selftest: PowerSelftestInfo | null
+export type ProbeOutcome = "ok" | "locked" | "ignored" | "unsupported" | "skipped" | "not_restored";
+export type SelftestProbe = { id: string; label: string; before: string | null; tried: string | null;
+  read: string | null; restored: boolean | null; outcome: ProbeOutcome; why: string | null };
+export type SelftestResult = { at: number; kernel: string | null; bios: string | null; probes: SelftestProbe[];
+  time_windows: TimeWindows; stopped: string | null; reapplied: PowerApply | null };
+export type MeasureResult = { at: number; mode: "idle" | "game"; appid: string | null; name: string | null;
+  seconds: number; ac: boolean | null; profile: string; slot: Slot; pl1_w: number | null; pl2_w: number | null;
+  avg_package_w: number | null; max_package_w: number | null; avg_gpu_busy_pct: number | null;
+  avg_battery_w: number | null; reasons: Record<string, number>;   // share of samples, 0..1
+  cpu_throttle_ms: number | null; interrupted: string | null };
+export type PowerSelftestInfo = { test: SelftestResult | null; measures: MeasureResult[]; measured: boolean };
+export type PowerAdvice = { kind: "headroom" | "raise" | "plug" | "cpu"; appid: string; pl1_w: number;
+  suggest_w: number | null; ac: boolean; pl1_max_ac: number | null; seconds: number;
+  stats: { samples: number; avg_package_w: number; p90_package_w: number; avg_gpu_busy_pct: number;
+           p90_gpu_busy_pct: number; limited_share: number; thermal_share: number } };
+export type PowerAdviceRes = Res & { advice: PowerAdvice | null; sampling: boolean; seconds: number; need_s: number };
+// Oxp3Status.refresh: + vrr_safe?, vrr_reason?, vrr_why?, vrr_range_hz?   (A)
+```
+
+`MeasureResult.name`: the frontend passes nothing; the backend uses the power profile's name for the appid, else
+null. The measurement's job result is `{ok, error, measure}`, the self-test's `{ok, error, selftest}`.
+
+**api.ts / backend.ts**: `power_selftest: [] → JobStart`, `power_measure: [mode: "idle" | "game"] → JobStart`,
+`power_advice: [appid: string] → PowerAdviceRes`, `power_advice_dismiss: [appid: string, kind: string, pl1_w:
+number] → Res`; `power_set`'s slot becomes `Slot`. backend.ts wraps them like the others.
+
+**effects.ts** additions: `power.preset`, `power.low_battery`, `power.low_battery_pct`, `power.low_battery_games`,
+`power.advisor`, `power.advice_use`: Now; `power.selftest`: `"idle"`. No tag: Measure 60 s, Dismiss, Don't show
+again (VRR), the "Edit values for: Low battery" selector.
+
+**Shared fixture** `tests/fixtures/power/presets.json` (builder 2 creates it; builder 3's node test reads it): the
+OXP3 range on battery and on AC (`pl1_min 5, pl1_max_battery 35, pl1_max_ac 40, extended_max 52, pl2_max 52`) and
+the expected `presetValues` of each preset for slots `main` (split off / on), `ac`, `low`, with full caps; the
+`battery` entry for slot `low` equals `power.BATTERY_PRESET`.
+
+### Tests
+
+- **Builder 1 (oxp3-tool)**: as listed under A.
+- **Builder 2 (plugin backend)**:
+  - `test_powerhw.py`: `time_windows` (both zones, a missing file → None, never written: no recorded write path
+    contains `time_window`); `battery()` (capacity/status, no battery → None).
+  - `test_selftest.py` (new): refused while disabled / blocked / overridden / a game runs / in a grace window; a full
+    run on the fake tree writes each probe then the old value (recorder order) and leaves every file byte-equal to
+    before; EACCES on MSR pl1 → `locked` and the id in run `locked`; an ignored MMIO write → `ignored`; EINVAL on a
+    cap → `unsupported`, the rest go on; a restore read-back mismatch → `not_restored` and an `_apply`; a blocked
+    `cpu` group → its probes `skipped`; a game reported mid-run → stopped, nothing left changed; an exception in a
+    probe → `selftest_mark(False)` still runs; a measurement: 60 s of fake energy/gtidle/battery gives the expected
+    averages and max, mode "game" stops when the game ends (stored ≥ 20 s, dropped below); `report()` JSON-safe.
+  - `test_sampler.py` (new): no sample while disabled / no game / low slot / testing; first 30 s skipped; a stall
+    restarts the baseline; buckets per PL1 and source; each advice kind at its threshold and just outside it;
+    `headroom`'s suggestion clamp and the "≥ 3 W" rule; dismissal per (kind, pl1_w); the run file's boot_id; no
+    freq file read (patched `_read`).
+  - `test_power.py`: the four new options' validation and defaults; `set_values(..., "low")` only for default and its
+    preset fill; enter at 20 % on battery, stay at 22 %, leave at 25 % and on AC, never with AC unknown; `_merge_low`
+    never raises (a null normal uses the snapshot; 8 W stays 8 W); a game profile holds it (`held`) unless
+    `low_battery_games`; `game_now` reads no sysfs; the N-7 period rules (panel, game, calm, grace, pending, Off);
+    `BATTERY_PRESET` equals the fixture.
+  - `test_budget.py` (new), `test_main.py` (the four methods through `_start`/`_call`, the third watch part, the
+    diagnose `extra`), `test_oxp3tool.py` (the sidecar file, its failure as a `say` line; the VRR passthrough).
+- **Builder 3 (frontend)**, node: `presetValues` against the fixture, clamping at the slot ceiling, leaving out
+  blocked fields; `presetOf` for each preset, "custom" after one field changes, "default" for all null;
+  `presetLine` ≤ 80; `adviceLine` for each kind ≤ 80 with 3-digit values; `selftestLine`, `measureLine`, `tauText`;
+  `vrrDetails` with and without a range; `editSlot` → "low"; `powerSummary` with a preset and with low battery ≤ 80;
+  effects ids present; pages.test source checks: the preset row is a horizontal `Focusable` of `DialogButton`s with
+  no "Custom" button, the VRR row's confirm offers "Don't show again", the Power tip row is inside the game group.
+- **On the device** (owner, later): run "Check power controls" and three measurements (idle, a light game at
+  Balanced, a heavy game at Performance); then decide whether the preset values change (a builder never changes them
+  from a guess).
+
+### Builders (performance batch)
+
+| Builder | Owns | Must not edit |
+|---|---|---|
+| 1 oxp3-tool | `oxp3_tool/display.py`, `detect.py`, `cli.py`; `tests/test_refresh.py`, `tests/test_json.py`, `tests/fakeroot.py`; README.md (one sentence) | the plugin repository |
+| 2 plugin backend | `py_modules/oxp3deck/power.py`, `powerhw.py`, `readouts.py`, `oxp3tool.py`, new `selftest.py`, new `sampler.py`; `main.py`; `tests/*.py` (incl. `powerfake.py`, new `test_selftest.py`, `test_sampler.py`, `test_budget.py`), `tests/fixtures/power/presets.json` | `src/`, `tests/js`, oxp3-tool |
+| 3 plugin frontend | `src/**` (types.ts, api.ts, backend.ts, power.ts, quickgroups.ts, effects.ts, new display.ts, components/PowerControls.tsx, GameControls.tsx or the Quick game body, JobView.tsx, pages/Power.tsx, Quick.tsx, Fixes.tsx); `tests/js/*`; README.md (presets, low battery, device check, power tips, VRR row) | `py_modules`, `main.py`, `tests/*.py`, oxp3-tool |
+
+The interfaces between them are exactly the names, shapes and texts above. Builder 3 may stub `power_selftest`,
+`power_measure`, `power_advice` answers in node tests and reads the fixture; builder 2 may stub oxp3-tool's new
+`refresh` keys in its passthrough test. DESIGN.md belongs to the integrator; a builder writes "(Built: …)" notes into
+this section only.
+
+(Built, builder 3 frontend: as above. The new rows live in a new `src/components/PerfRows.tsx` (PresetRow,
+LowBatteryRow, PerfOptions, VrrRow, PowerTipRows/useAdvice, DeviceCheckSection, TimeWindowsRow); the pure texts in
+`power.ts` and `display.ts`, tested in a new `tests/js/perf.test.mjs` (presetValues against the shared fixture).
+Deviations: the new `PowerOptions` keys and `PowerProfile.low`/`PowerState.low`/`PowerInfo.selftest`/
+`hw.time_windows` are optional in types.ts and read with the design's defaults, so an older backend still renders;
+`editedSlot` also returns the profile `key` (Default while the low slot runs, as only Default has one); `confirm`
+gained a `cancel` text for the VRR dialog's "Close", and the confirm-effect source test skips that dialog (no tag by
+design); with "Different settings when plugged in" off, "Values for" offers "Normal" and "Low battery"; "Use N W"
+writes the game's own profile only while per-game profiles are on (else Default, after the confirm).)

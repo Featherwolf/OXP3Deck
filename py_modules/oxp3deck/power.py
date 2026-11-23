@@ -56,8 +56,19 @@ _CHOICE_FIELDS = {"epp": EPP_CHOICES, **{f: EPP_CHOICES for f in EPP_TYPE_FIELDS
                   "scx_mode": ("auto", "gaming", "powersave")}
 CPU_PCT_MIN, CPU_MIN_PCT_MAX = 30, 50
 EXCLUSIVE = "use either the CPU speed cap or the per-core caps, not both"
-OPTION_DEFAULTS = {"per_game": True, "split_ac": False, "extended": False, "poll_s": 2}
+OPTION_DEFAULTS = {"per_game": True, "split_ac": False, "extended": False, "poll_s": 2,
+                   "low_battery": True, "low_battery_pct": 20, "low_battery_games": False, "advisor": True}
 POLL_MAX_S = 60                  # poll_s: 0 (Off) or 2..POLL_MAX_S
+LOW_PCT_MIN, LOW_PCT_MAX = 5, 50  # low_battery_pct
+LOW_HYST_PCT = 5                 # the low slot ends at low_battery_pct + this (or on AC)
+LOW_CHECK_S = 30                 # the battery's charge is read this often (and at once after an AC change)
+# The Battery preset (src/power.ts presetValues("battery", ...) for the low slot; tests/fixtures/power/presets.json
+# keeps the two equal): the low-battery slot's values while profiles.default.low is null. Other fields null.
+BATTERY_PRESET = {"pl1_w": 10, "pl2_w": 15, "epp": "balance_power", "turbo": False,
+                  "gpu_power_profile": "power_saving"}
+GAME_POLL_S = 10       # drift-check period while a game runs, no panel shows and nothing was unsettled lately
+PANEL_RECENT_S = 10    # a power_state call within this long = a panel shows
+CALM_S = 120           # after a drift (even seen once), an apply, a pending retry: poll_s again for this long
 PENDING_RETRIES = 30             # transient failures (the GPU asleep) retried at most this often per apply
 _APPID = re.compile(r"^\d{1,10}$")
 
@@ -234,6 +245,23 @@ def _poll_ok(v) -> bool:
     return isinstance(v, int) and not isinstance(v, bool) and (v == 0 or 2 <= v <= POLL_MAX_S)
 
 
+def _low_pct_ok(v) -> bool:
+    return isinstance(v, int) and not isinstance(v, bool) and LOW_PCT_MIN <= v <= LOW_PCT_MAX
+
+
+def _option_ok(k: str, v) -> bool:
+    if k == "poll_s":
+        return _poll_ok(v)
+    if k == "low_battery_pct":
+        return _low_pct_ok(v)
+    return isinstance(v, bool)
+
+
+def _battery_values() -> dict:
+    """The low slot's values while profiles.default.low is null: BATTERY_PRESET, every other field null."""
+    return dict(_empty_values(), **BATTERY_PRESET)
+
+
 def _norm_profile(raw, key: str) -> dict:
     raw = raw if isinstance(raw, dict) else {}
     name = raw.get("name")
@@ -241,8 +269,12 @@ def _norm_profile(raw, key: str) -> dict:
         log.warning("power.json: profile %s has a bad name, reads as none", key)
         name = None
     ac = raw.get("ac")
-    return {"name": name, "main": _norm_values(raw.get("main"), f"{key}.main"),
-            "ac": None if ac is None else _norm_values(ac, f"{key}.ac")}
+    out = {"name": name, "main": _norm_values(raw.get("main"), f"{key}.main"),
+           "ac": None if ac is None else _norm_values(ac, f"{key}.ac")}
+    if key == "default":            # the low-battery slot: the Default profile only
+        low = raw.get("low")
+        out["low"] = None if low is None else _norm_values(low, "default.low")
+    return out
 
 
 def _norm_data(raw) -> dict:
@@ -250,10 +282,7 @@ def _norm_data(raw) -> dict:
     raw = raw if isinstance(raw, dict) else {}
     data = {"version": VERSION, "enabled": raw.get("enabled") is True}
     for k, default in OPTION_DEFAULTS.items():
-        if k == "poll_s":
-            data[k] = raw[k] if _poll_ok(raw.get(k)) else default
-        else:
-            data[k] = raw[k] if isinstance(raw.get(k), bool) else default
+        data[k] = raw[k] if _option_ok(k, raw.get(k)) else default
     ignore = raw.get("ignore")
     data["ignore"] = sorted({i for i in ignore if i in IGNORABLE}) if isinstance(ignore, list) else []
     profiles = {"default": _norm_profile((raw.get("profiles") or {}).get("default")
@@ -314,7 +343,7 @@ def _boot_id(ctx) -> str:
 
 def _fresh_run(boot: str) -> dict:
     return {"boot_id": boot, "snapshot": None, "app": None, "ours": {}, "locked": [], "overridden": None,
-            "suspend_count": None}
+            "suspend_count": None, "low": None}
 
 
 def _load_run(ctx) -> dict:
@@ -342,6 +371,10 @@ def _load_run(ctx) -> dict:
         run["overridden"] = got["overridden"]
     if isinstance(got.get("suspend_count"), int):
         run["suspend_count"] = got["suspend_count"]
+    low = got.get("low")
+    if isinstance(low, dict) and isinstance(low.get("since"), (int, float)) and not isinstance(low["since"], bool) \
+            and (low.get("pct") is None or (isinstance(low["pct"], int) and not isinstance(low["pct"], bool))):
+        run["low"] = {"since": low["since"], "pct": low.get("pct")}
     return run
 
 
@@ -372,6 +405,11 @@ class _Power:
         self.pending: list[str] = []         # ids that failed `transient` at the last apply (the GPU asleep)
         self.pending_left = 0                # retries left for them
         self.yielded: dict[str, list[str]] = {}   # field group -> the ignored conflicts it was left to (drift)
+        self.panel_at: float | None = None   # the last state() call (a panel shows)
+        self.unsettled_at: float | None = None   # the last apply, drift sighting or pending retry (N-7)
+        self.low_at: float | None = None     # the last battery charge read (low-battery slot)
+        self.low_pct: int | None = None      # what it read
+        self.testing = False                 # the self-test runs (selftest_mark)
 
 
 def _get(ctx) -> _Power:
@@ -459,13 +497,77 @@ def _limits(ctx, p: _Power, hw: dict, ac, reading: dict | None = None) -> dict:
             else None, "cpu_min_pct_max": CPU_MIN_PCT_MAX, "core_types": core_types}
 
 
-def _active(p: _Power, ac) -> tuple[str, str, dict]:
+def _base_active(p: _Power, ac) -> tuple[str, str, dict]:
+    """The profile and slot the user's choices select (no low-battery slot)."""
     data = p.data
     app = p.run.get("app")
     key = app if data["per_game"] and app and app in data["profiles"] else "default"
     prof = data["profiles"][key]
     slot = "ac" if data["split_ac"] and ac is True and prof["ac"] is not None else "main"
     return key, slot, prof[slot]
+
+
+def _low_held(p: _Power, key: str) -> bool:
+    """The low-battery conditions hold but a game's own profile keeps its values."""
+    return key != "default" and not p.data["low_battery_games"]
+
+
+def _active(p: _Power, ac) -> tuple[str, str, dict]:
+    """(profile key, slot, values) of what runs: the low-battery slot ("low", merged values) while run.low is set,
+    for the Default profile (or every profile with low_battery_games)."""
+    key, slot, values = _base_active(p, ac)
+    if p.run.get("low") and p.data["low_battery"] and not _low_held(p, key):
+        low = p.data["profiles"]["default"].get("low")
+        return key, "low", _merge_low(p, values, low if low is not None else _battery_values())
+    return key, slot, values
+
+
+def _firmware_value(p: _Power, field: str):
+    """The firmware's value of a numeric limit (W, MHz, %) from the boot snapshot, for _merge_low; None unknown."""
+    snap = p.run.get("snapshot") or {}
+    rapl = [v for v in (snap.get("rapl") or {}).values() if isinstance(v, dict)]
+    if field == "pl1_w":
+        vals = [v["pl1_uw"] for v in rapl if isinstance(v.get("pl1_uw"), int) and v["pl1_uw"] > 0]
+        return _w(min(vals)) if vals else None
+    if field == "pl2_w":
+        vals = [v["pl2_uw"] for v in rapl if isinstance(v.get("pl2_uw"), int) and v["pl2_uw"] > 0]
+        return _w(max(vals)) if vals else None
+    if field == "gpu_max_mhz":
+        g = snap.get("gpu") if isinstance(snap.get("gpu"), dict) else {}
+        if isinstance(g.get("max"), int):
+            return g["max"]
+        return ((p.hw or {}).get("gpu") or {}).get("rp0")
+    if field == "cpu_max_pct":
+        perf = snap.get("perf") if isinstance(snap.get("perf"), dict) else {}
+        return perf.get("max") if isinstance(perf.get("max"), int) else None
+    return None
+
+
+_LOW_MIN = ("pl1_w", "pl2_w", "gpu_max_mhz", "cpu_max_pct")
+
+
+def _merge_low(p: _Power, normal: dict, low: dict) -> dict:
+    """The low slot over the profile's own values, never raising a limit: the numeric limits are min(normal, low)
+    (a null normal is the firmware's value from the boot snapshot; a null low keeps the normal; an unknown firmware
+    value gives the low value); every other field is the low slot's when set, else the normal one. A low EPP over
+    a profile's per-core-type EPP replaces them (else the per-type values would hide it)."""
+    out = dict(normal)
+    for f in FIELDS:
+        lv, nv = low.get(f), normal.get(f)
+        if f in _LOW_MIN:
+            if lv is None:
+                continue
+            base = nv if nv is not None else _firmware_value(p, f)
+            out[f] = lv if base is None else min(base, lv)
+            if nv is None and out[f] == base:
+                out[f] = None           # the firmware's own value is already the lower: leave it to the firmware
+        elif lv is not None:
+            out[f] = lv
+    if low.get("epp") is not None and not _epp_split(low):
+        out.update({f: None for f in EPP_TYPE_FIELDS})
+    if _exclusive_broken(out):
+        out.update({f: None for f in CAP_FIELDS})
+    return out
 
 
 def _profile_name(p: _Power, key: str) -> str:
@@ -843,6 +945,7 @@ def _do_apply(ctx, p: _Power, target: dict, split: bool = False, retry: bool = F
         del p.yielded[g]        # written again (a change, an event): ours until the other program changes it again
     p.last = {"ok": res["ok"], "error": res["error"], "written": res["written"], "failed": res["failed"]}
     p.started = True
+    p.unsettled_at = _monotonic()
     p.drift_seen = None
     p.pending = [f["id"] for f in res["failed"] if f.get("transient")]
     if not retry:
@@ -1206,6 +1309,7 @@ def _ignored_owners(p: _Power, group: str | None) -> list[str]:
 
 def _on_drift(ctx, p: _Power, d: tuple, now: float, confirm: bool) -> str:
     item, want, got = d
+    p.unsettled_at = now          # N-7: the drift check runs at poll_s again for CALM_S
     # look for other power managers now (the cached check can be a minute old): one that has just started is
     # "blocked" (writes stop, and resume by themselves once it is gone), not an override
     _rows(ctx, p, force=True)
@@ -1309,7 +1413,20 @@ def _state(ctx, p: _Power, reading: dict | None = None) -> dict:
         "cpu_blocked_by": [r["id"] for r in _cpu_rows(ctx, p)],
         "yielded": sorted(p.yielded),
         "last": p.last,
+        "low": _low_state(p, key),
     }
+
+
+def _low_state(p: _Power, key: str) -> dict | None:
+    """PowerLow (None while low_battery is off)."""
+    if not p.data["low_battery"]:
+        return None
+    low = p.run.get("low")
+    thr = p.data["low_battery_pct"]
+    held = bool(low) and _low_held(p, key)
+    pct = p.low_pct if p.low_pct is not None else (low or {}).get("pct")
+    return {"active": bool(low) and not held, "held": held, "pct": pct, "enter_pct": thr,
+            "leave_pct": thr + LOW_HYST_PCT, "since": low["since"] if low else None}
 
 
 def _safe_state(ctx, p: _Power):
@@ -1345,6 +1462,9 @@ def _may_write(ctx, p: _Power) -> bool:
 
 # ---- public ------------------------------------------------------------------------------------------------------
 
+_NEW_OPTIONS = ("low_battery", "low_battery_pct", "low_battery_games", "advisor")
+
+
 def limits(ctx, hw: dict, ac) -> dict:
     """PowerRange (W, MHz) for `hw` and the AC state `ac`."""
     with _LOCK:
@@ -1379,22 +1499,35 @@ def info(ctx, refresh: bool) -> dict:
                            "types": [t for t in CORE_TYPES if t in (cpu.get("types") or {})]}
                    if cpu else None,
                    "soc": hw.get("soc") is not None,
-                   "ac_supply": hw.get("ac_supply"), "problems": list(hw.get("problems") or [])},
+                   "ac_supply": hw.get("ac_supply"), "problems": list(hw.get("problems") or []),
+                   "time_windows": powerhw.time_windows(ctx, hw)},
             "options": {k: copy.deepcopy(p.data[k]) for k in ("per_game", "split_ac", "extended", "ignore",
-                                                              "poll_s")},
+                                                              "poll_s", *_NEW_OPTIONS)},
             "profiles": copy.deepcopy(p.data["profiles"]),
             "conflicts": rows,
             "fixed": _fixed_all(p),
             "boot": {"taken_at": snap.get("taken_at")} if snap else None,
             "sdtdp_found": os.path.isfile(sdtdp),
             "state": _state(ctx, p),
+            "selftest": _selftest_info(ctx),
         }}
+
+
+def _selftest_info(ctx):
+    """selftest.info(ctx) (stored results, no hardware read), imported lazily; any failure gives None."""
+    try:
+        from . import selftest
+        return selftest.info(ctx)
+    except Exception:
+        log.exception("power: selftest.info failed")
+        return None
 
 
 def state(ctx) -> dict:
     """PowerStateRes. Reads the GPU clocks (only called while a panel shows), and so checks them for drift."""
     with _LOCK:
         p = _get(ctx)
+        p.panel_at = _monotonic()
         hw = _hw(ctx, p)
         reading = powerhw.read(ctx, hw, gpu=hw.get("gpu") is not None)
         if _may_write(ctx, p) and p.apply_at is None:
@@ -1437,6 +1570,7 @@ def enable(ctx, on) -> dict:
         p.blocked = None
         p.run["overridden"] = None
         p.run["ours"] = {}
+        p.run["low"] = None
         p.apply_at = None
         _save_run(ctx, p)
         return _changed(ctx, p, applied)
@@ -1452,6 +1586,11 @@ def options(ctx, opts) -> dict:
             if k == "poll_s":
                 if not _poll_ok(v):
                     return _refuse(ctx, p, f"power_options: poll_s must be 0 (Off) or 2..{POLL_MAX_S} seconds")
+                new[k] = v
+            elif k == "low_battery_pct":
+                if not _low_pct_ok(v):
+                    return _refuse(ctx, p, f"power_options: low_battery_pct must be a whole number "
+                                           f"{LOW_PCT_MIN}..{LOW_PCT_MAX}")
                 new[k] = v
             elif k in OPTION_DEFAULTS:
                 if not isinstance(v, bool):
@@ -1475,10 +1614,13 @@ def options(ctx, opts) -> dict:
         applied = None
         if "poll_s" in new:
             p.last_poll = None           # the next tick checks with the new rate
-        writes = {k: v for k, v in new.items() if k != "poll_s"}
+        low_changed = False
+        if any(k.startswith("low_battery") for k in new):
+            low_changed = _low_eval(ctx, p, _monotonic(), powerhw.ac_online(ctx), force=True)
+        writes = {k: v for k, v in new.items() if k not in ("poll_s", "advisor")}
         if p.data["enabled"] and writes:
             cleared = _update_blocked(ctx, p) if "ignore" in new else False
-            if (cleared or writes != {k: old[k] for k in writes}) and _may_write(ctx, p):
+            if (cleared or low_changed or writes != {k: old[k] for k in writes}) and _may_write(ctx, p):
                 applied = _apply(ctx, p)
         return _changed(ctx, p, applied)
 
@@ -1488,8 +1630,10 @@ def set_values(ctx, key, slot, values) -> dict:
         p = _get(ctx)
         if not isinstance(key, str) or key not in p.data["profiles"]:
             return _refuse(ctx, p, f"power_set: no profile {key!r} (create it first)")
-        if slot not in ("main", "ac"):
-            return _refuse(ctx, p, f"power_set: slot must be 'main' or 'ac', not {slot!r}")
+        if slot not in ("main", "ac", "low"):
+            return _refuse(ctx, p, f"power_set: slot must be 'main', 'ac' or 'low', not {slot!r}")
+        if slot == "low" and key != "default":
+            return _refuse(ctx, p, "power_set: only the Default profile has low-battery values")
         if not isinstance(values, dict):
             return _refuse(ctx, p, "power_set: values must be an object")
         clean = {}
@@ -1502,12 +1646,14 @@ def set_values(ctx, key, slot, values) -> dict:
             clean[f] = nv
         old = copy.deepcopy(p.data["profiles"][key])
         prof = p.data["profiles"][key]
-        merged = dict(prof["main"] if slot == "ac" and prof["ac"] is None else prof[slot])
+        # an empty slot starts as a copy: ac of main, low of the Battery preset
+        start = {"ac": lambda: dict(prof["main"]), "low": _battery_values}
+        merged = dict(start[slot]() if slot != "main" and prof.get(slot) is None else prof[slot])
         merged.update(clean)
         if _exclusive_broken(merged):
             return _refuse(ctx, p, f"power_set: {EXCLUSIVE}")
-        if slot == "ac" and prof["ac"] is None:
-            prof["ac"] = dict(prof["main"])
+        if slot != "main" and prof.get(slot) is None:
+            prof[slot] = start[slot]()
         prof[slot].update(clean)
         err = _save(p)
         if err:
@@ -1517,7 +1663,7 @@ def set_values(ctx, key, slot, values) -> dict:
         _first_check(ctx, p)
         if p.data["enabled"] and p.blocked is None:
             akey, aslot, _v = _active(p, powerhw.ac_online(ctx))
-            if (akey, aslot) == (key, slot):
+            if (akey, aslot) == (key, slot) or (slot == "low" and aslot == "low"):
                 p.run["overridden"] = None     # a change to what runs: the user takes control again
                 applied = _apply(ctx, p)
         return _changed(ctx, p, applied)
@@ -1863,6 +2009,54 @@ def unfix(ctx, cid) -> dict:
         return _fix_answer(ctx, p, not errors, errors[-1] if errors else None, steps, notes, applied)
 
 
+def _drift_period(p: _Power, now: float) -> int:
+    """N-7: the drift check's period. poll_s, but max(poll_s, GAME_POLL_S) while a game runs with no panel showing
+    and nothing unsettled (an apply, a drift, a pending retry) in the last CALM_S, outside a grace window. 0: Off."""
+    poll = p.data["poll_s"]
+    if poll <= 0:
+        return 0
+    busy = (p.run.get("app") is None
+            or (p.panel_at is not None and now - p.panel_at < PANEL_RECENT_S)
+            or (p.grace_until is not None and now < p.grace_until)
+            or (p.pending and p.pending_left > 0)
+            or (p.unsettled_at is not None and now - p.unsettled_at < CALM_S))
+    return poll if busy else max(poll, GAME_POLL_S)
+
+
+def _low_eval(ctx, p: _Power, now: float, ac, force: bool = False) -> bool:
+    """The low-battery slot's conditions (N-4): enter on battery (never with AC unknown) at <= low_battery_pct,
+    leave on AC or at >= low_battery_pct + LOW_HYST_PCT. The charge is read every LOW_CHECK_S (force: now, after an
+    AC change or an option change), never on AC. True when run.low changed (saved)."""
+    cur = p.run.get("low")
+    if not (p.data["enabled"] and p.data["low_battery"]) or ac is True:
+        if cur is not None:
+            p.run["low"] = None
+            log.info("power: low battery: back to the profile's own values")
+            _save_run(ctx, p)
+            return True
+        return False
+    if not force and p.low_at is not None and now - p.low_at < LOW_CHECK_S:
+        return False
+    p.low_at = now
+    pct = powerhw.battery(ctx)["pct"]
+    p.low_pct = pct
+    thr = p.data["low_battery_pct"]
+    if cur is None:
+        if ac is False and pct is not None and pct <= thr:
+            p.run["low"] = {"since": time.time(), "pct": pct}
+            log.info("power: low battery (%d %%): battery-saving values until %d %% or AC", pct, thr + LOW_HYST_PCT)
+            _save_run(ctx, p)
+            return True
+        return False
+    if pct is not None and pct >= thr + LOW_HYST_PCT:
+        p.run["low"] = None
+        log.info("power: battery at %d %%: back to the profile's own values", pct)
+        _save_run(ctx, p)
+        return True
+    cur["pct"] = pct if pct is not None else cur.get("pct")
+    return False
+
+
 def tick(ctx) -> dict:
     """One step of the watch loop (every TICK_S): resume and AC changes, the boot apply, drift and conflicts."""
     with _LOCK:
@@ -1881,6 +2075,7 @@ def tick(ctx) -> dict:
         p.seen, p.prev_susp, p.prev_ac, p.prev_gap = True, susp, ac, gap
         if not p.data["enabled"]:
             p.apply_at = p.grace_until = p.recheck_at = None
+            _low_eval(ctx, p, now, ac)            # clears a low state left from before
             return {"ok": True, "error": None, "did": "idle"}
         _hw(ctx, p)
         if resumed:
@@ -1892,6 +2087,9 @@ def tick(ctx) -> dict:
             p.apply_at = max(p.apply_at or 0, now + AC_DEBOUNCE_S)   # after the last change of a flapping charger
             p.grace_until = max(p.grace_until or 0, now + GRACE_S)
             p.grace_left = GRACE_REAPPLIES
+        if _low_eval(ctx, p, now, ac, force=ac_changed) and p.blocked is None and not p.run.get("overridden") \
+                and p.apply_at is None:
+            p.apply_at = now
         recheck = p.recheck_at is not None and now >= p.recheck_at
         if recheck or p.rows_at is None or now - p.rows_at >= CONFLICT_RECHECK_S:
             p.recheck_at = None
@@ -1919,7 +2117,8 @@ def tick(ctx) -> dict:
         # the drift check and the retry of what the device did not take: every poll_s (0: Off), and every tick
         # inside a grace window (after AC or resume)
         poll = p.data["poll_s"]
-        due = p.grace_until is not None or (poll > 0 and (p.last_poll is None or now - p.last_poll >= poll))
+        period = _drift_period(p, now)
+        due = p.grace_until is not None or (poll > 0 and (p.last_poll is None or now - p.last_poll >= period))
         if not due:
             return {"ok": True, "error": None, "did": "nothing"}
         p.last_poll = now
@@ -1974,6 +2173,354 @@ def summary(ctx) -> dict:
         parts.append(_profile_name(p, key))
         out["line"] = " · ".join(parts)
         return out
+
+
+# ---- the sampler's context and the self-test (DESIGN.md "Performance batch" B, E) ----------------------------------
+
+def game_now(ctx) -> dict:
+    """What the sampler and the self-test need, with no sysfs read: {app, name, enabled, blocked, overridden, grace,
+    ac (the last tick's), key, slot, pl1_w / pl2_w (the lowest of what the last apply left on the zones, W, or None),
+    pl1_min, pl1_max, pl1_max_ac (None until a snapshot exists), low, testing, advisor}."""
+    with _LOCK:
+        p = _get(ctx)
+        now = _monotonic()
+        ac = p.prev_ac
+        key, slot, _v = _active(p, ac)
+        ours = p.run.get("ours") or {}
+        pl1s = [v for k, v in ours.items() if k.endswith("/pl1") and not k.startswith(("gpu/", "cpu/", "soc/"))
+                and isinstance(v, int)]
+        pl2s = [v for k, v in ours.items() if k.endswith("/pl2") and isinstance(v, int)]
+        rng = None
+        if p.hw is not None and p.run.get("snapshot") and p.oxp3 is not None:
+            rng = _limits(ctx, p, p.hw, ac)            # from the snapshot: no read
+        app = p.run.get("app")
+        return {"app": app, "name": (p.data["profiles"].get(app) or {}).get("name") if app else None,
+                "enabled": p.data["enabled"], "blocked": p.blocked, "overridden": p.run.get("overridden") is not None,
+                "grace": p.grace_until is not None and now < p.grace_until, "ac": ac, "key": key, "slot": slot,
+                "pl1_w": _w(min(pl1s)) if pl1s else None, "pl2_w": _w(min(pl2s)) if pl2s else None,
+                "pl1_min": MIN_W, "pl1_max": rng["pl1_max"] if rng else None,
+                "pl1_max_ac": rng["pl1_max_ac"] if rng else None,
+                "low": slot == "low", "testing": p.testing, "advisor": p.data["advisor"]}
+
+
+def time_windows(ctx) -> dict:
+    """powerhw.time_windows for the discovered zones (read only)."""
+    with _LOCK:
+        p = _get(ctx)
+        return powerhw.time_windows(ctx, _hw(ctx, p))
+
+
+def selftest_mark(ctx, on: bool) -> dict:
+    """The self-test starts (on: the boot snapshot is taken first) or ends (off: the active profile is applied when
+    writing is allowed; it writes only what differs). {ok, error, applied}."""
+    with _LOCK:
+        p = _get(ctx)
+        applied = None
+        if on:
+            _hw(ctx, p)
+            _ensure_snapshot(ctx, p)
+            p.testing = True
+        else:
+            p.testing = False
+            if _may_write(ctx, p):
+                applied = _apply(ctx, p)
+        return {"ok": True, "error": None, "applied": applied}
+
+
+PROBE_W, PROBE_MHZ, PROBE_PCT, PROBE_CAP_MHZ = 1, 50, 5, 200   # selftest.py's steps (kept equal by a test)
+_EPP_NEXT = {"balance_performance": "balance_power", "balance_power": "balance_performance",
+             "performance": "balance_performance", "power": "balance_power"}
+_TYPE_NAME = {"p": "P cores", "e": "E cores", "lpe": "LP-E cores"}
+
+
+def _probe_label(hw: dict, item: str) -> str:
+    if item.endswith(("/pl1", "/pl2")) and not item.startswith(("gpu/", "cpu/")):
+        zid, _, k = item.rpartition("/")
+        iface = "MMIO" if zid.startswith("intel-rapl-mmio") else "MSR"
+        return f"{'Sustained' if k == 'pl1' else 'Boost'} power ({iface})"
+    if item.startswith("cpu/cap/"):
+        pol = item[len("cpu/cap/"):]
+        t = _policy_types(hw).get(pol, "p")
+        return f"Per-core speed cap ({_TYPE_NAME.get(t, t)})"
+    return {"gpu/max": "GPU maximum speed", "gpu/min": "GPU minimum speed", "epp": "Energy preference",
+            "turbo": "CPU boost", "cpu/max_pct": "CPU speed cap", "cpu/min_pct": "CPU speed floor",
+            "soc/balance": "SoC power slider", "gpu/profile": "GPU power profile"}.get(item, item)
+
+
+def _left_to(ctx, p: _Power, group: str | None) -> str | None:
+    """Why the self-test leaves a field group alone: blocked by, or yielded to, another program."""
+    if group is None:
+        return None
+    blocked = _blocked_fields(ctx, p)
+    ids = blocked.get(group) or p.yielded.get(group)
+    if not ids:
+        return None
+    names = ", ".join(CONFLICTS[i][0] if i in CONFLICTS else i for i in ids)
+    return f"left to {names}"
+
+
+def probe_plan(ctx) -> list[dict]:
+    """The self-test's probes for what OXP3 Deck controls on this device, from a fresh read: each {id, label, probe:
+    Target, restore: Target, before, tried} (raw values: µW, MHz, kHz, %, words), or with `skip` (outcome) and
+    `why` instead of the targets. The restore target is the value read just before, so "previous" comes back."""
+    with _LOCK:
+        p = _get(ctx)
+        hw = _hw(ctx, p)
+        r = powerhw.read(ctx, hw, gpu=hw.get("gpu") is not None)
+        rng = _limits(ctx, p, hw, r.get("ac"), r)
+        locked = set(p.run["locked"])
+        plan: list[dict] = []
+
+        def add(item, probe=None, restore=None, before=None, tried=None, skip=None, why=None):
+            row = {"id": item, "label": _probe_label(hw, item), "before": before, "tried": tried}
+            if skip:
+                row.update(skip=skip, why=why)
+            else:
+                row.update(probe=probe, restore=restore)
+            plan.append(row)
+
+        step = _uw(PROBE_W)
+        for z in hw.get("rapl") or []:
+            cur = r["rapl"].get(z["id"]) or {}
+            pl1, pl2 = cur.get("pl1_uw"), cur.get("pl2_uw")
+            item = f"{z['id']}/pl1"
+            if item in locked:
+                add(item, before=pl1, skip="locked", why="locked earlier this boot")
+            elif not pl1:
+                add(item, before=pl1, skip="unsupported", why="unreadable")
+            else:
+                v = pl1 - step
+                if v < _uw(MIN_W):
+                    v = pl1 + step
+                if pl2 and v > pl2 and z.get("pl2"):
+                    add(item, before=pl1, skip="skipped", why="no room between the limits")
+                else:
+                    add(item, {"rapl": {z["id"]: {"pl1_uw": v}}}, {"rapl": {z["id"]: {"pl1_uw": pl1}}}, pl1, v)
+            item = f"{z['id']}/pl2"
+            if not z.get("pl2"):
+                add(item, skip="skipped", why="this interface has no boost limit")
+            elif item in locked:
+                add(item, before=pl2, skip="locked", why="locked earlier this boot")
+            elif not pl2:
+                add(item, before=pl2, skip="unsupported", why="unreadable")
+            else:
+                v = pl2 - step
+                if pl1 and v < pl1:
+                    v = pl2 + step
+                if v > _uw(rng["pl2_max"]) or (pl1 and v < pl1):
+                    add(item, before=pl2, skip="skipped", why="no room between the limits")
+                else:
+                    add(item, {"rapl": {z["id"]: {"pl2_uw": v}}}, {"rapl": {z["id"]: {"pl2_uw": pl2}}}, pl2, v)
+        g = hw.get("gpu")
+        rg = r.get("gpu") or {}
+        if not g:
+            for item in ("gpu/max", "gpu/min"):
+                add(item, skip="skipped", why="no xe GPU")
+        else:
+            lo, hi = rg.get("min"), rg.get("max")
+            if lo is None or hi is None:
+                for item in ("gpu/max", "gpu/min"):
+                    add(item, skip="unsupported", why="unreadable")
+            else:
+                v = hi - PROBE_MHZ
+                if v < lo:
+                    add("gpu/max", before=hi, skip="skipped", why="no room between the GPU limits")
+                else:
+                    add("gpu/max", {"gpu": {"max": v}}, {"gpu": {"max": hi}}, hi, v)
+                v = lo + PROBE_MHZ
+                if v > hi:
+                    v = lo - PROBE_MHZ
+                if v < g["rpn"] or v > hi:
+                    add("gpu/min", before=lo, skip="skipped", why="no room between the GPU limits")
+                else:
+                    add("gpu/min", {"gpu": {"min": v}}, {"gpu": {"min": lo}}, lo, v)
+        cpu = hw.get("cpu") or {}
+        pol0 = (cpu.get("policies") or [None])[0]
+        if cpu.get("epp") and pol0:
+            before = (r.get("epp") or {}).get(pol0)
+            nxt = _EPP_NEXT.get(before or "")
+            why = _left_to(ctx, p, "epp")
+            if r.get("governor") == "performance":
+                add("epp", before=before, skip="skipped", why="the CPU governor is performance")
+            elif why:
+                add("epp", before=before, skip="skipped", why=why)
+            elif nxt is None or nxt not in (cpu.get("epp_choices") or []):
+                add("epp", before=before, skip="skipped", why=f"no neighbour of {before or 'unreadable'} offered")
+            else:
+                add("epp", {"epp": {pol0: nxt}}, {"epp": {pol0: before}}, before, nxt)
+        if cpu.get("turbo"):
+            why = _left_to(ctx, p, "turbo")
+            if why:
+                add("turbo", before=r.get("turbo"), skip="skipped", why=why)
+            elif r.get("turbo") is not True:
+                add("turbo", before=r.get("turbo"), skip="skipped", why="not tried: CPU boost is off")
+            else:
+                restore: dict = {"turbo": True}
+                caps = {k: v for k, v in (r.get("caps") or {}).items() if isinstance(v, int)}
+                if caps and not _left_to(ctx, p, "cpu_caps"):
+                    restore["caps"] = caps          # intel_pstate clamps the caps while boost is off
+                perf = r.get("perf") or {}
+                if cpu.get("perf_pct") and isinstance(perf.get("max"), int) and isinstance(perf.get("min"), int) \
+                        and not _left_to(ctx, p, "cpu_pct"):
+                    restore["perf"] = {"max": perf["max"], "min": perf["min"]}
+                add("turbo", {"turbo": False}, restore, True, False)
+        if cpu.get("perf_pct"):
+            perf = r.get("perf") or {}
+            mx, mn = perf.get("max"), perf.get("min")
+            why = _left_to(ctx, p, "cpu_pct")
+            for item, k in (("cpu/max_pct", "max"), ("cpu/min_pct", "min")):
+                before = perf.get(k)
+                if why:
+                    add(item, before=before, skip="skipped", why=why)
+                    continue
+                if mx is None or mn is None:
+                    add(item, before=before, skip="unsupported", why="unreadable")
+                    continue
+                v = mx - PROBE_PCT if k == "max" else mn + 1
+                ok = (v >= CPU_PCT_MIN and v >= mn) if k == "max" else (v <= mx and v <= CPU_MIN_PCT_MAX)
+                if not ok:
+                    add(item, before=before, skip="skipped", why="no room between the CPU speed limits")
+                else:
+                    add(item, {"perf": {k: v}}, {"perf": {k: before}}, before, v)
+        caps = r.get("caps") or {}
+        why = _left_to(ctx, p, "cpu_caps")
+        for _t, pol in _first_policies(hw).items():
+            item = f"cpu/cap/{pol}"
+            before = caps.get(pol)
+            if why:
+                add(item, before=before, skip="skipped", why=why)
+                continue
+            if before is None:
+                add(item, skip="unsupported", why="unreadable")
+                continue
+            lo = powerhw._int(powerhw._read(powerhw._policy_file(ctx, pol, "scaling_min_freq")))
+            v = before - PROBE_CAP_MHZ * 1000
+            if lo is not None and v < lo:
+                add(item, before=before, skip="skipped", why="no room above the minimum speed")
+            else:
+                add(item, {"caps": {pol: v}}, {"caps": {pol: before}}, before, v)
+        soc = r.get("soc")
+        if hw.get("soc"):
+            why = _left_to(ctx, p, "soc")
+            b = (soc or {}).get("balance")
+            if why:
+                add("soc/balance", before=b, skip="skipped", why=why)
+            elif not isinstance(b, int):
+                add("soc/balance", skip="unsupported", why="unreadable")
+            elif (soc or {}).get("profile") != "balanced":
+                add("soc/balance", before=b, skip="skipped",
+                    why="the platform profile is not balanced: the slider cannot be read back")
+            else:
+                v = b - 1 if b > 1 else b + 1
+                add("soc/balance", {"soc": {"balance": v}}, {"soc": {"balance": b}}, b, v)
+        if g and g.get("power_profile"):
+            before = rg.get("profile")
+            if before not in powerhw.GPU_PROFILES:
+                add("gpu/profile", before=before, skip="unsupported", why="unreadable")
+            else:
+                v = "power_saving" if before == "base" else "base"
+                add("gpu/profile", {"gpu_profile": v}, {"gpu_profile": before}, before, v)
+        return plan
+
+
+def _probe_got(item: str, reading: dict):
+    """The value of probe `item` in a powerhw reading (raw)."""
+    if item.startswith("cpu/cap/"):
+        return (reading.get("caps") or {}).get(item[len("cpu/cap/"):])
+    if item in ("gpu/max", "gpu/min"):
+        return (reading.get("gpu") or {}).get(item[4:])
+    if item == "gpu/profile":
+        return (reading.get("gpu") or {}).get("profile")
+    if item == "epp":
+        epp = reading.get("epp") or {}
+        return epp.get(sorted(epp, key=lambda k: int(k[6:]) if k[6:].isdigit() else 1 << 30)[0]) if epp else None
+    if item == "turbo":
+        return reading.get("turbo")
+    if item in ("cpu/max_pct", "cpu/min_pct"):
+        return (reading.get("perf") or {}).get(item[4:7])
+    if item == "soc/balance":
+        return (reading.get("soc") or {}).get("balance")
+    zid, _, k = item.rpartition("/")
+    return (reading.get("rapl") or {}).get(zid, {}).get(f"{k}_uw")
+
+
+def _probe_same(item: str, a, b) -> bool:
+    if a is None or b is None:
+        return False
+    if item.startswith("cpu/cap/"):
+        return abs(a - b) <= powerhw.CAP_TOLERANCE_KHZ
+    if item in ("gpu/max", "gpu/min"):
+        return abs(a - b) <= powerhw.GPU_TOLERANCE_MHZ
+    if item.endswith(("/pl1", "/pl2")):
+        return abs(a - b) <= powerhw.RAPL_TOLERANCE_UW
+    return a == b
+
+
+def _probe_fails(res: dict) -> list[dict]:
+    return [f for f in res["failed"] if not f["id"].endswith("/pl4")]
+
+
+def probe(ctx, item: dict) -> dict:
+    """One probe of probe_plan, atomic under the lock (the watch loop and the UI never see the probe value): write
+    the probe target, then the restore target, each read back. A newly locked id joins the run's `locked`; `ours`
+    is not touched. A restore that does not read back the old value re-applies the profile at once (when writing is
+    allowed). SelftestProbe: {id, label, before, tried, read, restored, outcome, why}."""
+    with _LOCK:
+        p = _get(ctx)
+        iid = item["id"]
+        row = {"id": iid, "label": item.get("label") or iid, "before": _fmt(iid, item.get("before"))
+               if item.get("before") is not None else None,
+               "tried": _fmt(iid, item.get("tried")) if item.get("tried") is not None else None,
+               "read": None, "restored": None, "outcome": "skipped", "why": None}
+        if item.get("skip"):
+            row.update(outcome=item["skip"], why=item.get("why"))
+            return row
+        if not _may_write(ctx, p):
+            row["why"] = "power control is paused"
+            return row
+        hw = _hw(ctx, p)
+        # something may have written between probe_plan and now (a slider, a preset, the low-battery slot, a
+        # retry): the plan's restore target would then put back a stale value, so such a probe is skipped
+        now = powerhw.read(ctx, hw, gpu=iid.startswith("gpu/") and hw.get("gpu") is not None)
+        if not _probe_same(iid, _probe_got(iid, now), item.get("before")):
+            row["why"] = "changed during the check"
+            return row
+        res = powerhw.apply(ctx, hw, item["probe"], p.run["locked"])
+        fails = _probe_fails(res)
+        newly = [f["id"] for f in fails if f.get("locked")]
+        if newly:
+            log.warning("power: self-test: locked by firmware this boot: %s", ", ".join(newly))
+            p.run["locked"] = sorted(set(p.run["locked"]) | set(newly))
+            _save_run(ctx, p)
+        got = _probe_got(iid, res["reading"])
+        row["read"] = _fmt(iid, got) if got is not None else None
+        if newly:
+            row.update(outcome="locked", why="locked by firmware")
+        elif any(f["error"].startswith("did not take") for f in fails):
+            row.update(outcome="ignored", why="the device kept its value")
+        elif fails and all(f.get("transient") for f in fails):
+            row.update(outcome="skipped", why="GPU busy or asleep, try again")
+        elif fails:
+            row.update(outcome="unsupported", why=fails[0]["error"])
+        elif not _probe_same(iid, got, item["tried"]):
+            row.update(outcome="ignored", why="the device kept its value")
+        else:
+            row["outcome"] = "ok"
+        back = powerhw.apply(ctx, hw, item["restore"], p.run["locked"])
+        now_v = _probe_got(iid, back["reading"])
+        restored = not _probe_fails(back) and _probe_same(iid, now_v, item["before"])
+        bad = f"reads {_fmt(iid, now_v)} after the restore"
+        for pol, want in ((item["restore"].get("caps") or {}).items() if iid == "turbo" else ()):
+            cap = (back["reading"].get("caps") or {}).get(pol)
+            if not _probe_same("cpu/cap/" + pol, cap, want):      # intel_pstate clamps the caps while boost is off
+                restored, bad = False, f"{pol} speed cap reads {_fmt('cpu/cap/' + pol, cap)} after the restore"
+        row["restored"] = restored
+        if not restored:
+            log.warning("power: self-test: %s did not come back (%s): applying the profile again", iid, bad)
+            row.update(outcome="not_restored", why=bad)
+            if _may_write(ctx, p):
+                _apply(ctx, p)
+        return row
 
 
 # ---- import from SimpleDeckyTDP ----------------------------------------------------------------------------------
@@ -2085,6 +2632,8 @@ def import_sdtdp(ctx) -> dict:
             prev = profiles.get(key)
             main = slots.get("main") or (dict(prev["main"]) if prev else dict(profiles["default"]["main"]))
             profiles[key] = {"name": prev["name"] if prev else None, "main": main, "ac": slots.get("ac")}
+            if key == "default":
+                profiles[key]["low"] = (prev or {}).get("low")     # SimpleDeckyTDP has no low-battery slot
             if key != "default" and prev is None:
                 games += 1
             if "ac" in slots:

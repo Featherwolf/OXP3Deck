@@ -1,0 +1,304 @@
+{
+ "comment": "DESIGN.md Performance batch C/D: the OXP3's PowerRange on battery and on AC, full caps, and the expected presetValues(id, range[case.range], case.slot, case.opts, caps) of each preset (every PRESET_FIELDS key, the per-type EPP cleared with epp; null = the firmware's value). presetCeiling(range, slot, opts) = case.ceiling. The battery preset of slot low equals power.BATTERY_PRESET (its other fields null). Read by tests/test_power.py and tests/js/power.test.mjs.",
+ "range": {
+  "battery": {
+   "pl1_min": 5,
+   "pl1_max": 35,
+   "pl2_max": 52,
+   "pl1_max_battery": 35,
+   "pl1_max_ac": 40,
+   "extended_max": 52
+  },
+  "ac": {
+   "pl1_min": 5,
+   "pl1_max": 40,
+   "pl2_max": 52,
+   "pl1_max_battery": 35,
+   "pl1_max_ac": 40,
+   "extended_max": 52
+  }
+ },
+ "caps": {
+  "epp_choices": [
+   "performance",
+   "balance_performance",
+   "balance_power",
+   "power"
+  ],
+  "turbo": true,
+  "gpu_profile": true,
+  "cpu_blocked": false
+ },
+ "fields": [
+  "pl1_w",
+  "pl2_w",
+  "epp",
+  "epp_p",
+  "epp_e",
+  "epp_lpe",
+  "turbo",
+  "gpu_power_profile"
+ ],
+ "cases": [
+  {
+   "name": "main, split_ac off",
+   "slot": "main",
+   "opts": {
+    "split_ac": false,
+    "extended": false
+   },
+   "range": "battery",
+   "ceiling": 40,
+   "presets": {
+    "battery": {
+     "pl1_w": 10,
+     "pl2_w": 15,
+     "epp": "balance_power",
+     "epp_p": null,
+     "epp_e": null,
+     "epp_lpe": null,
+     "turbo": false,
+     "gpu_power_profile": "power_saving"
+    },
+    "balanced": {
+     "pl1_w": 17,
+     "pl2_w": 25,
+     "epp": "balance_performance",
+     "epp_p": null,
+     "epp_e": null,
+     "epp_lpe": null,
+     "turbo": null,
+     "gpu_power_profile": null
+    },
+    "performance": {
+     "pl1_w": 28,
+     "pl2_w": null,
+     "epp": "balance_performance",
+     "epp_p": null,
+     "epp_e": null,
+     "epp_lpe": null,
+     "turbo": null,
+     "gpu_power_profile": null
+    },
+    "max": {
+     "pl1_w": 40,
+     "pl2_w": 52,
+     "epp": "performance",
+     "epp_p": null,
+     "epp_e": null,
+     "epp_lpe": null,
+     "turbo": true,
+     "gpu_power_profile": "base"
+    }
+   }
+  },
+  {
+   "name": "main, split_ac on",
+   "slot": "main",
+   "opts": {
+    "split_ac": true,
+    "extended": false
+   },
+   "range": "battery",
+   "ceiling": 35,
+   "presets": {
+    "battery": {
+     "pl1_w": 10,
+     "pl2_w": 15,
+     "epp": "balance_power",
+     "epp_p": null,
+     "epp_e": null,
+     "epp_lpe": null,
+     "turbo": false,
+     "gpu_power_profile": "power_saving"
+    },
+    "balanced": {
+     "pl1_w": 17,
+     "pl2_w": 25,
+     "epp": "balance_performance",
+     "epp_p": null,
+     "epp_e": null,
+     "epp_lpe": null,
+     "turbo": null,
+     "gpu_power_profile": null
+    },
+    "performance": {
+     "pl1_w": 28,
+     "pl2_w": null,
+     "epp": "balance_performance",
+     "epp_p": null,
+     "epp_e": null,
+     "epp_lpe": null,
+     "turbo": null,
+     "gpu_power_profile": null
+    },
+    "max": {
+     "pl1_w": 35,
+     "pl2_w": 52,
+     "epp": "performance",
+     "epp_p": null,
+     "epp_e": null,
+     "epp_lpe": null,
+     "turbo": true,
+     "gpu_power_profile": "base"
+    }
+   }
+  },
+  {
+   "name": "ac",
+   "slot": "ac",
+   "opts": {
+    "split_ac": true,
+    "extended": false
+   },
+   "range": "ac",
+   "ceiling": 40,
+   "presets": {
+    "battery": {
+     "pl1_w": 10,
+     "pl2_w": 15,
+     "epp": "balance_power",
+     "epp_p": null,
+     "epp_e": null,
+     "epp_lpe": null,
+     "turbo": false,
+     "gpu_power_profile": "power_saving"
+    },
+    "balanced": {
+     "pl1_w": 17,
+     "pl2_w": 25,
+     "epp": "balance_performance",
+     "epp_p": null,
+     "epp_e": null,
+     "epp_lpe": null,
+     "turbo": null,
+     "gpu_power_profile": null
+    },
+    "performance": {
+     "pl1_w": 28,
+     "pl2_w": null,
+     "epp": "balance_performance",
+     "epp_p": null,
+     "epp_e": null,
+     "epp_lpe": null,
+     "turbo": null,
+     "gpu_power_profile": null
+    },
+    "max": {
+     "pl1_w": 40,
+     "pl2_w": 52,
+     "epp": "performance",
+     "epp_p": null,
+     "epp_e": null,
+     "epp_lpe": null,
+     "turbo": true,
+     "gpu_power_profile": "base"
+    }
+   }
+  },
+  {
+   "name": "ac, extended",
+   "slot": "ac",
+   "opts": {
+    "split_ac": true,
+    "extended": true
+   },
+   "range": "ac",
+   "ceiling": 52,
+   "presets": {
+    "battery": {
+     "pl1_w": 10,
+     "pl2_w": 15,
+     "epp": "balance_power",
+     "epp_p": null,
+     "epp_e": null,
+     "epp_lpe": null,
+     "turbo": false,
+     "gpu_power_profile": "power_saving"
+    },
+    "balanced": {
+     "pl1_w": 17,
+     "pl2_w": 25,
+     "epp": "balance_performance",
+     "epp_p": null,
+     "epp_e": null,
+     "epp_lpe": null,
+     "turbo": null,
+     "gpu_power_profile": null
+    },
+    "performance": {
+     "pl1_w": 28,
+     "pl2_w": null,
+     "epp": "balance_performance",
+     "epp_p": null,
+     "epp_e": null,
+     "epp_lpe": null,
+     "turbo": null,
+     "gpu_power_profile": null
+    },
+    "max": {
+     "pl1_w": 52,
+     "pl2_w": 52,
+     "epp": "performance",
+     "epp_p": null,
+     "epp_e": null,
+     "epp_lpe": null,
+     "turbo": true,
+     "gpu_power_profile": "base"
+    }
+   }
+  },
+  {
+   "name": "low",
+   "slot": "low",
+   "opts": {
+    "split_ac": false,
+    "extended": false
+   },
+   "range": "battery",
+   "ceiling": 35,
+   "presets": {
+    "battery": {
+     "pl1_w": 10,
+     "pl2_w": 15,
+     "epp": "balance_power",
+     "epp_p": null,
+     "epp_e": null,
+     "epp_lpe": null,
+     "turbo": false,
+     "gpu_power_profile": "power_saving"
+    },
+    "balanced": {
+     "pl1_w": 17,
+     "pl2_w": 25,
+     "epp": "balance_performance",
+     "epp_p": null,
+     "epp_e": null,
+     "epp_lpe": null,
+     "turbo": null,
+     "gpu_power_profile": null
+    },
+    "performance": {
+     "pl1_w": 28,
+     "pl2_w": null,
+     "epp": "balance_performance",
+     "epp_p": null,
+     "epp_e": null,
+     "epp_lpe": null,
+     "turbo": null,
+     "gpu_power_profile": null
+    },
+    "max": {
+     "pl1_w": 35,
+     "pl2_w": 52,
+     "epp": "performance",
+     "epp_p": null,
+     "epp_e": null,
+     "epp_lpe": null,
+     "turbo": true,
+     "gpu_power_profile": "base"
+    }
+   }
+  }
+ ]
+}

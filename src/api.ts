@@ -7,8 +7,8 @@ import { callable } from "@decky/api";
 import type {
   AutoChangeIn, AutoFacts, AutoGameRes, AutoMode, AutoPendingRes, AutoPlanRes, AutoSessionRes, AutoStateRes, AutoUndoRes,
   ApplyOpts, CatalogRes, OptiChoices, OptiInfoRes, DriversRes, ExtrasInfoRes, ExtrasOptions, ExtrasWhat, GameInfoRes, JobListRes, JobRes, JobStart, KernelRes, Overview, Oxp3UpdateCheck,
-  PlanRes, PowerChangeRes, PowerFixRes, PowerImportRes, PowerInfoRes, PowerLiveRes, PowerOptions, PowerStateRes, PowerValues, Res,
-  ShimRes, StatusRes, XessStateRes, XessUpdateCheck,
+  PlanRes, PowerAdviceRes, PowerChangeRes, PowerFixRes, PowerImportRes, PowerInfoRes, PowerLiveRes, PowerOptions, PowerStateRes, PowerValues, Res,
+  ShimRes, Slot, StatusRes, XessStateRes, XessUpdateCheck,
 } from "./types";
 
 // ---- overview ----------------------------------------------------------------------------------------------------
@@ -64,7 +64,7 @@ export const power_info = callable<[refresh: boolean], PowerInfoRes>("power_info
 export const power_state = callable<[], PowerStateRes>("power_state");
 export const power_enable = callable<[on: boolean], PowerChangeRes>("power_enable");
 export const power_options = callable<[opts: Partial<PowerOptions>], PowerChangeRes>("power_options");
-export const power_set = callable<[key: string, slot: "main" | "ac", values: Partial<PowerValues>], PowerChangeRes>("power_set");
+export const power_set = callable<[key: string, slot: Slot, values: Partial<PowerValues>], PowerChangeRes>("power_set");
 export const power_profile = callable<[appid: string, name: string | null, on: boolean], PowerChangeRes>("power_profile");
 export const power_game = callable<[appid: string | null], PowerChangeRes>("power_game");
 export const power_take_control = callable<[], PowerChangeRes>("power_take_control");
@@ -72,6 +72,10 @@ export const power_import_sdtdp = callable<[], PowerImportRes>("power_import_sdt
 export const power_fix = callable<[cid: string], PowerFixRes>("power_fix");
 export const power_unfix = callable<[cid: string], PowerFixRes>("power_unfix");
 export const power_live = callable<[], PowerLiveRes>("power_live");
+export const power_selftest = callable<[], JobStart>("power_selftest");
+export const power_measure = callable<[mode: "idle" | "game"], JobStart>("power_measure");
+export const power_advice = callable<[appid: string], PowerAdviceRes>("power_advice");
+export const power_advice_dismiss = callable<[appid: string, kind: string, pl1_w: number], Res>("power_advice_dismiss");
 export const extras_info = callable<[], ExtrasInfoRes>("extras_info");
 export const extras_set = callable<[opts: Partial<ExtrasOptions>], ExtrasInfoRes>("extras_set");
 export const extras_take_control = callable<[what: ExtrasWhat], ExtrasInfoRes>("extras_take_control");

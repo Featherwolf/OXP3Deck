@@ -143,7 +143,7 @@ test("power-state is polled only while active (it wakes the GPU)", () => {
 test("every power call in api.ts is wrapped in backend.ts with an empty state", () => {
   const api = src("api.ts");
   const names = [...api.matchAll(/callable<.*?>\("(power_[a-z_]+)"\)/g)].map((m) => m[1]);
-  assert.equal(names.length, 12);
+  assert.equal(names.length, 16);   // 12 + performance batch: power_selftest, power_measure, power_advice, power_advice_dismiss
   const b = src("backend.ts");
   for (const n of names) assert.match(b, new RegExp(`export const ${n} = guard\\("${n}", `), n);
 });
@@ -284,6 +284,8 @@ test("every confirm dialog says when it takes effect", () => {
     for (const m of s.matchAll(/\bconfirm\(/g)) {
       if (/(const|export const) $/.test(s.slice(m.index - 13, m.index)) || /\w$/.test(s.slice(m.index - 1, m.index))) continue;
       const a = callArgs(s, m.index + "confirm".length);
+      // the VRR row's dialog changes nothing on the system (DESIGN.md "Performance batch": no tag on "Don't show again")
+      if (/ok: "Don't show again"/.test(a.text)) continue;
       n++;
       assert.match(a.text, /\beffect[:,]|\beffect\b/, `${name}: confirm(${a.text.slice(0, 80)}…) has no effect`);
     }

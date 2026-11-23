@@ -36,6 +36,8 @@ CALLS = {
     "power_set": ("default", "main", {"pl1_w": 15}), "power_profile": ("1091500", "Cyberpunk 2077", True),
     "power_game": ("1091500",), "power_take_control": (), "power_import_sdtdp": (),
     "power_fix": ("ppd",), "power_unfix": ("ppd",), "power_live": (), "extras_info": (),
+    "power_selftest": (), "power_measure": ("idle",), "power_advice": ("1091500",),
+    "power_advice_dismiss": ("1091500", "headroom", 25),
     "extras_set": ({"lpmd_game_off": True},), "extras_take_control": ("fan",),
     "opti_info": ("292030",), "opti_install": ("292030", {"upscaler": "xess", "fg": 2, "fg_input": "xefg"}),
     "opti_set": ("292030", {"upscaler": "fsr31", "fg": 3, "fg_input": "xefg"}), "opti_remove": ("292030",),
@@ -104,7 +106,8 @@ class Base(unittest.TestCase):
         self.m = load_main(self.tmp.name)
         # nothing real runs (runuser, oxp3-tool, sysfs writes) unless a test says so (and Plugin()'s _after_restart
         # leaves the real /run alone)
-        for name in ("oxp3tool", "xess", "games", "power", "readouts", "extras", "optiscaler", "autosetup"):
+        for name in ("oxp3tool", "xess", "games", "power", "readouts", "extras", "optiscaler", "autosetup",
+                     "selftest", "sampler"):
             setattr(self.m, name, Raising())
         self.p = self.m.Plugin()
         self.assertIsNone(self.p._broken)
@@ -247,6 +250,45 @@ class JobsTest(Base):
         res = call(self.p, "oxp3_install", "somewhere")
         self.assertEqual(res["error"], "oxp3_install: source must be 'bundled' or 'online', not 'somewhere'")
         self.assertEqual(call(self.p, "job_list")["jobs"], [])
+
+    def test_power_selftest_measure_and_advice_calls(self):
+        """power_selftest and power_measure are jobs with a precheck (a refusal starts nothing); power_advice and
+        power_advice_dismiss are plain calls with their arguments."""
+        seen = []
+        why = {"value": "Quit the game first."}
+        self.fake("selftest", precheck=lambda ctx, what, mode=None: seen.append(("pre", what, mode)) or why["value"],
+                  run_test=lambda ctx, job: seen.append("test") or {"ok": True, "error": None, "selftest": {}},
+                  run_measure=lambda ctx, job, mode: seen.append(("measure", mode)) or
+                  {"ok": True, "error": None, "measure": {"mode": mode}})
+        self.fake("sampler", advice=lambda ctx, appid: {"ok": True, "advice": None, "appid": appid},
+                  dismiss=lambda ctx, appid, kind, pl1_w: {"ok": True, "got": [appid, kind, pl1_w]})
+        self.assertEqual(call(self.p, "power_selftest"), {"ok": False, "error": "Quit the game first.", "job": None})
+        self.assertEqual(call(self.p, "job_list")["jobs"], [])
+        why["value"] = None
+        res = call(self.p, "power_selftest")
+        self.assertEqual((res["ok"], res["job"]["kind"], res["job"]["title"]),
+                         (True, "power-selftest", "Check power controls"))
+        self.assertTrue(wait_idle(self.p))
+        res = call(self.p, "power_measure", "game")
+        self.assertEqual((res["job"]["kind"], res["job"]["title"]), ("power-measure", "Measure power for 60 s"))
+        self.assertTrue(wait_idle(self.p))
+        self.assertEqual(call(self.p, "job_status", res["job"]["id"])["job"]["result"]["measure"], {"mode": "game"})
+        self.assertEqual(seen, [("pre", "test", None), ("pre", "test", None), "test", ("pre", "measure", "game"),
+                                ("measure", "game")])
+        self.assertEqual(call(self.p, "power_advice", "1091500")["appid"], "1091500")
+        self.assertEqual(call(self.p, "power_advice_dismiss", "1091500", "headroom", 25)["got"],
+                         ["1091500", "headroom", 25])
+
+    def test_diagnose_passes_the_device_facts(self):
+        seen = []
+        self.fake("oxp3tool", diagnose=lambda ctx, job, extra: seen.append(extra) or {"ok": True, "error": None})
+        self.fake("selftest", report=lambda ctx: {"selftest": {"test": None}})
+        self.assertTrue(call(self.p, "oxp3_diagnose")["ok"])
+        self.assertTrue(wait_idle(self.p))
+        self.fake("selftest", report=lambda ctx: 1 / 0)
+        self.assertTrue(call(self.p, "oxp3_diagnose")["ok"])
+        self.assertTrue(wait_idle(self.p))
+        self.assertEqual(seen, [{"selftest": {"test": None}}, {"error": "ZeroDivisionError: division by zero"}])
 
     def test_optiscaler_jobs(self):
         """Bad choices and check()'s refusals start no job; the job gets the arguments; opti_set and
@@ -488,6 +530,24 @@ class LifecycleTest(Base):
         self.assertIs(seen[0], act)
         self.assertEqual(order[-1], "unload")
 
+    def test_the_sampler_part_follows_power(self):
+        """The third part: sampler.tick with power.game_now's answer; a raising sampler keeps power going; without
+        the power module the sampler part ends too."""
+        seen, ticks = [], []
+        game = {"app": "1091500", "enabled": True}
+        power = types.SimpleNamespace(tick=lambda ctx: ticks.append(1), active=lambda ctx: None,
+                                      refresh=lambda ctx: None, game_now=lambda ctx: game)
+        self.fake("sampler", tick=lambda ctx, g: seen.append(g) or {"ok": True, "did": "idle"})
+        self.assertFalse(self.run_watch(0.3, power, None))
+        self.assertGreater(len(seen), 2)
+        self.assertIs(seen[0], game)
+        ticks.clear()
+        self.m.sampler = Raising()
+        self.assertFalse(self.run_watch(0.2, power, None))
+        self.assertGreater(len(ticks), 2)
+        self.fake("sampler", tick=lambda ctx, g: seen.append(g))
+        self.assertTrue(self.run_watch(0.1, None, None))       # neither power nor extras: the loop ends
+
     def test_a_raising_or_missing_extras_keeps_power_going(self):
         ticks = []
         power = types.SimpleNamespace(tick=lambda ctx: ticks.append(1), active=lambda ctx: None,
@@ -522,6 +582,16 @@ class LifecycleTest(Base):
         seen.clear()
         self.assertFalse(self.run_watch(0.2, Raising(), extras))
         self.assertGreater(len(seen), 2)
+
+    def test_unload_stops_a_running_self_test_first(self):
+        order = []
+        self.fake("selftest", stop=lambda: order.append("selftest") or True)
+        self.fake("extras", unload=lambda ctx: order.append("extras"))
+        asyncio.run(self.p._unload())
+        self.assertEqual(order, ["selftest", "extras"])
+        self.fake("selftest", stop=lambda: (_ for _ in ()).throw(RuntimeError("x")))
+        asyncio.run(self.p._unload())                    # a failing stop does not stop the unload
+        self.assertEqual(order[-1], "extras")
 
     def test_unload_puts_the_extras_back_within_its_budget(self):
         done = []

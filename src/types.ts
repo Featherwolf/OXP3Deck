@@ -54,7 +54,10 @@ export type Oxp3Status = {
   boot: string; secure_boot: boolean; can_change: boolean; needs_root: boolean; game_mode: boolean;
   game_mode_input: "ogui" | "steam" | null; warnings: string[]; notes: string[]; fixes: Oxp3Fix[];
   reboot_pending: boolean; rebuild_unfinished: string | null;
-  refresh: { summary: string[]; advice: string[] } | null; text: string;
+  refresh: { summary: string[]; advice: string[];
+             // performance batch (DESIGN.md "A. VRR guidance"); older oxp3-tool: absent (vrr_safe read as null)
+             vrr_safe?: boolean | null; vrr_reason?: string; vrr_why?: string; vrr_range_hz?: [number, number] | null } | null;
+  text: string;
 };
 
 export type Oxp3CatalogFix = {
@@ -270,9 +273,17 @@ export type PowerValues = {
   epp_p: Epp | null; epp_e: Epp | null; epp_lpe: Epp | null;
   fan_mode: FanMode | null; scx_mode: ScxMode | null;  // applied by extras.py, also while TDP control is off
 };
-export type PowerProfile = { name: string | null; main: PowerValues; ac: PowerValues | null };
+/** The profile slot: on battery (or always), plugged in, or the low-battery values (Default only). */
+export type Slot = "main" | "ac" | "low";
+export type PowerProfile = { name: string | null; main: PowerValues; ac: PowerValues | null;
+                             low?: PowerValues | null };          // low: "default" only; null = the Battery preset
 export type PowerOptions = { per_game: boolean; split_ac: boolean; extended: boolean; ignore: string[];
-                             poll_s: number };    // 0 = Off, 2..60
+                             poll_s: number;       // 0 = Off, 2..60
+                             // performance batch (older backends: absent)
+                             low_battery?: boolean; low_battery_pct?: number; low_battery_games?: boolean; advisor?: boolean };
+/** The low-battery slot's state (DESIGN.md "D. Low-battery slot"); held: a game's own profile keeps its values. */
+export type PowerLow = { active: boolean; held: boolean; pct: number | null; enter_pct: number; leave_pct: number;
+                         since: number | null };
 export type PowerRange = {
   pl1_min: number; pl1_max: number; pl2_max: number;    // for the AC state now (W)
   pl1_max_battery: number; pl1_max_ac: number; extended_max: number | null;   // extended_max: OXP3 only
@@ -309,7 +320,7 @@ export type BlockedGroup = "epp" | "turbo" | "cpu_pct" | "cpu_caps" | "soc";
 export type PowerGpuNow = { min: number | null; max: number | null; act: number | null; reasons: string[] };
 export type PowerState = {
   enabled: boolean;
-  active: { key: string; name: string; slot: "main" | "ac"; app: string | null; ac: boolean | null };
+  active: { key: string; name: string; slot: Slot; app: string | null; ac: boolean | null };
   values: PowerValues;                    // the active slot as stored
   applied_values: PowerValues;            // after clamping and with firmware values filled in (what was written)
   now: { pl1_w: number | null; pl2_w: number | null;     // effective: the lowest over the zones
@@ -330,13 +341,15 @@ export type PowerState = {
   cpu_blocked_by: string[];               // the conflict ids behind cpu_blocked (their Fix for me goes under EPP)
   yielded?: BlockedGroup[];               // 0.4.x: field groups left to an ignored CPU program that changed them (until the next change)
   last: PowerApply | null;                // the last apply
+  low?: PowerLow | null;                  // null: low_battery off (older backends: absent)
 };
 export type PowerInfo = {
   hw: { rapl: boolean; mmio: boolean;
         gpu: { card: string; gt: string; media_gt: string | null; power_profile?: boolean } | null;
         cpu: { pstate: string | null; epp_choices: Epp[]; turbo: boolean; perf_pct?: boolean; types?: CoreType[] } | null;
         soc?: boolean;
-        ac_supply: string | null; problems: string[] };
+        ac_supply: string | null; problems: string[];
+        time_windows?: TimeWindows };          // read only (older backends: absent)
   options: PowerOptions;
   profiles: Record<string, PowerProfile>;  // "default" always present
   conflicts: PowerConflict[];
@@ -344,6 +357,7 @@ export type PowerInfo = {
   boot: { taken_at: number } | null;
   sdtdp_found: boolean;                    // SimpleDeckyTDP's settings.json exists
   state: PowerState;
+  selftest?: PowerSelftestInfo | null;     // the device check's stored results (older backends: absent)
 };
 /** line e.g. "15 W / 25 W · Cyberpunk 2077" or "Off". */
 export type PowerSummary = { enabled: boolean; line: string | null; overridden: boolean; blocked: string | null };
@@ -354,6 +368,28 @@ export type PowerChangeRes = Res & { state: PowerState | null; applied: PowerApp
 export type PowerImportRes = Res & { imported: string[]; skipped: string[]; state: PowerState | null };
 export type PowerFixRes = Res & { steps: PowerFixStep[]; notes: string[]; state: PowerState | null;
                                   conflicts: PowerConflict[]; fixed: PowerFixed[]; applied: PowerApply | null };
+
+// ---- device check, measurement and power tips (DESIGN.md "Performance batch" B and E) ---------------------------
+
+/** constraint_{0,1}_time_window_us per RAPL zone id (read only). */
+export type TimeWindows = Record<string, { pl1_us: number | null; pl2_us: number | null }>;
+export type ProbeOutcome = "ok" | "locked" | "ignored" | "unsupported" | "skipped" | "not_restored";
+export type SelftestProbe = { id: string; label: string; before: string | null; tried: string | null;
+  read: string | null; restored: boolean | null; outcome: ProbeOutcome; why: string | null };
+export type SelftestResult = { at: number; kernel: string | null; bios: string | null; probes: SelftestProbe[];
+  time_windows: TimeWindows; stopped: string | null; reapplied: PowerApply | null };
+export type MeasureResult = { at: number; mode: "idle" | "game"; appid: string | null; name: string | null;
+  seconds: number; ac: boolean | null; profile: string; slot: Slot; pl1_w: number | null; pl2_w: number | null;
+  avg_package_w: number | null; max_package_w: number | null; avg_gpu_busy_pct: number | null;
+  avg_battery_w: number | null; reasons: Record<string, number>;   // share of samples, 0..1
+  cpu_throttle_ms: number | null; interrupted: string | null };
+export type PowerSelftestInfo = { test: SelftestResult | null; measures: MeasureResult[]; measured: boolean };
+export type AdviceKind = "headroom" | "raise" | "plug" | "cpu";
+export type PowerAdvice = { kind: AdviceKind; appid: string; pl1_w: number;
+  suggest_w: number | null; ac: boolean; pl1_max_ac: number | null; seconds: number;
+  stats: { samples: number; avg_package_w: number; p90_package_w: number; avg_gpu_busy_pct: number;
+           p90_gpu_busy_pct: number; limited_share: number; thermal_share: number } };
+export type PowerAdviceRes = Res & { advice: PowerAdvice | null; sampling: boolean; seconds: number; need_s: number };
 
 // ---- live readouts and extras (DESIGN.md "Live readouts", "Extras") -------------------------------------------------
 

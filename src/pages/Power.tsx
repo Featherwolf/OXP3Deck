@@ -11,21 +11,27 @@ import { confirm, DetailsSpec, paragraphs } from "../components/confirm";
 import { BatteryNote, ChargeRows, LpmdToggle, useExtrasState } from "../components/ExtrasControls";
 import { explain, explainWhen, label, Note, Problem, Status, WithDetails } from "../components/Hint";
 import { LiveSection } from "../components/LiveRows";
+import { DeviceCheckSection, LowBatteryRow, PerfOptions, PresetRow, TimeWindowsRow } from "../components/PerfRows";
 import { cpuBlockers, EnableToggle, ExtrasRows, PowerStatusRows, settle, usePower, ValuesEditor } from "../components/PowerControls";
 import { friendlyName } from "../conflicts";
 import { EFFECTS } from "../effects";
-import { cpuNowLine, limitsLine, pollIndex, pollText, pollValue, POLL_DEFAULT, POLL_STEPS, profileOrder, reasonText, Slot, watts } from "../power";
+import {
+  cpuNowLine, limitsLine, lowOptions, lowStored, pollIndex, pollText, pollValue, POLL_DEFAULT, POLL_STEPS, profileOrder, reasonText, Slot,
+  tauText, watts,
+} from "../power";
 import { useRunningApp } from "../steam";
 import { flushPower, powerWriter, put } from "../store";
-import type { ExtrasState, PowerInfo, PowerOptions, PowerState, PowerZone } from "../types";
+import type { ExtrasState, PowerInfo, PowerOptions, PowerState, PowerZone, TimeWindows } from "../types";
 import { listText, when } from "../util";
 
 const det = (title: string, body: (string | null | undefined | false)[], lines?: string[], linesTitle?: string): DetailsSpec =>
   ({ title, body: paragraphs(body), lines, linesTitle });
 
-const zoneLine = (z: PowerZone) => {
+const zoneLine = (z: PowerZone, tw?: TimeWindows | null) => {
   const lock = (c: string) => (z.locked.includes(c) ? " (locked)" : "");
-  return `${z.iface.toUpperCase()} ${z.name}: PL1 ${watts(z.pl1_w)}${lock("pl1")} · PL2 ${watts(z.pl2_w)}${lock("pl2")} · PL4 ${watts(z.pl4_w)}`;
+  const w = tw?.[z.id];
+  const win = w && (w.pl1_us != null || w.pl2_us != null) ? ` · time windows ${tauText(w.pl1_us)} / ${tauText(w.pl2_us)}` : "";
+  return `${z.iface.toUpperCase()} ${z.name}: PL1 ${watts(z.pl1_w)}${lock("pl1")} · PL2 ${watts(z.pl2_w)}${lock("pl2")} · PL4 ${watts(z.pl4_w)}${win}`;
 };
 const ac = (s: PowerState) => (s.active.ac == null ? "Power source unknown" : s.active.ac ? "Plugged in" : "On battery");
 
@@ -40,12 +46,13 @@ const NowSection: FC<{ info: PowerInfo | null; state: PowerState }> = ({ info, s
   return (
     <PanelSection title="Status">
       <PowerStatusRows info={info} state={state} />
+      <LowBatteryRow state={state} />
       <PanelSectionRow>
         {zones.length > 0 ? (
           <Status ok={null} label="Power limits now" detail={limitsLine(state)}
             details={det("Power limits now", ["The limits each of the CPU's two power-limit interfaces holds now; the CPU uses the lower of the two.",
               zones.some((z) => z.iface === "mmio") ? "The firmware rewrites one of them whenever the charger is plugged in or out; OXP3 Deck writes it again." : null],
-              zones.map(zoneLine), "Per interface:")} />
+              zones.map((z) => zoneLine(z, info?.hw.time_windows)), "Per interface:")} />
         ) : (
           <Status ok={false} label="Power limits not available" detail="This system doesn't expose power limits."
             details={det("Power limits not available", ["No power-limit interface was found, so power limits cannot be read or set here."],
@@ -107,6 +114,7 @@ const OptionsSection: FC<{ info: PowerInfo; state: PowerState }> = ({ info, stat
           </WithDetails>
         )}
         <PollSlider info={info} />
+        <PerfOptions info={info} busy={!!act.busy} set={set} />
         <Problem what="Option" error={act.error} />
       </PanelSectionRow>
     </PanelSection>
@@ -120,8 +128,14 @@ const EditorSection: FC<{ info: PowerInfo; state: PowerState; x: ExtrasState | n
   const [slotPick, setSlotPick] = useState<Slot>(state.active.slot);
   const k = info.profiles[key] ? key : "default";
   const prof = info.profiles[k];
-  const slot: Slot = info.options.split_ac ? slotPick : "main";
-  const stored = slot === "ac" ? prof.ac ?? prof.main : prof.main;
+  const lowOn = lowOptions(info.options).on;
+  const slot: Slot = slotPick === "low" ? (k === "default" && lowOn ? "low" : "main") : info.options.split_ac ? slotPick : "main";
+  const stored = slot === "low" ? lowStored(prof.low) : slot === "ac" ? prof.ac ?? prof.main : prof.main;
+  const slotOptions = [
+    { data: "main", label: info.options.split_ac ? "Battery" : "Normal" },
+    ...(info.options.split_ac ? [{ data: "ac", label: "Plugged in" }] : []),
+    ...(k === "default" && lowOn ? [{ data: "low", label: "Low battery" }] : []),
+  ];
   const active = state.active.key === k && state.active.slot === slot;
   const order = profileOrder(info.profiles, app?.appid);
   useEffect(() => { flushPower(); }, [k, slot]);
@@ -129,8 +143,9 @@ const EditorSection: FC<{ info: PowerInfo; state: PowerState; x: ExtrasState | n
   const canAdd = app && !info.profiles[app.appid];
   const profD = det("Profile to edit", ["The sliders below edit this profile. Changes to a profile that is not active are saved and used when it is.",
     info.options.per_game ? null : "Per-game profiles are off: every game uses the default profile."]);
-  const slotD = det("Edit values for", ["Which of the profile's two sets the sliders edit: on battery or plugged in.",
-    "The plugged-in set starts as a copy of the battery set at the first change."]);
+  const slotD = det("Edit values for", ["Which of the profile's sets the sliders edit: on battery, plugged in or (Default only) low battery.",
+    info.options.split_ac ? "The plugged-in set starts as a copy of the battery set at the first change." : null,
+    lowOn && k === "default" ? "Low battery: used on battery below the low-battery level; never higher than the normal values. It starts as the Battery preset." : null]);
   return (
     <PanelSection title="Profiles">
       <PanelSectionRow>
@@ -139,17 +154,19 @@ const EditorSection: FC<{ info: PowerInfo; state: PowerState; x: ExtrasState | n
             onChange={(o) => setKey(String(o.data))}
             description={explain(state.active.key === k ? "Active now" : "Saved; used when this game runs")} />
         </WithDetails>
-        {info.options.split_ac && (
+        {slotOptions.length > 1 && (
           <WithDetails details={slotD}>
-            <DropdownItem label={label("Edit values for", slotD)} rgOptions={[{ data: "main", label: "Battery" }, { data: "ac", label: "Plugged in" }]}
+            <DropdownItem label={label("Edit values for", slotD)} rgOptions={slotOptions}
               selectedOption={slot} onChange={(o) => setSlotPick(o.data as Slot)}
-              description={explain("Battery or plugged in.")} />
+              description={explain(slot === "low" ? (prof.low ? "Low-battery values (Default)" : "Battery preset")
+                : info.options.split_ac ? "Battery or plugged in." : "Normal or low battery.")} />
           </WithDetails>
         )}
         {!state.enabled && <Note>Power control is off: changes are saved for later.</Note>}
       </PanelSectionRow>
+      <PresetRow state={state} info={info} profileKey={k} slot={slot} stored={stored} />
       <ValuesEditor key={`${k}/${slot}`} state={state} info={info} profileKey={k} slot={slot} stored={stored} active={active && state.enabled}
-        label={`${name}${info.options.split_ac ? (slot === "ac" ? " (plugged-in values)" : " (battery values)") : ""}`} />
+        label={slot === "low" ? "the low-battery values (Default)" : `${name}${info.options.split_ac ? (slot === "ac" ? " (plugged-in values)" : " (battery values)") : ""}`} />
       <ExtrasRows key={`x-${k}/${slot}`} profileKey={k} slot={slot} stored={stored} x={x} battery={false} errors={false} active={active} />
       <PanelSectionRow>
         {canAdd && (
@@ -237,6 +254,7 @@ const FirmwareSection: FC<{ info: PowerInfo; state: PowerState }> = ({ info, sta
         {r.gpu_min != null && <Status ok={null} label="GPU speed range" detail={`${r.gpu_min}–${r.gpu_max} MHz`} details={gpuD} />}
         <Status ok={null} label="Allowed range" details={rangeD}
           detail={r.spec === "oxp3" ? `${r.pl1_min}–${r.pl1_max_battery} W on battery, up to ${r.pl1_max_ac} W plugged in` : `${r.pl1_min}–${r.pl1_max} W`} />
+        <TimeWindowsRow info={info} />
       </PanelSectionRow>
     </PanelSection>
   );
@@ -324,6 +342,7 @@ const BatterySection: FC<{ x: ExtrasState | null }> = ({ x }) => {
 export const PowerTab: FC = () => {
   const p = usePower(true);
   const ex = useExtrasState();
+  const game = useRunningApp();
   const s = p.state;
   if (!s || !p.info) {
     return (
@@ -344,6 +363,7 @@ export const PowerTab: FC = () => {
       <BatterySection x={ex.x} />
       <ConflictsSection info={p.info} x={ex.x} />
       <FirmwareSection info={p.info} state={s} />
+      <DeviceCheckSection info={p.info} state={s} game={game} />
       {p.info.sdtdp_found && <ImportSection />}
     </>
   );

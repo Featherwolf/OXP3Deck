@@ -49,6 +49,8 @@ xess = _load("xess")
 games = _load("games")
 power = _load("power")              # (powerhw is imported by power)
 readouts = _load("readouts")
+selftest = _load("selftest")         # the device self-test and the 60 s measurement (jobs)
+sampler = _load("sampler")           # the background sampler and the per-game power tips
 extras = _load("extras")
 optiscaler = _load("optiscaler")
 autosetup = _load("autosetup")
@@ -254,8 +256,8 @@ class Plugin:
         once in a row) and the loop goes on; a module that did not load ends its own part, and the loop ends when
         neither part is left. A part still running after POWER_TICK_S (a D-Bus service that hangs) is not waited
         for: the other part goes on, and the slow one is started again only once it has finished."""
-        last = {"power": None, "extras": None}
-        parts = {"power": self._power_tick, "extras": self._extras_tick}
+        last = {"power": None, "extras": None, "sampler": None}
+        parts = {"power": self._power_tick, "extras": self._extras_tick, "sampler": self._sampler_tick}
         running: dict = {}
 
         def finished(name, fut) -> None:
@@ -271,28 +273,44 @@ class Plugin:
                     log.error("%s watch: %s", name, "".join(traceback.format_exception(e)))
                 last[name] = text
 
+        def quiet(fut) -> None:      # a step still running when the loop is cancelled (unload): nobody waits
+            if not fut.cancelled():
+                fut.exception()
+
         while parts:
-            await asyncio.sleep(POWER_TICK_S)
-            for name, step in list(parts.items()):
-                fut = running.get(name)
-                if fut is not None:
-                    if not fut.done():
-                        continue                       # still busy: skip this pass
-                    del running[name]
-                    finished(name, fut)
-                    if name not in parts:
-                        continue
-                fut = asyncio.get_running_loop().run_in_executor(None, step)
-                await asyncio.wait({fut}, timeout=POWER_TICK_S)
-                if fut.done():
-                    finished(name, fut)
-                else:
+            try:
+                await asyncio.sleep(POWER_TICK_S)
+                for name, step in list(parts.items()):
+                    fut = running.get(name)
+                    if fut is not None:
+                        if not fut.done():
+                            continue                       # still busy: skip this pass
+                        del running[name]
+                        finished(name, fut)
+                        if name not in parts:
+                            continue
+                    fut = asyncio.get_running_loop().run_in_executor(None, step)
                     running[name] = fut
-                    log.warning("%s watch: a step takes longer than %s s; the other part goes on", name,
-                                POWER_TICK_S)
+                    await asyncio.wait({fut}, timeout=POWER_TICK_S)
+                    if fut.done():
+                        del running[name]
+                        finished(name, fut)
+                    else:
+                        log.warning("%s watch: a step takes longer than %s s; the other part goes on", name,
+                                    POWER_TICK_S)
+            except asyncio.CancelledError:
+                for fut in running.values():
+                    fut.add_done_callback(quiet)
+                raise
 
     def _power_tick(self) -> None:
         _mod("power").tick(self.ctx)
+
+    def _sampler_tick(self) -> None:
+        """The sampler's part of the watch loop (after power's): its context from power.game_now (no sysfs read).
+        Ends with the power module (Unavailable)."""
+        game = _mod("power").game_now(self.ctx)
+        _mod("sampler").tick(self.ctx, game)
 
     def _power_active(self):
         """power.active(ctx), or None when the power module is not there or fails (the extras then act on no
@@ -354,6 +372,14 @@ class Plugin:
         if self._watch is not None:
             self._watch.cancel()
             self._watch = None
+        # A running self-test stops before its next probe and puts the profile back (its finally) first.
+        if self._broken is None and selftest is not None:
+            try:
+                done = await asyncio.get_running_loop().run_in_executor(None, _mod("selftest").stop)
+                if not done:
+                    log.error("the self-test did not end within %.1f s of the unload", 1.5)
+            except Exception:
+                log.error("self-test stop failed:\n%s", traceback.format_exc())
         # The extras are the exception (DESIGN.md "Extras"): the fan back to Auto, the scheduler mode and
         # intel_lpmd put back, the sleep watch stopped.
         if self._broken is None and extras is not None:
@@ -449,8 +475,19 @@ class Plugin:
                                  lambda job: _mod("oxp3tool").kernel_keep(self.ctx, job))
 
     async def oxp3_diagnose(self):
-        return await self._start("oxp3_diagnose", "oxp3-diagnose", "Diagnose archive",
-                                 lambda job: _mod("oxp3tool").diagnose(self.ctx, job))
+        return await self._start("oxp3_diagnose", "oxp3-diagnose", "Diagnose archive", self._diagnose)
+
+    def _diagnose(self, job):
+        extra = self._diagnose_extra()
+        return _mod("oxp3tool").diagnose(self.ctx, job, extra)
+
+    def _diagnose_extra(self) -> dict:
+        """OXP3 Deck's device facts for the diagnose sidecar: selftest.report, or why not."""
+        try:
+            return _mod("selftest").report(self.ctx)
+        except Exception as e:
+            log.error("selftest.report failed:\n%s", traceback.format_exc())
+            return {"error": f"{type(e).__name__}: {e}"}
 
     async def oxp3_update_check(self):
         return await self._call("oxp3_update_check", lambda: _mod("oxp3tool").update_check(self.ctx, self.settings))
@@ -645,6 +682,26 @@ class Plugin:
     async def power_unfix(self, cid):
         """Undo of power_fix: enable and start again exactly what it turned off."""
         return await self._call("power_unfix", lambda: _mod("power").unfix(self.ctx, cid))
+
+    async def power_selftest(self):
+        """Check power controls: each managed control moved a small step, read back and put back (a job)."""
+        return await self._start("power_selftest", "power-selftest", "Check power controls",
+                                 lambda job: _mod("selftest").run_test(self.ctx, job),
+                                 lambda: _mod("selftest").precheck(self.ctx, "test"))
+
+    async def power_measure(self, mode):
+        """Measure power for 60 s, idle or while a game runs (read only; a job)."""
+        return await self._start("power_measure", "power-measure", "Measure power for 60 s",
+                                 lambda job: _mod("selftest").run_measure(self.ctx, job, mode),
+                                 lambda: _mod("selftest").precheck(self.ctx, "measure", mode))
+
+    async def power_advice(self, appid):
+        """The power tip for a running game (in memory, no sysfs read)."""
+        return await self._call("power_advice", lambda: _mod("sampler").advice(self.ctx, appid))
+
+    async def power_advice_dismiss(self, appid, kind, pl1_w):
+        return await self._call("power_advice_dismiss",
+                                lambda: _mod("sampler").dismiss(self.ctx, appid, kind, pl1_w))
 
     async def power_live(self):
         """Live readouts (package W, battery, temperature, GPU busy and clocks, throttling, fan): read only; the

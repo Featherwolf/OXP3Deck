@@ -1,11 +1,12 @@
 // Power control's frontend logic, framework-free so node can test it (tests/js/power.test.mjs): the serial writer
 // behind the sliders and the texts the Power section shows (DESIGN.md "Power (TDP, GPU, CPU)", Frontend).
 import type {
-  CoreType, Epp, PowerApply, PowerChangeRes, PowerConflict, PowerOptions, PowerOverridden, PowerRange, PowerState, PowerValues,
-  PowerZone,
+  AdviceKind, CoreType, Epp, MeasureResult, PowerAdvice, PowerApply, PowerChangeRes, PowerConflict, PowerInfo, PowerLow,
+  PowerOptions, PowerOverridden, PowerRange, PowerState, PowerValues, PowerZone, SelftestProbe, SelftestResult, Slot,
+  TimeWindows,
 } from "./types";
 
-export type Slot = "main" | "ac";
+export type { Slot };
 export type Send = (key: string, slot: Slot, values: Partial<PowerValues>) => Promise<PowerChangeRes>;
 export type Timers = { set(fn: () => void, ms: number): unknown; clear(handle: unknown): void };
 
@@ -119,9 +120,12 @@ export const makeWriter = (send: Send, opts: WriterOpts = {}): Writer => {
 
 // ---- what the sliders edit and show --------------------------------------------------------------------------------
 
-/** The slot the sliders edit: the active one (AC values only when they are split and in use). */
+/**
+ * The slot the sliders edit: the active one (AC values only when they are split and in use; the low-battery values
+ * while they run).
+ */
 export const editSlot = (state: PowerState, options: PowerOptions | null | undefined): Slot =>
-  options?.split_ac && state.active.slot === "ac" ? "ac" : "main";
+  state.active.slot === "low" ? "low" : options?.split_ac && state.active.slot === "ac" ? "ac" : "main";
 
 /** Every profile field, in power.py's FIELDS order (0.4: 19). */
 export const FIELDS = ["pl1_w", "pl2_w", "gpu_min_mhz", "gpu_max_mhz", "epp", "turbo",
@@ -415,3 +419,291 @@ export const profileOrder = (profiles: Record<string, { name: string | null }>, 
 /** The conflicts that keep "TDP control" from turning on (not ignored). */
 export const blockers = (conflicts: PowerConflict[] | null | undefined): PowerConflict[] =>
   (conflicts ?? []).filter((c) => c.kind === "blocks" && !c.ignored);
+
+// ---- one-tap presets (DESIGN.md "Performance batch", C) ---------------------------------------------------------
+
+export type PresetId = "battery" | "balanced" | "performance" | "max";
+export const PRESET_IDS: PresetId[] = ["battery", "balanced", "performance", "max"];
+export const PRESET_LABEL: Record<PresetId, string> = { battery: "Battery", balanced: "Balanced",
+  performance: "Performance", max: "Max" };
+/**
+ * The fields a preset sets (every other field of the slot stays as it is: a GPU speed cap the user set is kept).
+ * The per-core-type energy preferences are cleared with `epp`, since the backend prefers them over `epp`.
+ */
+export const PRESET_FIELDS = ["pl1_w", "pl2_w", "epp", "epp_p", "epp_e", "epp_lpe", "turbo", "gpu_power_profile"] as const;
+export type PresetField = typeof PRESET_FIELDS[number];
+/** What the device and the conflicts allow: a field they do not is left out of a preset (never a refusal or a fight). */
+export type PresetCaps = { epp_choices: Epp[]; turbo: boolean; gpu_profile: boolean; cpu_blocked: boolean };
+type PresetOpts = Pick<PowerOptions, "split_ac" | "extended">;
+type PresetRange = Pick<PowerRange, "pl1_min" | "pl2_max" | "pl1_max_battery" | "pl1_max_ac" | "extended_max">;
+
+/**
+ * The provisional values (not yet measured on this device): OEM presets 5/17/35 W, MSR boot PL1 25 W (Performance
+ * is a step above stock), Max = the slot's ceiling. null = the firmware's value; "max" W are filled in by presetValues.
+ */
+type PresetRow = Pick<PowerValues, "pl1_w" | "pl2_w" | "epp" | "turbo" | "gpu_power_profile">;
+const PRESET_TABLE: Record<PresetId, PresetRow> = {
+  battery: { pl1_w: 10, pl2_w: 15, epp: "balance_power", turbo: false, gpu_power_profile: "power_saving" },
+  balanced: { pl1_w: 17, pl2_w: 25, epp: "balance_performance", turbo: null, gpu_power_profile: null },
+  performance: { pl1_w: 28, pl2_w: null, epp: "balance_performance", turbo: null, gpu_power_profile: null },
+  max: { pl1_w: null, pl2_w: null, epp: "performance", turbo: true, gpu_power_profile: "base" },
+};
+
+/** The Battery preset as the low-battery slot uses it (power.py BATTERY_PRESET; tests/fixtures/power/presets.json). */
+export const BATTERY_PRESET: Partial<PowerValues> = {
+  pl1_w: 10, pl2_w: 15, epp: "balance_power", turbo: false, gpu_power_profile: "power_saving",
+};
+
+/** The slot's sustained-power ceiling: AC (extended when on), battery for split battery values and the low slot. */
+export const presetCeiling = (range: PresetRange, slot: Slot, opts: PresetOpts): number => {
+  const acTop = opts.extended && range.extended_max != null ? range.extended_max : range.pl1_max_ac;
+  if (slot === "low" || (slot === "main" && opts.split_ac)) return range.pl1_max_battery;
+  return acTop;
+};
+
+const clampTo = (v: number, lo: number, hi: number) => Math.min(Math.max(lo, hi), Math.max(lo, Math.round(v)));
+
+/** A preset's values for a slot: every W clamped to [pl1_min, ceiling], boost to [sustained, pl2_max]. */
+export const presetValues = (id: PresetId, range: PresetRange, slot: Slot, opts: PresetOpts, caps: PresetCaps): Partial<PowerValues> => {
+  const t = PRESET_TABLE[id];
+  const top = presetCeiling(range, slot, opts);
+  const lo = Math.ceil(range.pl1_min);
+  const pl1 = clampTo(id === "max" ? top : t.pl1_w ?? top, lo, Math.floor(top));
+  const pl2 = id === "max" ? clampTo(range.pl2_max, pl1, Math.floor(range.pl2_max))
+    : t.pl2_w == null ? null : clampTo(t.pl2_w, pl1, Math.floor(range.pl2_max));
+  const out: Partial<PowerValues> = { pl1_w: pl1, pl2_w: pl2 };
+  if (!caps.cpu_blocked && t.epp != null && caps.epp_choices.includes(t.epp)) {
+    out.epp = t.epp;
+    out.epp_p = null; out.epp_e = null; out.epp_lpe = null;     // else the per-type values keep running
+  }
+  if (!caps.cpu_blocked && caps.turbo) out.turbo = t.turbo;
+  if (caps.gpu_profile) out.gpu_power_profile = t.gpu_power_profile;
+  return out;
+};
+
+/** What the device allows for presets, from the power info and state. */
+export const presetCaps = (info: Pick<PowerInfo, "hw"> | null | undefined, state: Pick<PowerState, "cpu_blocked" | "blocked_fields"> | null | undefined): PresetCaps => ({
+  epp_choices: info?.hw.cpu?.epp_choices ?? [],
+  turbo: !!info?.hw.cpu?.turbo,
+  gpu_profile: !!info?.hw.gpu?.power_profile,
+  cpu_blocked: !!state?.cpu_blocked || !!state?.blocked_fields?.epp?.length || !!state?.blocked_fields?.turbo?.length,
+});
+
+/** The preset the stored slot matches (only the fields that preset sets, W after the same clamping), else custom/default. */
+export const presetOf = (values: Partial<PowerValues> | null | undefined, range: PresetRange, slot: Slot, opts: PresetOpts,
+  caps: PresetCaps): PresetId | "custom" | "default" => {
+  const v = values ?? {};
+  for (const id of PRESET_IDS) {
+    const pv = presetValues(id, range, slot, opts, caps);
+    const top = Math.floor(presetCeiling(range, slot, opts));
+    const pl1 = v.pl1_w == null ? null : clampTo(v.pl1_w, Math.ceil(range.pl1_min), top);
+    const norm: Partial<PowerValues> = {
+      ...v, pl1_w: pl1,
+      pl2_w: v.pl2_w == null ? null : clampTo(v.pl2_w, pl1 ?? Math.ceil(range.pl1_min), Math.floor(range.pl2_max)),
+    };
+    if ((Object.keys(pv) as PresetField[]).every((f) => (norm[f] ?? null) === (pv[f] ?? null))) return id;
+  }
+  return PRESET_FIELDS.every((f) => (v[f] ?? null) === null) ? "default" : "custom";
+};
+
+/** The PRESET_FIELDS values of a slot (Undo after a preset tap writes them back). */
+export const presetFieldsOf = (v: Partial<PowerValues> | null | undefined): Partial<PowerValues> =>
+  Object.fromEntries(PRESET_FIELDS.map((f) => [f, v?.[f] ?? null])) as Partial<PowerValues>;
+
+export const NOT_MEASURED = "not yet measured on this device";
+
+/** "Balanced: 17 W, boost 25 W · not yet measured on this device" / "Custom: set by hand" / "Device defaults". */
+export const presetLine = (which: PresetId | "custom" | "default", v: Partial<PowerValues>, measured: boolean): string => {
+  if (which === "custom") return "Custom: set by hand";
+  if (which === "default") return "Device defaults";
+  const head = `${PRESET_LABEL[which]}: ${watts(v.pl1_w)}, boost ${v.pl2_w == null ? "device default" : watts(v.pl2_w)}`;
+  return measured ? head : `${head} · ${NOT_MEASURED}`;
+};
+
+/** The Preset row's Details: what the preset sets, provisional or measured. */
+export const presetDetails = (which: PresetId | "custom" | "default", v: Partial<PowerValues>, measures: MeasureResult[] | null | undefined): string[] => {
+  const ms = measures ?? [];
+  const out = [
+    "Battery, Balanced, Performance and Max set sustained and boost power, energy preference (per core type too), CPU boost and GPU power saving in one tap. Every other setting stays, a GPU speed cap included. Moving any of those sliders by hand makes it Custom.",
+  ];
+  if (!ms.length) out.push("These are starting points from ONEXPLAYER's own presets and the device's firmware values, not yet measured on this device.");
+  if (which !== "custom" && which !== "default") {
+    const m = ms.find((x) => x.pl1_w != null && x.pl1_w === v.pl1_w && x.avg_package_w != null);
+    if (m) out.push(`Measured: ${Math.round(m.seconds)} s at ${watts(m.pl1_w)}, ${w1(m.avg_package_w)} average${m.avg_gpu_busy_pct != null ? `, GPU ${Math.round(m.avg_gpu_busy_pct)} %` : ""}.`);
+  }
+  out.push("Battery 10 W / boost 15 W, Balanced 17 / 25 W, Performance 28 W with the device's own boost, Max the highest this power source allows.");
+  return out;
+};
+
+// ---- low battery (DESIGN.md "Performance batch", D) ------------------------------------------------------------
+
+export const LOW_PCT_DEFAULT = 20;
+export const LOW_HYST_PCT = 5;
+export const LOW_SLIDER = { min: 10, max: 40, step: 5 } as const;
+
+/** The low-battery options with their defaults (an older backend: absent). */
+export const lowOptions = (o: Partial<PowerOptions> | null | undefined) => ({
+  on: o?.low_battery ?? true,
+  pct: typeof o?.low_battery_pct === "number" ? o.low_battery_pct : LOW_PCT_DEFAULT,
+  games: o?.low_battery_games ?? false,
+});
+
+/** The low slot's values as the sliders show them: stored, else the Battery preset's. */
+export const lowStored = (low: PowerValues | null | undefined): PowerValues => low ?? { ...EMPTY, ...BATTERY_PRESET };
+
+/** The status row while the low-battery slot runs or is held back: label and line (≤ 80), or null. */
+export const lowLine = (low: PowerLow | null | undefined, game?: string | null): { label: string; line: string; muted: boolean } | null => {
+  if (!low || (!low.active && !low.held)) return null;
+  const pct = low.pct == null ? "Low battery" : `${low.pct} %`;
+  if (low.active) return { label: "Low battery", line: `${pct}: saving power until ${low.leave_pct} % or plugged in.`, muted: false };
+  return { label: "Low battery", line: fitText(`${pct}: ${game || "this game"} keeps its own profile.`), muted: true };
+};
+
+/** The low-battery toggle's one line: "Below 20 % on battery, use battery-saving values until 25 % or plugged in." */
+export const lowToggleLine = (pct: number): string =>
+  `Below ${pct} % on battery, use battery-saving values until ${pct + LOW_HYST_PCT} % or plugged in.`;
+
+// ---- device check and measurement (DESIGN.md "Performance batch", B) -------------------------------------------
+
+const MONTHS = ["Jan", "Feb", "Mar", "Apr", "May", "Jun", "Jul", "Aug", "Sep", "Oct", "Nov", "Dec"];
+/** A Unix time as "23 Nov 14:02" (local time). */
+export const dateText = (t: number): string => {
+  const d = new Date(t * 1000);
+  const p = (n: number) => String(n).padStart(2, "0");
+  return `${d.getDate()} ${MONTHS[d.getMonth()]} ${p(d.getHours())}:${p(d.getMinutes())}`;
+};
+
+const fitText = (s: string, max = 80) => (s.length <= max ? s : `${s.slice(0, max - 1)}…`);
+const w1 = (w: number | null | undefined) => (w == null ? "?" : `${(Math.round(w * 10) / 10).toFixed(1)} W`);
+const pctText = (x: number | null | undefined) => (x == null ? "?" : `${Math.round(x)} %`);
+
+const OUTCOME_SHORT: Record<string, string> = {
+  locked: "locked by firmware", ignored: "ignored by firmware", unsupported: "not supported", skipped: "skipped",
+  not_restored: "not put back",
+};
+
+/** "11 of 12 work · 1 locked by firmware · 23 Nov 14:02"; red when a probe was not put back. */
+export const selftestLine = (test: SelftestResult | null | undefined, fmt: (t: number) => string = dateText): { line: string; red: boolean } | null => {
+  if (!test) return null;
+  const ps = test.probes ?? [];
+  const tried = ps.filter((p) => p.outcome !== "skipped");
+  const ok = tried.filter((p) => p.outcome === "ok").length;
+  const parts = [`${ok} of ${tried.length} work`];
+  for (const k of ["not_restored", "locked", "ignored", "unsupported", "skipped"]) {
+    const n = ps.filter((p) => p.outcome === k).length;
+    if (n) parts.push(`${n} ${OUTCOME_SHORT[k]}`);
+  }
+  if (test.stopped) parts.push("stopped");
+  parts.push(fmt(test.at));
+  return { line: fitText(parts.join(" · ")), red: ps.some((p) => p.outcome === "not_restored") };
+};
+
+/** One probe in words: "Sustained power (MSR): locked by firmware", "GPU maximum speed: works (2300 → 2250 MHz)". */
+export const probeLine = (p: SelftestProbe): string => {
+  const what = p.label || p.id;
+  switch (p.outcome) {
+    case "ok": return `${what}: works${p.before != null && p.tried != null ? ` (${p.before} → ${p.tried})` : ""}`;
+    case "locked": return `${what}: locked by firmware`;
+    case "ignored": return `${what}: the device ignored the change${p.read != null ? ` (stayed ${p.read})` : ""}`;
+    case "unsupported": return `${what}: not supported here`;
+    case "skipped": return `${what}: not tried${p.why ? `: ${p.why}` : ""}`;
+    case "not_restored": return `${what}: did not go back${p.read != null ? ` (reads ${p.read})` : ""}; power control set your value again`;
+    default: return `${what}: ${p.outcome}`;
+  }
+};
+
+/** A RAPL time window: ≥ 10 s "28 s", ≥ 1 s "2.5 s", ≥ 1 ms "2.4 ms", else "µs". */
+export const tauText = (us: number | null | undefined): string => {
+  if (us == null || !Number.isFinite(us)) return "?";
+  if (us >= 10e6) return `${Math.round(us / 1e6)} s`;
+  if (us >= 1e6) return `${(Math.round(us / 1e5) / 10).toFixed(1)} s`;
+  if (us >= 1e3) return `${(Math.round(us / 100) / 10).toFixed(1)} ms`;
+  return `${Math.round(us)} µs`;
+};
+
+const zoneName = (id: string) => {
+  const m = /^intel-rapl(-mmio)?:(\d+)/.exec(id);
+  return m ? `${m[1] ? "MMIO" : "MSR"}${m[2] !== "0" ? ` ${m[2]}` : ""}` : id;
+};
+
+/** "Sustained over 28 s, boost over 2.4 ms": the MSR package zone's windows (else the first zone's), or null. */
+export const timeWindowsLine = (tw: TimeWindows | null | undefined): string | null => {
+  const ids = Object.keys(tw ?? {}).sort((a, b) => (a.includes("mmio") === b.includes("mmio") ? a.localeCompare(b) : a.includes("mmio") ? 1 : -1));
+  if (!tw || !ids.length) return null;
+  const z = tw[ids[0]];
+  if (z.pl1_us == null && z.pl2_us == null) return null;
+  return `Sustained over ${tauText(z.pl1_us)}, boost over ${tauText(z.pl2_us)}`;
+};
+
+/** One line per zone, MSR before MMIO: "MSR: sustained 28 s, boost 2.4 ms". */
+export const timeWindowsLines = (tw: TimeWindows | null | undefined): string[] =>
+  Object.keys(tw ?? {}).sort((a, b) => (a.includes("mmio") === b.includes("mmio") ? a.localeCompare(b) : a.includes("mmio") ? 1 : -1))
+    .map((id) => `${zoneName(id)} (${id}): sustained ${tauText(tw![id].pl1_us)}, boost ${tauText(tw![id].pl2_us)}`);
+
+/** The share of samples a power limit held the GPU back (0..1), or null when no reason was seen. */
+export const limitedShare = (reasons: Record<string, number> | null | undefined): number | null => {
+  const xs = Object.entries(reasons ?? {}).filter(([k]) => POWER_REASONS.has(k)).map(([, v]) => v);
+  return xs.length ? Math.max(...xs) : null;
+};
+
+/** "Idle on battery: 4.1 W average, 6.0 W peak, GPU 3 %" / "Cyberpunk 2077 at 25 W: 24.6 W average, GPU 98 %, power-limited 92 %". */
+export const measureLine = (m: MeasureResult | null | undefined): string | null => {
+  if (!m) return null;
+  const src = m.ac === true ? " plugged in" : m.ac === false ? " on battery" : "";
+  const lim = limitedShare(m.reasons);
+  if (m.mode === "idle") {
+    return fitText(`Idle${src}: ${w1(m.avg_package_w)} average, ${w1(m.max_package_w)} peak, GPU ${pctText(m.avg_gpu_busy_pct)}`);
+  }
+  const tail = `${m.pl1_w != null ? ` at ${watts(m.pl1_w)}` : ""}: ${w1(m.avg_package_w)} average, GPU ${pctText(m.avg_gpu_busy_pct)}${lim != null && lim > 0 ? `, power-limited ${Math.round(lim * 100)} %` : ""}`;
+  const name = m.name || (m.appid ? `App ${m.appid}` : "Game");
+  return `${fitText(name, Math.max(12, 80 - tail.length))}${tail}`;
+};
+
+/** Every field of a measurement, one line each (the Details). */
+export const measureLines = (m: MeasureResult, fmt: (t: number) => string = dateText): string[] => [
+  `${fmt(m.at)} · ${Math.round(m.seconds)} s · ${m.mode === "idle" ? "idle" : m.name || `app ${m.appid ?? "?"}`}`,
+  `Power source: ${m.ac == null ? "unknown" : m.ac ? "plugged in" : "battery"} · profile ${m.profile} (${m.slot})`,
+  `Limits at the start: sustained ${watts(m.pl1_w)}, boost ${watts(m.pl2_w)}`,
+  `Package: ${w1(m.avg_package_w)} average, ${w1(m.max_package_w)} peak`,
+  `GPU busy: ${pctText(m.avg_gpu_busy_pct)} on average`,
+  `Battery: ${m.avg_battery_w == null ? "not discharging" : `${w1(m.avg_battery_w)} average`}`,
+  `GPU throttle reasons: ${Object.keys(m.reasons ?? {}).length ? Object.entries(m.reasons).map(([k, v]) => `${k} ${Math.round(v * 100)} %`).join(", ") : "none"}`,
+  `CPU thermal throttling: ${m.cpu_throttle_ms == null ? "?" : `${Math.round(m.cpu_throttle_ms)} ms`}`,
+  ...(m.interrupted ? [`Stopped early: ${m.interrupted}`] : []),
+];
+
+// ---- power tips (DESIGN.md "Performance batch", E) -------------------------------------------------------------
+
+/** The Power tip row's line (≤ 80). */
+export const adviceLine = (a: PowerAdvice): string => {
+  const now = watts(a.pl1_w);
+  const by: Record<AdviceKind, string> = {
+    headroom: `GPU has headroom: ${watts(a.suggest_w)} would likely keep your fps (now ${now})`,
+    raise: `Power-limited at ${now}: ${watts(a.suggest_w)} may give more fps`,
+    plug: `Power-limited at ${now}: plug in for up to ${watts(a.pl1_max_ac)}`,
+    cpu: `Power-limited at ${now}: a lower CPU speed cap leaves the GPU more`,
+  };
+  return fitText(by[a.kind] ?? `Power tip at ${now}`);
+};
+
+/** "Use 15 W" is offered for these kinds only (the others suggest no value). */
+/** Whose sustained power "Use N W" writes (PerfRows use(): the game's profile, a new one, or Default). */
+export const adviceTarget = (name: string, own: boolean, perGame: boolean): string =>
+  perGame ? (own ? name : `a new profile for ${name}`) : "the Default profile";
+
+export const adviceUsable = (a: PowerAdvice | null | undefined): a is PowerAdvice & { suggest_w: number } =>
+  !!a && (a.kind === "headroom" || a.kind === "raise") && typeof a.suggest_w === "number";
+
+/** The Power tip's Details paragraphs. */
+export const adviceDetails = (a: PowerAdvice): string[] => {
+  const st = a.stats;
+  const min = Math.max(1, Math.round(a.seconds / 60));
+  const out = [`Over ${min} min at ${watts(a.pl1_w)}: ${w1(st.avg_package_w)} on average (90 % of the time under ${w1(st.p90_package_w)}), GPU busy ${pctText(st.avg_gpu_busy_pct)}, held back by the power limit ${Math.round(st.limited_share * 100)} % of the time.`];
+  if (a.kind === "headroom") out.push("A lower limit usually keeps a frame-capped game at the same fps and saves battery. If fps drops, tap Undo or move the slider.");
+  if (a.kind === "raise") out.push("The game uses all the power it gets and the GPU is busy nearly all the time: a higher limit may give more fps, and costs battery.");
+  if (a.kind === "plug") out.push(`On battery the limit stops at ${watts(a.pl1_w)}; plugged in it can go up to ${watts(a.pl1_max_ac)}.`);
+  if (a.kind === "cpu") out.push("The limit is at its top. A lower CPU speed cap (CPU group) leaves more of the power to the GPU.");
+  if (st.thermal_share > 0.1) out.push(`It was also held back by heat ${Math.round(st.thermal_share * 100)} % of the time.`);
+  out.push("Nothing changes until you tap the button.");
+  return out;
+};

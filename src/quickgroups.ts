@@ -4,7 +4,7 @@
 import { fit } from "./autosetup";
 import { friendlyName, lockedLine } from "./conflicts";
 import { liveLine } from "./live";
-import { blockers, capRows, editSlot, EMPTY, fwValues, GOVERNOR_PERFORMANCE, shown, type Slot, usesCaps, watts } from "./power";
+import { blockers, capRows, editSlot, EMPTY, fwValues, GOVERNOR_PERFORMANCE, lowStored, shown, type Slot, usesCaps, watts } from "./power";
 import { firstSentence, MAX_LINE } from "./text";
 import type { ExtrasState, Live, PowerConflict, PowerInfo, PowerState, PowerValues, ScxMode, XessSummary } from "./types";
 
@@ -106,17 +106,31 @@ export const batteryAlert = (x: ExtrasState | null): Alert | null => alertOf([
 
 // ---- the values the sliders edit -------------------------------------------------------------------------------------
 
-/** The profile slot the quick sliders edit, its stored values and the editor's "Edits …" name. */
-export const editedSlot = (s: PowerState, info: PowerInfo | null): { slot: Slot; stored: PowerValues; label: string } => {
+/**
+ * The profile and slot the quick sliders edit, its stored values and the editor's "Edits …" name. While the
+ * low-battery values run, that is the Default profile's low slot (only Default has one), stored or the Battery preset.
+ */
+export const editedSlot = (s: PowerState, info: PowerInfo | null): { key: string; slot: Slot; stored: PowerValues; label: string } => {
   const slot = editSlot(s, info?.options);
+  if (slot === "low") {
+    const low = info?.profiles?.default ? lowStored(info.profiles.default.low) : s.values;
+    return { key: "default", slot, stored: low ?? EMPTY, label: "the low-battery values (Default)" };
+  }
   const prof = info?.profiles?.[s.active.key];
   const stored = s.active.slot === slot ? s.values : (slot === "ac" ? prof?.ac ?? prof?.main : prof?.main) ?? s.values;
   const label = `${s.active.key === "default" ? "the default profile" : `the profile of ${s.active.name || `app ${s.active.key}`}`}${info?.options.split_ac ? (slot === "ac" ? " (plugged-in values)" : " (battery values)") : ""}`;
-  return { slot, stored: stored ?? EMPTY, label };
+  return { key: s.active.key, slot, stored: stored ?? EMPTY, label };
 };
 
 /** What the open group's sliders show: the stored value, else what runs now, else the boot value. */
 export const editedValues = (s: PowerState, stored: PowerValues): PowerValues => shown(stored, shown(s.applied_values, fwValues(s)));
+
+/**
+ * The values the closed Power header names: the edited ones, except while the low-battery values run. Those run as
+ * min(the profile's own, the low slot) (power.py _merge_low), so the header shows what was applied, not what is stored.
+ */
+export const summaryValues = (s: PowerState, edited: PowerValues | null): PowerValues | null =>
+  s.active.slot === "low" ? editedValues(s, EMPTY) : edited;
 
 // ---- summaries (the closed header's one line) --------------------------------------------------------------------
 
@@ -138,9 +152,11 @@ const mhz = (x: number | null) => (x == null ? "default" : `${x}`);
 
 /**
  * "15 W · boost 25 W · GPU 300–2300 MHz · Default": the values the sliders edit; "Off · device defaults" while
- * power control is off. `yieldedTo`: an ignored program changed a CPU setting back ("Left to <x>").
+ * power control is off. `yieldedTo`: an ignored program changed a CPU setting back ("Left to <x>"). `preset`: the
+ * matching preset's name goes first ("Balanced · 17 W · …"); "Low battery" first while the low-battery values run.
  */
-export const powerSummary = (s: PowerState | null, v: PowerValues | null, opts: { yieldedTo?: string | null; gpuHeld?: boolean } = {}): string => {
+export const powerSummary = (s: PowerState | null, v: PowerValues | null,
+  opts: { yieldedTo?: string | null; gpuHeld?: boolean; preset?: string | null } = {}): string => {
   if (!s) return "Reading…";
   if (!s.enabled) return "Off · device defaults";
   if (s.blocked) return join(["Paused", firstSentence(s.blocked, 60)]);
@@ -148,6 +164,8 @@ export const powerSummary = (s: PowerState | null, v: PowerValues | null, opts: 
   const gpu = s.range.gpu_min != null && s.range.gpu_max != null && s.range.gpu_max > s.range.gpu_min
     ? (x.gpu_min_mhz == null && x.gpu_max_mhz == null ? "GPU default" : `GPU ${mhz(x.gpu_min_mhz)}–${mhz(x.gpu_max_mhz)} MHz`) : null;
   return join([
+    s.low?.active || s.active.slot === "low" ? "Low battery" : null,
+    opts.preset || null,
     x.pl1_w == null ? "default" : watts(x.pl1_w),
     `boost ${x.pl2_w == null ? "default" : watts(x.pl2_w)}`,
     gpu, profileName(s),

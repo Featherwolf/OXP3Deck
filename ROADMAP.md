@@ -9,11 +9,11 @@ figure here is measured on a device yet; the device self-test (Tier 1) is there 
 
 Performance items first, then the rest:
 
-- [ ] VRR guidance for kernels with the fix (N-1)
-- [ ] Device self-test and 60 s measurement (N-2)
-- [ ] One-tap presets: Battery / Balanced / Performance / Max / Custom (T1-2)
-- [ ] Low-battery profile slot (N-4)
-- [ ] Background sampler and per-game TDP advisor, read-only until tapped (T1-11)
+- [x] VRR guidance for kernels with the fix (N-1) (0.5.0)
+- [x] Device self-test and 60 s measurement (N-2) (0.5.0)
+- [x] One-tap presets: Battery / Balanced / Performance / Max / Custom (T1-2) (0.5.0)
+- [x] Low-battery profile slot (N-4) (0.5.0)
+- [x] Background sampler and per-game TDP advisor, read-only until tapped (T1-11) (0.5.0)
 - [ ] Tests gate every release, incl. the TypeScript check (T1-6, C-4)
 - [ ] Error boundaries, Retry/Copy on problem rows (N-3)
 - [ ] Protect settings files (T1-5)

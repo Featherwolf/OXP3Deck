@@ -420,3 +420,30 @@ class Systemctl:
             elif action == "start":
                 u[2] = True
         return sysexec.Result(0, "", "")
+
+
+def battery_pct(ctx, pct, status=None, name="BAT0", power_uw=None) -> None:
+    """The battery's capacity (and status, power_now when given)."""
+    base = ctx.sys_path(f"/sys/class/power_supply/{name}")
+    put(os.path.join(base, "type"), "Battery")
+    put(os.path.join(base, "capacity"), pct)
+    if status is not None:
+        put(os.path.join(base, "status"), status)
+    if power_uw is not None:
+        put(os.path.join(base, "power_now"), int(power_uw))
+
+
+def oxp3_full(ctx, on_ac=False) -> str:
+    """The whole OXP3 tree of the performance batch: oxp3() plus hybrid core types (14 policies), the CPU speed cap
+    and floor, the SoC slider, the GPU power profile, the energy counter, gtidle, the CPU throttle counter and the
+    battery's charge and draw. Returns the render GT's freq0 folder."""
+    oxp3(ctx, on_ac=on_ac)
+    types(ctx, p="0-3", atom="4-13", no_l3=(12, 13))
+    perf(ctx)
+    soc(ctx)
+    gpu_profile(ctx)
+    energy(ctx, 1_000_000)
+    gtidle(ctx, 10_000)
+    throttle(ctx, 0)
+    battery_pct(ctx, 80, "Charging" if on_ac else "Discharging", power_uw=12_000_000)
+    return ctx.sys_path("/sys/class/drm/card1/device/tile0/gt0/freq0")

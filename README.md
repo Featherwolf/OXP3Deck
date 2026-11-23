@@ -79,10 +79,13 @@ stay visible in a closed group, with their buttons, and turn its header red.
   rebuilding the boot entries (its Details say what to run). **Reboot to finish** when a change waits for a reboot.
   The running task and its last log line (the whole log in its Details).
 - **Live:** closed, the live line ("18.4 W · 62 °C · GPU 87 % · 3 h 10 min left"); open, one value per row.
-- **This game** (only while a game runs): **Set up games automatically**, **Separate profile for <game>**, the XeSS
-  settings as dropdowns, and tips for that game.
+- **This game** (only while a game runs): **Set up games automatically**, **Separate profile for <game>**, a
+  **Power tip** after 5 minutes of play (see [Presets, low battery and power tips](#presets-low-battery-and-power-tips)),
+  the XeSS settings as dropdowns, and tips for that game.
 - **Power:** the power limits now ("15 W steady · 25 W boost") and the active profile, **Power control (TDP)** on or
-  off, **Sustained power**, **Boost power**, **GPU maximum speed** and **GPU power saving**. Red lines when another
+  off, **Preset** (Battery, Balanced, Performance, Max), **Sustained power**, **Boost power**, **GPU maximum speed**
+  and **GPU power saving**, a **Low battery** line while it saves power, and **Variable refresh is safe** once the
+  kernel has the fix. Red lines when another
   power program is in the way, each with **Fix for me** where OXP3 Deck can turn it off for you (see
   [Other power managers](#other-power-managers)).
 - **CPU:** the [CPU controls](#cpu-and-gpu-controls), **CPU boost**, what the CPU runs now and **CPU scheduler
@@ -95,14 +98,16 @@ stay visible in a closed group, with their buttons, and turn its header red.
 
 **Power:** the power limits now (each interface in Details), the GPU speed, energy preference, boost and the power
 source, then **Live readouts** (one value per row). The options (per-game profiles, different settings when plugged
-in, up to 52 W when plugged in, **How often to check**), the editor
-for every profile (also GPU minimum speed, energy preference and **Reset to device defaults**), **Other power
+in, up to 52 W when plugged in, **How often to check**, **Save power on low battery**, **Power tips while playing**),
+the editor for every profile (the presets, also GPU minimum speed, energy preference and **Reset to device
+defaults**), **Other power
 programs** (each with **Fix for me**, **Undo**, **I've handled it** or **How to fix**, and **Pause Intel's
 low-power daemon in games**), **Battery**, **Turned off by OXP3 Deck**
-(with Undo), the device's own values, and **Import from SimpleDeckyTDP**.
+(with Undo), the device's own values (with the read-only **Power time windows**), **Device check** and **Import from
+SimpleDeckyTDP**.
 
 **Fixes:** every oxp3-tool fix with its state, notes and when it takes effect. Apply and Revert for each one. Both
-show the plan first. With oxp3-tool 0.4.3 or later (bundled), a **Sound** section has `speaker-profile`: louder
+show the plan first. With oxp3-tool 0.4.3 or later (0.4.4 is bundled), a **Sound** section has `speaker-profile`: louder
 built-in speakers through a PipeWire EQ and limiter that never clips (optional; keep the built-in speaker as the
 output and its volume at 100%).
 
@@ -181,6 +186,32 @@ While power control is on, each profile (default, per game, plugged in) also has
 
 None of these is measured on the device yet; their Details say what to expect. They reset at reboot and when power
 control is turned off. Intel's low-power daemon and TuneD lock the CPU ones while they run (the control says so).
+
+### Presets, low battery and power tips
+
+- **Preset** (Quick Access → Power, and the Power tab's profile editor): **Battery** (10 W, boost 15 W, power-saving
+  energy preference, CPU boost off, GPU power saving), **Balanced** (17 W / 25 W), **Performance** (28 W, the
+  device's own boost) and **Max** (the highest this power source allows). One tap sets sustained and boost power,
+  energy preference, CPU boost and GPU power saving of the profile the sliders edit (the game's own one, else
+  Default), with **Undo** for 30 s. A GPU speed cap you set stays as it is. Moving one of those sliders by hand makes it **Custom**. The values are starting
+  points from ONEXPLAYER's own presets and the firmware's, **not yet measured on this device**: the line says so
+  until a measurement exists.
+- **Save power on low battery** (Power tab, on by default once power control is on): on battery at 20 % or less (a
+  slider, 10–40 %), the Default profile uses its **Low battery** values (the Battery preset unless you change them
+  under **Edit values for: Low battery**) until 25 % or until you plug in. It never raises a limit (each one is the lower
+  of the two) and a game with its own profile keeps its values unless **Also for games with their own profile** is
+  on; a **Low battery** line says when it is active or held back.
+- **Power tips while playing** (on by default): while a game runs with power control on, OXP3 Deck reads the power
+  use every 5 s (no GPU clock reads, which would wake the GPU) and after 5 minutes may suggest a limit in **This
+  game**, such as "GPU has headroom: 15 W would likely keep your fps (now 25 W)". Nothing changes until you tap
+  **Use 15 W** (then **Undo**); **Dismiss** hides that tip.
+- **Device check** (Power tab): **Check power controls** moves each power setting by a small step, reads it back and
+  puts it back at once (only with no game running; nothing stays changed), and lists what is locked or missing.
+  **Measure 60 s** reads idle power, or the running game's, for one minute. The results are kept and saved next to
+  the diagnose archive.
+- **Variable refresh is safe** (Quick Access → Power and the Fixes tab): shown when the fixes tool says the kernel has
+  the variable-refresh fix (oxp3-tool 0.4.4 or later, bundled); its Details say how to turn VRR on in Steam and which frame limits suit it. **Don't show
+  again** hides it until the kernel changes.
 
 ### Fan, battery, scheduler (when available)
 

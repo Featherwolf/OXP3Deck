@@ -27,6 +27,7 @@ import { CpuControls } from "./CpuControls";
 import { ChargeRows, ProfileExtras } from "./ExtrasControls";
 import { explainWhen, label, Problem, Status, WithDetails } from "./Hint";
 import { usePinned } from "./Group";
+import { LowBatteryRow, PresetRow } from "./PerfRows";
 
 /** The cached power info and the live state (polled only while `active`): the state of power_state, else info's. */
 export const usePower = (active: boolean) => {
@@ -475,9 +476,11 @@ export const PowerBody: FC<PowerData> = ({ info, state: s, error }) => {
   return (
     <>
       <PowerStatusRows info={info} state={s} quick />
+      <LowBatteryRow state={s} />
       <EnableToggle state={s} info={info} quick />
+      {s.enabled && <PresetRow state={s} info={info} profileKey={e.key} slot={e.slot} stored={e.stored} />}
       {s.enabled && (
-        <ValuesEditor state={s} info={info} profileKey={s.active.key} slot={e.slot} stored={e.stored}
+        <ValuesEditor state={s} info={info} profileKey={e.key} slot={e.slot} stored={e.stored}
           active quick part="gpu" label={e.label} />
       )}
     </>
@@ -500,10 +503,10 @@ export const CpuBody: FC<PowerData & { x: ExtrasState | null }> = ({ info, state
   return (
     <>
       {s.enabled && (
-        <ValuesEditor state={s} info={info} profileKey={s.active.key} slot={e.slot} stored={e.stored}
+        <ValuesEditor state={s} info={info} profileKey={e.key} slot={e.slot} stored={e.stored}
           active quick part="cpu" label={e.label} />
       )}
-      <ExtrasRows profileKey={s.active.key} slot={e.slot} stored={e.stored} x={x} battery={false} only="scx" />
+      <ExtrasRows profileKey={e.key} slot={e.slot} stored={e.stored} x={x} battery={false} only="scx" />
     </>
   );
 };
@@ -522,7 +525,7 @@ export const CpuAlerts: FC<PowerData & { x: ExtrasState | null }> = ({ info, sta
           <ConflictRows rows={lockers} info={info} quick />
         </PanelSectionRow>
       )}
-      <ExtrasRows profileKey={s.active.key} slot={e.slot} stored={e.stored} x={x} battery={false} errors={false} only="scx" alerts />
+      <ExtrasRows profileKey={e.key} slot={e.slot} stored={e.stored} x={x} battery={false} errors={false} only="scx" alerts />
     </>
   );
 };
@@ -531,7 +534,7 @@ export const CpuAlerts: FC<PowerData & { x: ExtrasState | null }> = ({ info, sta
 export const BatteryBody: FC<PowerData & { x: ExtrasState | null; alerts?: boolean }> = ({ info, state: s, x, alerts }) => {
   const e = s ? editedSlot(s, info) : null;
   if (!s || !e) return <PanelSectionRow><ChargeRows x={x} only={alerts ? "alerts" : undefined} /></PanelSectionRow>;
-  return <ExtrasRows profileKey={s.active.key} slot={e.slot} stored={e.stored} x={x} errors={!alerts} only="fan" alerts={alerts} />;
+  return <ExtrasRows profileKey={e.key} slot={e.slot} stored={e.stored} x={x} errors={!alerts} only="fan" alerts={alerts} />;
 };
 
 /**

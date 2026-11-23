@@ -261,8 +261,10 @@ class SettingsTest(Base):
                 self.write(content)
             i = self.info()
             self.assertEqual(i["options"], {"per_game": True, "split_ac": False, "extended": False, "ignore": [],
-                                            "poll_s": 2})
-            self.assertEqual(i["profiles"], {"default": {"name": None, "main": power._empty_values(), "ac": None}})
+                                            "poll_s": 2, "low_battery": True, "low_battery_pct": 20,
+                                            "low_battery_games": False, "advisor": True})
+            self.assertEqual(i["profiles"], {"default": {"name": None, "main": power._empty_values(), "ac": None,
+                                                         "low": None}})
             self.assertFalse(i["state"]["enabled"])
 
     def test_wrong_types_read_as_null_and_bad_keys_are_dropped(self):
@@ -1841,6 +1843,278 @@ class ActiveRefreshTest(NewBase):
         self.on()
         power.refresh(self.ctx)
         self.assertEqual(power._get(self.ctx).apply_at, self.t)
+
+
+class PerfOptionsTest(Base):
+    """The performance batch's power.json options (DESIGN.md "Performance batch" D, E)."""
+
+    def test_defaults_and_validation(self):
+        o = power.info(self.ctx, False)["info"]["options"]
+        self.assertEqual({k: o[k] for k in ("low_battery", "low_battery_pct", "low_battery_games", "advisor")},
+                         {"low_battery": True, "low_battery_pct": 20, "low_battery_games": False, "advisor": True})
+        for bad in (4, 51, 20.5, True, "20", None):
+            res = power.options(self.ctx, {"low_battery_pct": bad})
+            self.assertFalse(res["ok"], bad)
+            self.assertIn("low_battery_pct must be a whole number 5..50", res["error"])
+        for k in ("low_battery", "low_battery_games", "advisor"):
+            self.assertFalse(power.options(self.ctx, {k: 1})["ok"], k)
+        self.assertTrue(power.options(self.ctx, {"low_battery_pct": 50, "advisor": False, "low_battery": False})["ok"])
+        self.restart()
+        o = power.info(self.ctx, False)["info"]["options"]
+        self.assertEqual((o["low_battery_pct"], o["advisor"], o["low_battery"]), (50, False, False))
+
+    def test_a_bad_stored_value_reads_as_the_default(self):
+        with open(os.path.join(self.ctx.settings_dir, power.SETTINGS_FILE), "w") as f:
+            json.dump({"low_battery_pct": 70, "advisor": "yes", "profiles": {"9": {"low": {"pl1_w": 6}}}}, f)
+        info = power.info(self.ctx, False)["info"]
+        self.assertEqual((info["options"]["low_battery_pct"], info["options"]["advisor"]), (20, True))
+        self.assertNotIn("low", info["profiles"]["9"])            # the Default profile only
+
+    def test_advisor_alone_writes_nothing(self):
+        self.on()
+        self.w.calls.clear()
+        res = power.options(self.ctx, {"advisor": False})
+        self.assertTrue(res["ok"])
+        self.assertIsNone(res["applied"])
+
+    def test_battery_preset_equals_the_shared_fixture(self):
+        with open(os.path.join(FIX, "presets.json")) as f:
+            fix = json.load(f)
+        low = next(c for c in fix["cases"] if c["slot"] == "low")
+        want = {k: v for k, v in low["presets"]["battery"].items() if v is not None}
+        self.assertEqual(power.BATTERY_PRESET, want)
+        self.assertTrue(set(low["presets"]["battery"]) <= set(power.FIELDS))
+        self.assertEqual(power._battery_values(), dict(power._empty_values(), **want))
+
+
+class LowBatteryTest(Base):
+    def setUp(self):
+        super().setUp()
+        pf.battery_pct(self.ctx, 50, "Discharging")
+        self.on()
+        self.tick()
+
+    def pct(self, value):
+        pf.battery_pct(self.ctx, value)
+
+    def low(self):
+        return power.state(self.ctx)["state"]["low"]
+
+    def test_set_values_low_only_for_default_and_filled_from_the_preset(self):
+        power.profile(self.ctx, "9", None, True)
+        res = power.set_values(self.ctx, "9", "low", {"pl1_w": 8})
+        self.assertEqual(res["error"], "power_set: only the Default profile has low-battery values")
+        self.assertFalse(power.set_values(self.ctx, "default", "night", {})["ok"])
+        self.set(slot="low", gpu_max_mhz=1500)
+        low = power.info(self.ctx, False)["info"]["profiles"]["default"]["low"]
+        self.assertEqual(low, dict(power._battery_values(), gpu_max_mhz=1500))
+        self.assertNotIn("low", power.info(self.ctx, False)["info"]["profiles"]["9"])
+
+    def test_enter_stay_leave(self):
+        self.assertEqual(self.low(), {"active": False, "held": False, "pct": 50, "enter_pct": 20, "leave_pct": 25,
+                                      "since": None})
+        self.pct(20)
+        self.assertEqual(self.tick(power.LOW_CHECK_S), "applied")
+        self.assertTrue(self.low()["active"])
+        st = power.state(self.ctx)["state"]
+        self.assertEqual(st["active"]["slot"], "low")
+        self.assertEqual((self.watts(MSR), self.watts(MSR, "short_term"), self.watts(MMIO)), (10, 15, 10))
+        self.assertEqual(pf.get(pf.epp_path(self.ctx)), "balance_power")
+        self.assertEqual(pf.get(pf.no_turbo_path(self.ctx)), "1")
+        self.pct(22)
+        self.tick(power.LOW_CHECK_S)
+        self.assertTrue(self.low()["active"])                     # 22 % is inside the 5 % gap
+        self.pct(25)
+        self.assertEqual(self.tick(power.LOW_CHECK_S), "applied")
+        self.assertFalse(self.low()["active"])
+        self.assertEqual((self.watts(MSR), self.watts(MMIO)), (25, 35))     # the profile's own (firmware) values
+        self.assertEqual(pf.get(pf.no_turbo_path(self.ctx)), "0")
+
+    def test_the_charge_is_read_every_30_s_only(self):
+        reads = []
+        real = powerhw._read
+        with mock.patch.object(powerhw, "_read", lambda p: reads.append(p) or real(p)):
+            for _ in range(15):
+                self.tick()
+        self.assertEqual(len([p for p in reads if p.endswith("/capacity")]), 1)
+
+    def test_leaves_on_ac_and_never_enters_with_ac_unknown(self):
+        self.pct(10)
+        self.tick(power.LOW_CHECK_S)
+        self.assertTrue(self.low()["active"])
+        self.plug(True)
+        self.tick()
+        self.assertFalse(self.low()["active"])
+        self.assertIsNone(power._get(self.ctx).run["low"])
+        os.remove(self.ctx.sys_path("/sys/class/power_supply/ADP1/online"))
+        os.remove(self.ctx.sys_path("/sys/class/power_supply/BAT0/status"))
+        self.tick(power.LOW_CHECK_S)
+        self.tick(power.LOW_CHECK_S)
+        self.assertIsNone(powerhw.ac_online(self.ctx))
+        self.assertFalse(self.low()["active"])
+
+    def test_turning_power_control_off_ends_it(self):
+        self.pct(10)
+        self.tick(power.LOW_CHECK_S)
+        self.assertTrue(self.low()["active"])
+        res = power.enable(self.ctx, False)
+        self.assertFalse(res["state"]["low"]["active"])
+        self.assertEqual(self.watts(MSR), 25)
+
+    def test_survives_a_restart(self):
+        self.pct(15)
+        self.tick(power.LOW_CHECK_S)
+        self.tick()
+        self.restart()
+        self.assertTrue(self.low()["active"])
+        self.assertEqual(power._get(self.ctx).run["low"]["pct"], 15)
+
+    def test_never_raises_a_limit(self):
+        self.set(pl1_w=8, pl2_w=12)
+        self.pct(10)
+        self.tick(power.LOW_CHECK_S)
+        self.tick()
+        st = power.state(self.ctx)["state"]
+        self.assertEqual(st["active"]["slot"], "low")
+        self.assertEqual((st["values"]["pl1_w"], st["values"]["pl2_w"]), (8, 12))
+        self.assertEqual(st["values"]["epp"], "balance_power")
+        self.assertEqual(self.watts(MSR), 8)
+        p = power._get(self.ctx)
+        merged = power._merge_low(p, power._empty_values(), dict(power._empty_values(), pl1_w=30, pl2_w=60,
+                                                                 gpu_max_mhz=1800, cpu_max_pct=80))
+        # a null normal is the firmware's value (PL1 25, the lowest boot PL1; PL2 52; GPU 2300): a higher low
+        # value leaves it to the firmware; no CPU speed cap file here: an unknown firmware value takes the low one
+        self.assertEqual((merged["pl1_w"], merged["pl2_w"], merged["gpu_max_mhz"], merged["cpu_max_pct"]),
+                         (None, None, 1800, 80))
+        merged = power._merge_low(p, dict(power._empty_values(), epp_p="performance"), power._battery_values())
+        self.assertEqual((merged["epp"], merged["epp_p"], merged["pl1_w"]), ("balance_power", None, 10))
+
+    def test_a_game_profile_holds_it_unless_asked(self):
+        power.profile(self.ctx, "1091500", "Cyberpunk 2077", True)
+        power.game(self.ctx, "1091500")
+        self.set(key="1091500", pl1_w=20)
+        self.pct(10)
+        self.tick(power.LOW_CHECK_S)
+        self.tick()
+        low = self.low()
+        self.assertEqual((low["active"], low["held"]), (False, True))
+        self.assertEqual(self.watts(MSR), 20)
+        self.assertTrue(power.options(self.ctx, {"low_battery_games": True})["ok"])
+        low = self.low()
+        self.assertEqual((low["active"], low["held"]), (True, False))
+        self.assertEqual(self.watts(MSR), 10)
+        st = power.state(self.ctx)["state"]
+        self.assertEqual((st["active"]["key"], st["active"]["slot"]), ("1091500", "low"))
+
+    def test_turning_it_off_ends_it_at_once(self):
+        self.pct(10)
+        self.tick(power.LOW_CHECK_S)
+        self.tick()
+        res = power.options(self.ctx, {"low_battery": False})
+        self.assertIsNone(res["state"]["low"])
+        self.assertEqual(self.watts(MSR), 25)
+        res = power.options(self.ctx, {"low_battery": True})        # one read at once, no waiting for 30 s
+        self.assertTrue(res["state"]["low"]["active"])
+        self.assertEqual(self.watts(MSR), 10)
+        res = power.options(self.ctx, {"low_battery_pct": 8})
+        self.assertTrue(res["state"]["low"]["active"])               # 10 % < 8 + 5: stays
+        pf.battery_pct(self.ctx, 12)
+        res = power.options(self.ctx, {"low_battery_pct": 6})
+        self.assertFalse(res["state"]["low"]["active"])
+
+    def test_a_user_low_slot(self):
+        self.set(slot="low", pl1_w=7, pl2_w=None, turbo=None, epp=None, gpu_power_profile=None)
+        self.pct(10)
+        self.tick(power.LOW_CHECK_S)
+        self.tick()
+        self.assertEqual((self.watts(MSR), self.watts(MSR, "short_term")), (7, 52))
+        self.set(slot="low", pl1_w=9)                           # edits what runs: applied at once
+        self.assertEqual(self.watts(MSR), 9)
+
+
+class GameNowTest(Base):
+    def test_shape_and_no_sysfs_read(self):
+        self.on()
+        self.set(pl1_w=15, pl2_w=25)
+        self.tick()
+        power.profile(self.ctx, "1091500", "Cyberpunk 2077", True)
+        power.game(self.ctx, "1091500")
+        with mock.patch.object(powerhw, "_read", side_effect=AssertionError("read")), \
+                mock.patch("builtins.open", side_effect=AssertionError("open")):
+            g = power.game_now(self.ctx)
+        self.assertEqual(g, {"app": "1091500", "name": "Cyberpunk 2077", "enabled": True, "blocked": None,
+                             "overridden": False, "grace": False, "ac": False, "key": "1091500", "slot": "main",
+                             "pl1_w": 15, "pl2_w": 25, "pl1_min": 5, "pl1_max": 35, "pl1_max_ac": 40, "low": False,
+                             "testing": False, "advisor": True})
+
+    def test_before_a_snapshot(self):
+        g = power.game_now(self.ctx)
+        self.assertEqual((g["enabled"], g["pl1_w"], g["pl1_max"], g["pl1_max_ac"], g["ac"]),
+                         (False, None, None, None, None))
+
+    def test_time_windows_in_info(self):
+        tw = power.info(self.ctx, False)["info"]["hw"]["time_windows"]
+        self.assertEqual(tw, {MMIO: {"pl1_us": 27983872, "pl2_us": 976}, MSR: {"pl1_us": 27983872, "pl2_us": 976}})
+        self.assertEqual(power.info(self.ctx, False)["info"]["selftest"],
+                         {"test": None, "measures": [], "measured": False})
+
+
+class OverheadTest(Base):
+    """N-7: the drift check's period in game."""
+
+    def setUp(self):
+        super().setUp()
+        self.on()
+        self.set(pl1_w=15)
+        power.game(self.ctx, "1091500")
+        self.tick(power.CALM_S + 1)
+
+    def drift_reads(self, seconds, every=None):
+        reads = []
+        real = powerhw._read
+        msr = pf.limit(self.ctx, MSR, "long_term")
+        with mock.patch.object(powerhw, "_read", lambda p: reads.append(p) or real(p)):
+            for i in range(int(seconds / power.TICK_S)):
+                if every and i % every == 0:
+                    power.state(self.ctx)
+                self.tick()
+        return len([p for p in reads if p == msr])
+
+    def test_slower_in_game_with_no_panel(self):
+        self.assertLessEqual(self.drift_reads(60), 7)
+
+    def test_poll_s_while_a_panel_shows(self):
+        self.assertGreaterEqual(self.drift_reads(60, every=1), 30)
+
+    def test_poll_s_without_a_game(self):
+        power.game(self.ctx, None)
+        self.t += power.CALM_S + 1
+        self.assertGreaterEqual(self.drift_reads(60), 29)
+
+    def test_poll_s_after_a_drift_or_an_apply(self):
+        pf.set_watts(self.ctx, MSR, "long_term", 20)
+        self.t += power.GAME_POLL_S
+        self.assertEqual(self.tick(), "nothing")         # seen once: unsettled from now
+        p = power._get(self.ctx)
+        self.assertEqual(power._drift_period(p, self.t), p.data["poll_s"])
+        pf.set_watts(self.ctx, MSR, "long_term", 15)
+        self.assertGreaterEqual(self.drift_reads(60), 29)
+
+    def test_period_rules(self):
+        p = power._get(self.ctx)
+        now = self.t
+        self.assertEqual(power._drift_period(p, now), power.GAME_POLL_S)
+        p.grace_until = now + 5
+        self.assertEqual(power._drift_period(p, now), 2)
+        p.grace_until = None
+        p.pending, p.pending_left = ["gpu/profile"], 3
+        self.assertEqual(power._drift_period(p, now), 2)
+        p.pending_left = 0
+        self.assertEqual(power._drift_period(p, now), power.GAME_POLL_S)
+        p.data["poll_s"] = 30
+        self.assertEqual(power._drift_period(p, now), 30)
+        p.data["poll_s"] = 0
+        self.assertEqual(power._drift_period(p, now), 0)
 
 
 if __name__ == "__main__":

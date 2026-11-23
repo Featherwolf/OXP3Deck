@@ -10,6 +10,8 @@ import { Pending } from "../components/Effect";
 import { explain, explainWhen, label, Note, Problem, Status, WithDetails } from "../components/Hint";
 import { EFFECTS, effectText } from "../effects";
 import { JobView, TaskSection } from "../components/JobView";
+import { VrrRow } from "../components/PerfRows";
+import { isVrrAdvice } from "../display";
 import { RebootRow } from "../components/Reboot";
 import { openPage } from "../nav";
 import { useCurrentJob, useResource } from "../store";
@@ -182,10 +184,11 @@ export const FixesTab: FC = () => {
               <PanelSectionRow>
                 <Note label="Display refresh" details={{ title: "Display refresh", body: paragraphs([...status.refresh.summary, ...status.refresh.advice]) }}>
                   {firstSentence(status.refresh.summary[0] ?? "")}</Note>
-                {status.refresh.advice.map((a, i) => <Note key={i} label={i === 0 ? "Tip" : undefined}
+                {status.refresh.advice.filter((a) => !isVrrAdvice(a)).map((a, i) => <Note key={i} label={i === 0 ? "Tip" : undefined}
                   details={fitsOneLine(a) ? null : { title: "Tip", body: a }}>{firstSentence(a)}</Note>)}
               </PanelSectionRow>
             )}
+            <VrrRow status={status} />
           </PanelSection>
           {group("audio").length > 0 && (
             <PanelSection title="Sound">

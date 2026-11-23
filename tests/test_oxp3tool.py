@@ -387,6 +387,72 @@ class ArgvTest(Base):
         self.assertEqual(oxp3tool._free_name(self.ctx.home, os.path.basename(r["path"])[:-7], ".tar.gz"),
                          r["path"][:-7] + "-2.tar.gz")
 
+    def test_diagnose_writes_the_device_facts_next_to_the_archive(self):
+        self.answer("diagnose", fixture("diagnose.json"), write="ARCHIVE")
+        job = FakeJob()
+        extra = {"selftest": {"version": 1, "test": None, "measures": []}, "sampler": {"apps": {}}}
+        r = self.run_cmd(oxp3tool.diagnose, job, extra)
+        self.assertTrue(r["ok"], r)
+        self.assertEqual(r["extra_path"], r["path"][:-len(".tar.gz")] + "-oxp3deck.json")
+        with open(r["extra_path"]) as f:
+            self.assertEqual(json.load(f), extra)
+        st = os.lstat(r["extra_path"])
+        self.assertEqual(stat.S_IMODE(st.st_mode), 0o600)
+        if ROOT:
+            self.assertEqual((st.st_uid, st.st_gid), (1000, 1000))
+        self.assertEqual(job.log[-1], f"Saved {r['extra_path']}")
+        self.assertIsNone(self.run_cmd(oxp3tool.diagnose, FakeJob())["extra_path"])     # without extra: none
+
+    def test_a_failed_sidecar_is_a_line_not_a_failure(self):
+        self.answer("diagnose", fixture("diagnose.json"), write="ARCHIVE")
+        job = FakeJob()
+        real = oxp3tool.userexec.write_new
+
+        def write_new(ctx, path, data, mode=0o644):
+            if path.endswith("-oxp3deck.json"):
+                raise PermissionError(13, "Permission denied", path)
+            return real(ctx, path, data, mode)
+
+        with mock.patch.object(oxp3tool.userexec, "write_new", write_new):
+            r = self.run_cmd(oxp3tool.diagnose, job, {"x": 1})
+        self.assertTrue(r["ok"], r)
+        self.assertIsNone(r["extra_path"])
+        self.assertTrue(os.path.isfile(r["path"]))
+        self.assertEqual(job.log[-1], "Could not save OXP3 Deck's device facts next to it: Permission denied")
+
+    def test_status_passes_the_vrr_keys_through(self):
+        """oxp3-tool 0.4.4's refresh keys (vrr_safe, vrr_reason, vrr_why, vrr_range_hz) reach status.refresh and
+        main._sendable unchanged; an older oxp3-tool simply has none."""
+        data = json.loads(fixture("status-cachyos.json"))
+        refresh = dict(data["status"]["refresh"], vrr_safe=True, vrr_reason="fixed",
+                       vrr_why="the kernel has the variable-refresh fix (7.2.10 or later)", vrr_range_hz=[48, 144])
+        data["status"]["refresh"] = refresh
+        self.answer("status", json.dumps(data))
+        r = self.run_cmd(oxp3tool.status)
+        self.assertEqual(r["status"]["refresh"], refresh)
+        main = load_main_module(self)
+        self.assertEqual(main._sendable(r)["status"]["refresh"], refresh)
+        # the regenerated fixture is oxp3-tool 0.4.4's own output: the keys are there (7.2.11, DMC unknown)
+        self.answer("status", fixture("status-cachyos.json"))
+        now = self.run_cmd(oxp3tool.status)["status"]["refresh"]
+        self.assertEqual((now["vrr_safe"], now["vrr_reason"], now["vrr_range_hz"]), (None, "firmware_unknown", None))
+        # an older oxp3-tool (0.4.3) has none of them
+        older = json.loads(fixture("status-cachyos.json"))
+        for k in ("vrr_safe", "vrr_reason", "vrr_why", "vrr_range_hz"):
+            del older["status"]["refresh"][k]
+        self.answer("status", json.dumps(older))
+        old = self.run_cmd(oxp3tool.status)["status"]["refresh"]
+        self.assertNotIn("vrr_safe", old)
+
+
+def load_main_module(test):
+    """main.py as Decky loads it (tests/test_main.py's loader), in a folder of the test's own."""
+    from tests import test_main
+    test.addCleanup(stub_decky.uninstall)
+    folder = os.path.join(test.tmp.name, "main")
+    os.makedirs(folder)
+    return test_main.load_main(folder)
+
 
 class ValidationTest(Base):
     def setUp(self):

@@ -89,6 +89,8 @@ export const JobView: FC<{ job?: Job | null; quick?: boolean; lines?: number; on
         {reboot && <Status ok={null} label="Reboot to finish" detail="The change takes effect after a reboot." />}
         {next && <Status ok={null} label="Next" detail={next} />}
         {path && shown.kind === "oxp3-diagnose" && <Note label="Saved">{path}</Note>}
+        {shown.state === "done" && shown.kind === "oxp3-diagnose" && typeof shown.result?.extra_path === "string" &&
+          <Note label="Saved">{shown.result.extra_path as string}</Note>}
         {path && shown.kind === "oxp3-install" && <Note label="Installed">{`oxp3-tool ${shown.result?.version ?? ""} as ${path}`}</Note>}
         {shown.state === "failed" && <Problem what={shown.title} error={shown.error ?? "failed (see the log above)"} />}
       </PanelSectionRow>

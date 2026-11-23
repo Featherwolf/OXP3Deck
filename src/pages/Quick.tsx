@@ -21,14 +21,16 @@ import { explain, explainWhen, INFO, Note, Problem, Status, WithDetails } from "
 import { EFFECTS } from "../effects";
 import { JobView, useQuickAccessVisible } from "../components/JobView";
 import { LiveRows } from "../components/LiveRows";
+import { PowerTipRows, VrrRow } from "../components/PerfRows";
 import {
   BatteryBody, CpuAlerts, CpuBody, GameProfileToggle, PowerAlerts, PowerBody, usePower, useRefused,
 } from "../components/PowerControls";
 import { RebootRow } from "../components/Reboot";
 import { openPage } from "../nav";
+import { PRESET_LABEL, presetCaps, presetOf } from "../power";
 import {
   Alert, alertOf, batteryAlert, batterySummary, cpuAlert, cpuSummary, editedSlot, editedValues, fixesSummary, gameSummary,
-  liveSummary, powerAlert, powerSummary, refusedLive, xessLine, xessSummary,
+  liveSummary, powerAlert, powerSummary, refusedLive, summaryValues, xessLine, xessSummary,
 } from "../quickgroups";
 import { useRunningApp } from "../steam";
 import { syncJob, useCurrentJob, useLive, useResource } from "../store";
@@ -256,6 +258,8 @@ export const QuickPanel: FC = () => {
   const ed = s ? editedSlot(s, info) : null;
   const vals = s && ed ? editedValues(s, ed.stored) : null;
   const cpu = info?.hw.cpu ?? null;
+  const lowRuns = s?.active.slot === "low";      // the header names what runs, not a stored preset (summaryValues)
+  const preset = s?.enabled && ed && info && !lowRuns ? presetOf(ed.stored, s.range, ed.slot, info.options, presetCaps(info, s)) : null;
   const ignored = listText((info?.conflicts ?? []).filter((c) => c.kind === "cpu" && c.ignored).map((c) => friendlyName(c.id, c.name))) || "another program";
 
   const autoOn = !!(auto.data?.ok && auto.data.on);
@@ -289,13 +293,16 @@ export const QuickPanel: FC = () => {
           <PanelSectionRow><AutoSetupSwitch /></PanelSectionRow>
           <PanelSectionRow><Note label={app.name} details={{ title: app.name, body: "Saved in the game's Steam launch options. Changes apply the next time you start it." }}>XeSS settings for this game</Note></PanelSectionRow>
           {s?.enabled && info?.options.per_game && <GameProfileToggle app={app} info={info} />}
+          {s && info && <PowerTipRows app={app} info={info} state={s} visible={visible} />}
           <GameControls app={app} quick running />
         </Group>
       )}
       <Group id="power" title="Power" alert={pAlert} alerts={pAlert && <PowerAlerts {...pd} />}
-        summary={powerSummary(s, vals, { yieldedTo: s?.enabled && s.yielded?.length ? ignored : null,
-          gpuHeld: !!s?.enabled && (s.now.gpu?.reasons ?? []).some((r) => GPU_HELD.test(r)) })}>
+        summary={powerSummary(s, s ? summaryValues(s, vals) : vals, { yieldedTo: s?.enabled && s.yielded?.length ? ignored : null,
+          gpuHeld: !!s?.enabled && (s.now.gpu?.reasons ?? []).some((r) => GPU_HELD.test(r)),
+          preset: preset && preset !== "custom" && preset !== "default" ? PRESET_LABEL[preset] : null })}>
         <PowerBody {...pd} />
+        <VrrRow status={status} />
       </Group>
       {showCpu && (
         <Group id="cpu" title="CPU" alert={cAlert} alerts={cAlert && <CpuAlerts {...pd} x={x} />}

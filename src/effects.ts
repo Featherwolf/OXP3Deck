@@ -25,6 +25,9 @@ export const EFFECTS: Record<string, EffectSpec> = {
   "power.per_game": NOW, "power.split_ac": NOW, "power.extended": NOW, "power.poll_s": NOW,
   "power.cpu_max_pct": NOW, "power.soc": NOW, "power.soc_offset": NOW, "power.gpu_profile": NOW, "power.cpu_min_pct": NOW,
   "power.cpu_caps": NOW, "power.epp_split": NOW,
+  // performance batch (DESIGN.md "Performance batch"): Measure 60 s, Dismiss and the VRR row change nothing, no tag
+  "power.preset": NOW, "power.low_battery": NOW, "power.low_battery_pct": NOW, "power.low_battery_games": NOW,
+  "power.advisor": NOW, "power.advice_use": NOW, "power.selftest": "idle",
   "power.take_control": NOW, "power.fix": NOW, "power.unfix": NOW, "power.ignore": NOW, "power.import": NOW,
   "extras.fan": NOW, "extras.scx": NOW, "extras.lpmd": NOW, "extras.charge_limit": NOW, "extras.charge_behaviour": NOW,
   "extras.take_control": NOW,

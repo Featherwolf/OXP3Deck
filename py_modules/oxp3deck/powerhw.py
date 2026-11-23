@@ -290,6 +290,33 @@ def suspend_count(ctx) -> int | None:
     return _int(_read(ctx.sys_path(SUSPEND_SUCCESS)))
 
 
+def battery(ctx) -> dict:
+    """{"pct": int | None, "status": str | None} of the first supply whose type is Battery (by name order): its
+    `capacity` and `status`. Two reads (plus the supplies' `type`); no battery: both None."""
+    base = ctx.sys_path(POWER_SUPPLY)
+    for name, kind in _supplies(ctx):
+        if kind == "Battery":
+            pct = _int(_read(os.path.join(base, name, "capacity")))
+            return {"pct": pct if pct is not None and 0 <= pct <= 100 else None,
+                    "status": _read(os.path.join(base, name, "status")) or None}
+    return {"pct": None, "status": None}
+
+
+def time_windows(ctx, hw: dict) -> dict:
+    """{zone id: {"pl1_us", "pl2_us"}}: constraint_<n>_time_window_us of each zone's PL1 and PL2 constraint (None
+    when missing or unreadable). Read only: OXP3 Deck never writes a time window. Called by power.info() and the
+    self-test, never by tick."""
+    out = {}
+    for z in hw.get("rapl") or []:
+        vals = {}
+        for k in ("pl1", "pl2"):
+            c = z.get(k)
+            v = _int(_read(os.path.join(z["path"], f"constraint_{c['n']}_time_window_us"))) if c else None
+            vals[f"{k}_us"] = v if v is not None and v >= 0 else None
+        out[z["id"]] = vals
+    return out
+
+
 # ---- reading -----------------------------------------------------------------------------------------------------
 
 def _limit_path(zone: dict, which: str) -> str | None:

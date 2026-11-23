@@ -571,3 +571,30 @@ class GpuProfileTest(Base):
                           and "/drm/" in p])
         self.apply({"gpu_profile": "power_saving"})
         self.assertFalse([p for p in self.w.paths() if "/gt1/" in p])
+
+
+class TimeWindowsBatteryTest(Base):
+    def test_time_windows_of_both_zones_read_only(self):
+        pf.oxp3(self.ctx)
+        pf.put(self.ctx.sys_path("/sys/class/powercap/intel-rapl-mmio:0/constraint_1_time_window_us"), 2441)
+        os.remove(self.ctx.sys_path("/sys/class/powercap/intel-rapl:0/constraint_1_time_window_us"))
+        hw = self.hw()
+        self.assertEqual(powerhw.time_windows(self.ctx, hw),
+                         {"intel-rapl-mmio:0": {"pl1_us": 27983872, "pl2_us": 2441},
+                          "intel-rapl:0": {"pl1_us": 27983872, "pl2_us": None}})
+        self.apply({"rapl": {"intel-rapl:0": {"pl1_uw": 15 * MW, "pl2_uw": 25 * MW}}})
+        self.assertTrue(self.w.calls)
+        self.assertFalse([p for p in self.w.paths() if "time_window" in p])
+
+    def test_a_zone_without_boost(self):
+        pf.rapl(self.ctx, "intel-rapl:0", order=("long_term",))
+        self.assertEqual(powerhw.time_windows(self.ctx, self.hw()), {"intel-rapl:0": {"pl1_us": 27983872,
+                                                                                       "pl2_us": None}})
+
+    def test_battery(self):
+        self.assertEqual(powerhw.battery(self.ctx), {"pct": None, "status": None})
+        pf.ac(self.ctx, online=False)
+        pf.battery_pct(self.ctx, 18, "Discharging")
+        self.assertEqual(powerhw.battery(self.ctx), {"pct": 18, "status": "Discharging"})
+        pf.battery_pct(self.ctx, 140)
+        self.assertEqual(powerhw.battery(self.ctx)["pct"], None)

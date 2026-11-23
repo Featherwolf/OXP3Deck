@@ -181,5 +181,58 @@ class ThrottleFanTest(Base):
         self.assertEqual(self.sample()["fan_rpm"], 3100)
 
 
+class CheapTest(Base):
+    """readouts.cheap (the sampler's and the measurement's sample): at most 6 files, never a GPU clock."""
+
+    def setUp(self):
+        super().setUp()
+        pf.oxp3_full(self.ctx)
+        self.st = readouts.new_state()
+
+    def cheap(self, dt=5.0, reasons=False):
+        self.t += dt
+        return readouts.cheap(self.ctx, self.st, reasons)
+
+    def test_values(self):
+        first = self.cheap()
+        self.assertEqual((first["package_w"], first["gpu_busy_pct"], first["cpu_throttle_ms"]), (None, None, None))
+        self.assertEqual((first["battery_w"], first["battery_status"], first["reasons"]), (12.0, "Discharging", None))
+        pf.energy(self.ctx, 1_000_000 + 100_000_000)            # 100 J in 5 s
+        pf.gtidle(self.ctx, 10_000 + 1_000)                     # 1 s idle in 5 s
+        pf.throttle(self.ctx, 40)
+        pf.put(self.ctx.sys_path("/sys/class/drm/card1/device/tile0/gt0/freq0/throttle/reasons"),
+               "reason_pl1 reason_thermal")
+        s = self.cheap(reasons=True)
+        self.assertEqual((s["package_w"], s["gpu_busy_pct"], s["cpu_throttle_ms"], s["reasons"]),
+                         (20.0, 80.0, 40, ["pl1", "thermal"]))
+        self.assertEqual(set(s), {"t", "package_w", "gpu_busy_pct", "reasons", "battery_w", "battery_status",
+                                  "cpu_throttle_ms"})
+
+    def test_reads_at_most_six_files_and_no_clock(self):
+        self.cheap()
+        seen = []
+        real = readouts._read
+        with mock.patch.object(readouts, "_read", lambda p: seen.append(p) or real(p)), \
+                mock.patch.object(readouts.powerhw, "_read", side_effect=AssertionError("discovery again")):
+            self.cheap(reasons=True)
+            self.assertLessEqual(len(seen), 6, seen)
+            seen.clear()
+            self.cheap(reasons=False)
+            self.assertLessEqual(len(seen), 5, seen)
+        self.assertFalse([p for p in seen if p.endswith(("/min_freq", "/max_freq", "/cur_freq", "/act_freq"))])
+
+    def test_its_own_state(self):
+        self.cheap()
+        pf.energy(self.ctx, 51_000_000)
+        readouts.sample(self.ctx)                               # the panel's sample does not take cheap's Δ
+        self.assertEqual(self.cheap()["package_w"], 10.0)
+
+    def test_never_raises(self):
+        with mock.patch.object(readouts, "_cheap_discover", side_effect=RuntimeError("x")), \
+                self.assertLogs("oxp3deck", "ERROR"):
+            s = self.cheap()
+        self.assertIsNone(s["package_w"])
+
+
 if __name__ == "__main__":
     unittest.main()

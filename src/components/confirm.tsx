@@ -10,6 +10,7 @@ export type ConfirmOpts = {
   lines?: string[];          // e.g. oxp3-tool's dry-run plan
   linesTitle?: string;
   ok?: string;
+  cancel?: string;           // the Cancel button's text ("Cancel")
   destructive?: boolean;
   effect?: EffectSpec;       // "Takes effect: …", after text (DESIGN.md "When it takes effect")
 };
@@ -40,7 +41,7 @@ export const confirm = (o: ConfirmOpts): Promise<boolean> => new Promise((resolv
   try {
     const m = showModal(
       <ConfirmModal strTitle={o.title} strDescription={body} strOKButtonText={o.ok ?? "Continue"}
-        strCancelButtonText="Cancel" bDestructiveWarning={o.destructive}
+        strCancelButtonText={o.cancel ?? "Cancel"} bDestructiveWarning={o.destructive}
         onOK={() => done(true)} onCancel={() => done(false)} />,
     );
     // older Decky (3.2) has no ClosedPromise; there onCancel covers B and the close button

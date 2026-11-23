@@ -485,9 +485,11 @@ def kernel_keep(ctx, job) -> dict:
     return _job_result(run_json(ctx, ["kernel", "keep", "--yes"], on_line=job.say), "action", "kernel")
 
 
-def diagnose(ctx, job) -> dict:
+def diagnose(ctx, job, extra: dict | None = None) -> dict:
     """`oxp3-tool diagnose` into the root-only run folder, then a new file in the user's home, created by
-    userexec.write_new (no symlink followed, owned by the user). {ok, error, path, findings}."""
+    userexec.write_new (no symlink followed, owned by the user). {ok, error, path, findings, extra_path}. With
+    `extra` (OXP3 Deck's own device facts: the self-test, measurements, sampler stats), a sidecar
+    <archive name>-oxp3deck.json (0600) goes next to the archive; failing to write it is a log line, not a failure."""
     stamp = time.strftime("%Y%m%d-%H%M%S")
     try:
         tmp = os.path.join(_run_dir(ctx), f"oxp3-diagnose-{stamp}-{secrets.token_hex(3)}.tar.gz")
@@ -508,9 +510,18 @@ def diagnose(ctx, job) -> dict:
     finally:
         _unlink(tmp)
     job.say(f"Saved {dest}")
+    extra_path = None
+    if extra is not None:
+        side = dest[:-len(".tar.gz")] + "-oxp3deck.json"
+        try:
+            userexec.write_new(ctx, side, (json.dumps(extra, indent=1, default=str) + "\n").encode("utf-8"), 0o600)
+            extra_path = side
+            job.say(f"Saved {side}")
+        except (OSError, TypeError, ValueError) as e:
+            job.say(f"Could not save OXP3 Deck's device facts next to it: {getattr(e, 'strerror', None) or e}")
     found = (r.get("diagnose") or {}).get("findings") if isinstance(r.get("diagnose"), dict) else None
     return {"ok": True, "error": None, "rc": r.get("rc"), "path": dest,
-            "findings": [str(f) for f in found] if isinstance(found, list) else []}
+            "findings": [str(f) for f in found] if isinstance(found, list) else [], "extra_path": extra_path}
 
 
 def _free_name(folder: str, stem: str, ext: str) -> str:

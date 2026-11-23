@@ -261,3 +261,69 @@ def sample(ctx) -> dict:
     except Exception as e:
         log.exception("readouts: sample failed")
         return {"ok": False, "error": f"live readouts failed: {e}", "live": None}
+
+
+# ---- the cheap sample (sampler.py and the self-test's measurement; DESIGN.md "Performance batch" E) -------------
+
+def new_state() -> _State:
+    """A state of its own for cheap(): never shared with the panel's, so the two never share a Δ."""
+    return _State()
+
+
+def _cheap_discover(ctx, old: dict | None) -> dict:
+    """Only what cheap() reads: the MSR package zone (its energy range read once here), the battery, the render GT
+    (a known folder is kept: the full discovery reads gtidle/name and rpe_freq) and the CPU throttle counter."""
+    zone = _find_zone(ctx)
+    if zone is not None:
+        zone = {"energy": zone["energy"], "wrap": _int(_read(zone["range"]))}
+    gpu = _find_gpu(ctx, (old or {}).get("gpu"))
+    return {"zone": zone, "battery": _find_battery(ctx), "gpu": gpu,
+            "idle": os.path.join(os.path.dirname(gpu), "gtidle", "idle_residency_ms") if gpu else None,
+            "reasons": os.path.join(gpu, "throttle", "reasons") if gpu else None,
+            "throttle": ctx.sys_path(CPU0_THROTTLE)}
+
+
+def cheap(ctx, st: _State, reasons: bool) -> dict:
+    """{t, package_w, gpu_busy_pct, reasons: list | None, battery_w, battery_status, cpu_throttle_ms} from at most
+    6 files: the MSR energy_uj, the render GT's gtidle/idle_residency_ms, its throttle/reasons (only with `reasons`),
+    the battery's power_now and status, cpu0's package throttle time (cpu_throttle_ms is the Δ since the last cheap
+    sample of `st`). Never min/max/cur/act_freq (they wake the GPU). A first sample (or one too far from the last)
+    gives None for the Δ values. Never raises."""
+    try:
+        now = _monotonic()
+        if st.found is None or now - st.found_at >= REDISCOVER_S:
+            st.found, st.found_at = _cheap_discover(ctx, st.found), now
+        f = st.found
+        pkg = None
+        if f.get("zone"):
+            uj = _int(_read(f["zone"]["energy"]))
+            d = _delta(st, "energy", now, uj, f["zone"]["wrap"])
+            pkg = round(d[0] / d[1] / 1e6, 2) if d else None
+            if uj is None:
+                st.found = None                      # gone: look again at the next sample
+        busy = None
+        if f.get("idle"):
+            d = _delta(st, "idle", now, _int(_read(f["idle"])))
+            if d is not None:
+                busy = round(max(0.0, min(100.0, 100 - 100 * d[0] / (d[1] * 1000))), 1)
+        why = None
+        if reasons and f.get("reasons"):
+            text = _read(f["reasons"])
+            if text is not None:
+                why = [r[len("reason_"):] if r.startswith("reason_") else r
+                       for r in re.split(r"[\s,]+", text) if r and r != "none"]
+        bat_w = status = None
+        if f.get("battery"):
+            power = _int(_read(os.path.join(f["battery"], "power_now")))
+            bat_w = round(abs(power) / 1e6, 2) if power is not None else None
+            status = _read(os.path.join(f["battery"], "status"))
+        ms = _int(_read(f.get("throttle")))
+        prev = st.prev.get("throttle")
+        st.prev["throttle"] = (now, ms) if ms is not None else None
+        thr = ms - prev[1] if ms is not None and prev is not None and prev[1] is not None and ms >= prev[1] else None
+        return {"t": time.time(), "package_w": pkg, "gpu_busy_pct": busy, "reasons": why, "battery_w": bat_w,
+                "battery_status": status, "cpu_throttle_ms": thr}
+    except Exception:
+        log.exception("readouts: cheap sample failed")
+        return {"t": time.time(), "package_w": None, "gpu_busy_pct": None, "reasons": None, "battery_w": None,
+                "battery_status": None, "cpu_throttle_ms": None}
