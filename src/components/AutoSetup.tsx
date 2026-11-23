@@ -32,6 +32,7 @@ import { usePinned } from "./Group";
 import { explainWhen, label, Note, Problem, Status, WithDetails } from "./Hint";
 import { JobView } from "./JobView";
 import { optiApplyPending, resetOptiInflight, syncOptiLaunch } from "./OptiControls";
+import { xessLogAfterExit } from "./XessLog";
 
 // ---- state ---------------------------------------------------------------------------------------------------------
 
@@ -101,6 +102,7 @@ const DEPS: PassDeps = {
   optiIn: async (appid) => !!(await optiLogNow())[appid]?.plan,
   legacyRec: async (appid) => (await loadLog())[appid],
   toast: (t) => toast(t),
+  readOnly: async () => { const st = await auto_state(); return st.ok ? st.read_only ?? null : null; },
 };
 
 // ---- the pass and its triggers -----------------------------------------------------------------------------------------
@@ -151,10 +153,13 @@ const onLifetime = (appid: string, running: boolean) => {
   if (!running) void p.then(() => afterExit(appid, EXIT_RETRIES));
 };
 
-/** After a game quits: OptiScaler's waiting launch options first, then the session exit (and its rollback), then the pass. */
+/** After a game quits: OptiScaler's waiting launch options first, then Save XeSS logs' turn-off, then the session exit
+ * (and its rollback), then the pass. */
 export const exitFlow = async (appid: string, name: string): Promise<void> => {
   if (isRunning(appid)) return;
   try { await optiApplyPending(appid, name); } catch { /* its own row says it */ }
+  // Save XeSS logs for one run: off after a run that wrote a fresh log (whatever the automatic setup's switch says)
+  try { await xessLogAfterExit(appid, name); } catch { /* left on; the next exit tries again */ }
   try { await sessions.get(appid); } catch { /* the backend did not answer */ }
   if (isRunning(appid)) return;
   await autoPass(appid, name, "exit");
@@ -274,7 +279,7 @@ export const AutoSetupSwitch: FC = () => {
           description={explainWhen(switchLine(on, !!old.data?.on), EFFECTS["auto.global"],
             st.data && !st.data.ok ? "The backend did not answer." : null)} />
       </WithDetails>
-      <Problem what="Automatic setup" error={err ?? (st.data && !st.data.ok ? st.data.error : null)} />
+      <Problem what="Automatic setup" error={err ?? (st.data && !st.data.ok ? st.data.error : null)} onRetry={!err && st.data && !st.data.ok ? st.reload : null} />
     </>
   );
 };
@@ -312,6 +317,8 @@ export const AutoSetupRows: FC<{ app: RunningApp; running: boolean; onWritten: (
   const alerts = only === "alerts";
   const st = useAutoState();
   const on = !!(st.data?.ok && st.data.on);
+  // auto.json damaged or from a newer OXP3 Deck: rows only, no Undo, Try again or mode change (Status has Start fresh)
+  const readOnly = st.data?.ok ? st.data.read_only ?? null : null;
   const planRes = useResource<AutoPlanRes>(on && steam && !alerts ? planKey(appid) : null, () => loadPlan(appid), { fresh: true });
   const plan = planRes.data?.ok ? planRes.data.plan : null;
   const game: AutoGame | null = st.data?.games?.[appid] ?? plan?.game ?? null;
@@ -400,20 +407,23 @@ export const AutoSetupRows: FC<{ app: RunningApp; running: boolean; onWritten: (
     return (
       <div key={c.id}>
         <Status ok={null} label={row.label} detail={row.line} details={d} />
-        <WithDetails details={{ title: `Undo: ${row.label}`, body: paragraphs(undoConfirm(c, app.name).text) }}>
+        {!readOnly && <WithDetails details={{ title: `Undo: ${row.label}`, body: paragraphs(undoConfirm(c, app.name).text) }}>
           <ButtonItem layout="below" disabled={!!act.busy || running} onClick={() => undoOne(c)}
             description={explainWhen("Puts back what was there before.", EFFECTS["game.auto_undo"], quit)}>
             {act.busy === `undo-${c.id}` ? "Working…" : "Undo"}
           </ButtonItem>
-        </WithDetails>
+        </WithDetails>}
       </div>
     );
   });
   const removeJob = cur && cur.kind === "opti-remove" && act.busy?.startsWith("undo-") ? cur : null;
+  const roNote = readOnly && (live.length > 0 || !!on) ? (
+    <Status ok={false} label="Automatic setup is read-only" detail="See Status." details={{ title: "Automatic setup is read-only", body: readOnly }} />
+  ) : null;
   if (alerts && !on) return null;
   if (!on) {
     // switch off: no passes; past changes keep their rows and Undo
-    return <>{legacy}{changeRows}{removeJob && <JobView job={removeJob} />}<Problem what="Automatic setup" error={act.error} /></>;
+    return <>{legacy}{roNote}{changeRows}{removeJob && <JobView job={removeJob} />}<Problem what="Automatic setup" error={act.error} onRetry={act.retry} /></>;
   }
 
   const skipped = plan?.class === "skipped";
@@ -447,18 +457,19 @@ export const AutoSetupRows: FC<{ app: RunningApp; running: boolean; onWritten: (
           "A run shorter than 60 s right after an automatic change undoes that change before the next start; three quick exits in a row undo the newest change. Quitting quickly yourself counts too.",
           "Try again applies it once more; a single quick exit then no longer undoes it."]),
       }} />
-      <ButtonItem layout="below" disabled={!!act.busy || running} onClick={() => retry(c)}
+      {!readOnly && <ButtonItem layout="below" disabled={!!act.busy || running} onClick={() => retry(c)}
         description={explainWhen("Applies it again; it won't be undone for a quick exit again.", EFFECTS["game.auto_retry"], quit)}>
         {act.busy === `retry-${c.id}` ? "Working…" : "Try again"}
-      </ButtonItem>
+      </ButtonItem>}
     </div>
   ));
-  const problem = <Problem what="Automatic setup" error={act.error ?? passErr ?? game?.last_error ?? (planRes.data && !planRes.data.ok ? planRes.data.error : null)} />;
-  if (alerts) return <>{rolledBack}{problem}</>;
+  const problem = <Problem what="Automatic setup" onRetry={act.retry} error={act.error ?? passErr ?? game?.last_error ?? (planRes.data && !planRes.data.ok ? planRes.data.error : null)} />;
+  if (alerts) return <>{roNote}{rolledBack}{problem}</>;
 
   return (
     <>
-      {skipped ? (
+      {roNote}
+      {skipped || readOnly ? (
         <Status ok={null} label="Set up this game" detail={modeLine(plan)} details={modeD} />
       ) : (
         <WithDetails details={modeD}>
@@ -477,7 +488,7 @@ export const AutoSetupRows: FC<{ app: RunningApp; running: boolean; onWritten: (
       {rolledBack}
       {note && <Status ok={false} label={note.label} detail={note.line} details={{ title: note.label, body: note.detail }} />}
       {plan?.needs_xess && <Note label="Automatic setup">Install XeSS fast mode first (XeSS tab).</Note>}
-      {!skipped && (plan?.offers ?? []).map((o) => (
+      {!skipped && !readOnly && (plan?.offers ?? []).map((o) => (
         <WithDetails key={`offer-${o.id}`} details={{ title: `Also possible: ${o.label}`, body: o.why || o.line }}>
           <ButtonItem layout="below" disabled={!!act.busy || running} onClick={() => takeOffer(o)} label={fit(`Also possible: ${o.label}`, 60)}
             description={explainWhen(fit(o.line), EFFECTS["game.auto_offer"], quit)}>

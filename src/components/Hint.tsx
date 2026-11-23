@@ -1,11 +1,14 @@
 // Adapted from ClawDeck (MIT, Copyright (c) 2026 IHulkSmashI and ClawDeck contributors). See THIRD_PARTY_NOTICES.md.
 // The shared rows (DESIGN.md "Frontend → Details"): one plain line up front, the rest in a Details window that the
 // Options (☰) button opens on any row that has one (A opens it too on a read-only row).
-import { Field, Focusable } from "@decky/ui";
-import { FC, ReactNode } from "react";
+import { DialogButton, Field, Focusable } from "@decky/ui";
+import { FC, ReactNode, useState } from "react";
 
+import { problemText } from "../boundary";
+import { copyText } from "../clipboard";
 import { EffectSpec, effectText } from "../effects";
 import { firstSentence } from "../text";
+import { toast } from "../util";
 import { DetailsSpec, showDetails } from "./confirm";
 
 export type { DetailsSpec };
@@ -64,16 +67,60 @@ export const Status: FC<{ ok: boolean | null; label: ReactNode; detail?: ReactNo
   };
 
 /**
- * The last action that did not work, in red under the control it belongs to: the error's first sentence, the whole
- * text in its Details.
+ * Copy `text` (an error, for a bug report); when no clipboard method works, it shows in a window to read or copy by
+ * hand. `from` is the pressed element (clipboard.ts).
  */
-export const Problem: FC<{ error: string | null | undefined; what?: string; details?: DetailsSpec | null }> = ({ error, what, details }) => {
-  if (!error) return null;
-  const title = what ? `${what}: did not work` : "Did not work";
-  const short = firstSentence(error, 100);
-  const d = details ?? (short === error.trim() ? null : { title, body: <span style={{ wordBreak: "break-word" }}>{error}</span> });
-  return <Status ok={false} red label={title} detail={short} details={d} />;
+export const copyOut = async (text: string, from?: { ownerDocument?: unknown } | null): Promise<void> => {
+  if (await copyText(text, from)) { toast("The error text is on the clipboard.", "Copied"); return; }
+  showDetails({ title: "Couldn't copy", body: <Code>{text}</Code> });
 };
+
+const SMALL = { flex: 1, minWidth: 0, padding: "6px 2px", fontSize: "0.85em" };
+
+/**
+ * The buttons under a problem: Retry (when the failed step is known: `onRetry` runs it again, or reloads what failed
+ * to load) and Copy (`copy`, the whole error text). One row the D-pad moves across.
+ */
+export const RetryCopy: FC<{ copy: string; onRetry?: (() => unknown) | null; copyLabel?: string }> = ({ copy, onRetry, copyLabel = "Copy" }) => {
+  const [busy, setBusy] = useState<"retry" | "copy" | null>(null);
+  const tap = async (which: "retry" | "copy", fn: () => unknown) => {
+    if (busy) return;
+    setBusy(which);
+    try { await fn(); } catch { /* the step shows its own error */ } finally { setBusy(null); }
+  };
+  return (
+    <Focusable flow-children="horizontal" style={{ display: "flex", gap: 6, padding: "2px 0 6px" }}>
+      {onRetry && (
+        <DialogButton disabled={!!busy} onClick={() => tap("retry", onRetry)} style={SMALL}>
+          {busy === "retry" ? "Retrying…" : "Retry"}
+        </DialogButton>
+      )}
+      <DialogButton disabled={!!busy}
+        onClick={(e) => tap("copy", () => copyOut(copy, (e?.currentTarget ?? e?.target ?? null) as { ownerDocument?: unknown } | null))}
+        style={SMALL}>
+        {copyLabel}
+      </DialogButton>
+    </Focusable>
+  );
+};
+
+/**
+ * The last action that did not work, in red under the control it belongs to: the error's first sentence, the whole
+ * text in its Details, then Retry (with `onRetry`: the failed action again, or a reload) and Copy (the error text).
+ */
+export const Problem: FC<{ error: string | null | undefined; what?: string; details?: DetailsSpec | null; onRetry?: (() => unknown) | null }> =
+  ({ error, what, details, onRetry }) => {
+    if (!error) return null;
+    const title = what ? `${what}: did not work` : "Did not work";
+    const short = firstSentence(error, 100);
+    const d = details ?? (short === error.trim() ? null : { title, body: <span style={{ wordBreak: "break-word" }}>{error}</span> });
+    return (
+      <>
+        <Status ok={false} red label={title} detail={short} details={d} />
+        <RetryCopy copy={problemText(what, error)} onRetry={onRetry} />
+      </>
+    );
+  };
 
 /** Plain information in one line, focusable so the D-pad scrolls through it; the longer text goes in `details`. */
 export const Note: FC<{ children?: ReactNode; label?: ReactNode; details?: DetailsSpec | null }> = ({ children, label: text, details }) => (

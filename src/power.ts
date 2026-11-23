@@ -127,15 +127,16 @@ export const makeWriter = (send: Send, opts: WriterOpts = {}): Writer => {
 export const editSlot = (state: PowerState, options: PowerOptions | null | undefined): Slot =>
   state.active.slot === "low" ? "low" : options?.split_ac && state.active.slot === "ac" ? "ac" : "main";
 
-/** Every profile field, in power.py's FIELDS order (0.4: 19). */
+/** Every profile field, in power.py's FIELDS order (0.4: 19; T1-1 adds pl2_follow). */
 export const FIELDS = ["pl1_w", "pl2_w", "gpu_min_mhz", "gpu_max_mhz", "epp", "turbo",
   "cpu_max_pct", "cpu_min_pct", "soc_balance", "soc_offset", "gpu_power_profile",
-  "cpu_cap_p_mhz", "cpu_cap_e_mhz", "cpu_cap_lpe_mhz", "epp_p", "epp_e", "epp_lpe", "fan_mode", "scx_mode"] as const;
+  "cpu_cap_p_mhz", "cpu_cap_e_mhz", "cpu_cap_lpe_mhz", "epp_p", "epp_e", "epp_lpe", "fan_mode", "scx_mode",
+  "pl2_follow"] as const;
 export const EMPTY: PowerValues = {
   pl1_w: null, pl2_w: null, gpu_min_mhz: null, gpu_max_mhz: null, epp: null, turbo: null,
   cpu_max_pct: null, cpu_min_pct: null, soc_balance: null, soc_offset: null, gpu_power_profile: null,
   cpu_cap_p_mhz: null, cpu_cap_e_mhz: null, cpu_cap_lpe_mhz: null, epp_p: null, epp_e: null, epp_lpe: null,
-  fan_mode: null, scx_mode: null,
+  fan_mode: null, scx_mode: null, pl2_follow: null,
 };
 
 /** "Reset to device defaults": every field power control writes back to null; fan and scheduler mode stay. */
@@ -215,9 +216,29 @@ export const clampW = (v: number, range: Pick<PowerRange, "pl1_min" | "pl1_max">
   return Math.min(hi, Math.max(lo, Math.round(Number.isFinite(v) ? v : lo)));
 };
 
-/** The change a new sustained value makes: boost moves along when it would end up below it. */
-export const pl1Change = (pl1: number, pl2Shown: number | null | undefined): Partial<PowerValues> =>
-  pl2Shown != null && pl1 > pl2Shown ? { pl1_w: pl1, pl2_w: pl1 } : { pl1_w: pl1 };
+/** The change a new sustained value makes: boost moves along when it would end up below it (a following boost
+ * moves by itself, so it is left alone). */
+export const pl1Change = (pl1: number, pl2Shown: number | null | undefined, follow = false): Partial<PowerValues> =>
+  !follow && pl2Shown != null && pl1 > pl2Shown ? { pl1_w: pl1, pl2_w: pl1 } : { pl1_w: pl1 };
+
+/** power.py PL2_FOLLOW: boost = sustained × 1.25 on battery (or AC unknown), × 1.5 on AC. */
+export const PL2_FOLLOW = { battery: 1.25, ac: 1.5 } as const;
+
+/** "Steadier fps after loads" is on and acts: sustained set, boost left to it (an explicit boost wins). */
+export const follows = (v: Partial<PowerValues> | null | undefined): boolean =>
+  v?.pl2_follow === true && v.pl1_w != null && v.pl2_w == null;
+
+/** power.py follow_pl2: the boost a following slot gets, rounded half up, at most pl2Max, never below pl1. */
+export const followPl2 = (pl1: number, pl2Max: number, ac: boolean | null | undefined): number =>
+  Math.max(pl1, Math.min(pl2Max, Math.floor(pl1 * PL2_FOLLOW[ac === true ? "ac" : "battery"] + 0.5)));
+
+/** "follows sustained (+25 %)" / "(+50 %)" on AC. */
+export const followText = (ac: boolean | null | undefined): string =>
+  `follows sustained (+${Math.round((PL2_FOLLOW[ac === true ? "ac" : "battery"] - 1) * 100)} %)`;
+
+/** Whether a slot runs on AC: "ac" yes, "low" no (battery only), "main" as the charger is now. */
+export const slotAc = (slot: Slot, ac: boolean | null | undefined): boolean | null =>
+  slot === "ac" ? true : slot === "low" ? false : ac ?? null;
 
 /** "efficient" at the GPU's rpe, on a 50 MHz notch scale (Steam's slider places labels by notch index). */
 export const gpuNotches = (range: PowerRange, step = 50) => {
@@ -506,9 +527,18 @@ export const presetOf = (values: Partial<PowerValues> | null | undefined, range:
   return PRESET_FIELDS.every((f) => (v[f] ?? null) === null) ? "default" : "custom";
 };
 
-/** The PRESET_FIELDS values of a slot (Undo after a preset tap writes them back). */
-export const presetFieldsOf = (v: Partial<PowerValues> | null | undefined): Partial<PowerValues> =>
-  Object.fromEntries(PRESET_FIELDS.map((f) => [f, v?.[f] ?? null])) as Partial<PowerValues>;
+/** The PRESET_FIELDS values of a slot (Undo after a preset tap writes them back), plus pl2_follow when it is on
+ * (presetWrite may turn it off). */
+export const presetFieldsOf = (v: Partial<PowerValues> | null | undefined): Partial<PowerValues> => {
+  const out = Object.fromEntries(PRESET_FIELDS.map((f) => [f, v?.[f] ?? null])) as Partial<PowerValues>;
+  if (v?.pl2_follow === true) out.pl2_follow = true;
+  return out;
+};
+
+/** A preset tap's write: a preset with its own boost turns "Steadier fps after loads" off (its boost would win and
+ * the toggle would show on for nothing); one that leaves boost to the device (Performance) keeps it. */
+export const presetWrite = (pv: Partial<PowerValues>, stored: Partial<PowerValues> | null | undefined): Partial<PowerValues> =>
+  stored?.pl2_follow === true && pv.pl2_w != null ? { ...pv, pl2_follow: null } : pv;
 
 export const NOT_MEASURED = "not yet measured on this device";
 
@@ -516,7 +546,7 @@ export const NOT_MEASURED = "not yet measured on this device";
 export const presetLine = (which: PresetId | "custom" | "default", v: Partial<PowerValues>, measured: boolean): string => {
   if (which === "custom") return "Custom: set by hand";
   if (which === "default") return "Device defaults";
-  const head = `${PRESET_LABEL[which]}: ${watts(v.pl1_w)}, boost ${v.pl2_w == null ? "device default" : watts(v.pl2_w)}`;
+  const head = `${PRESET_LABEL[which]}: ${watts(v.pl1_w)}, boost ${v.pl2_w != null ? watts(v.pl2_w) : follows(v) ? "follows sustained" : "device default"}`;
   return measured ? head : `${head} · ${NOT_MEASURED}`;
 };
 
@@ -524,7 +554,7 @@ export const presetLine = (which: PresetId | "custom" | "default", v: Partial<Po
 export const presetDetails = (which: PresetId | "custom" | "default", v: Partial<PowerValues>, measures: MeasureResult[] | null | undefined): string[] => {
   const ms = measures ?? [];
   const out = [
-    "Battery, Balanced, Performance and Max set sustained and boost power, energy preference (per core type too), CPU boost and GPU power saving in one tap. Every other setting stays, a GPU speed cap included. Moving any of those sliders by hand makes it Custom.",
+    "Battery, Balanced, Performance and Max set sustained and boost power, energy preference (per core type too), CPU boost and GPU power saving in one tap. Every other setting stays, a GPU speed cap included. Moving any of those sliders by hand makes it Custom. A preset with its own boost (all but Performance) turns off Steadier fps after loads.",
   ];
   if (!ms.length) out.push("These are starting points from ONEXPLAYER's own presets and the device's firmware values, not yet measured on this device.");
   if (which !== "custom" && which !== "default") {

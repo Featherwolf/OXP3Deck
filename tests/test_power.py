@@ -362,6 +362,26 @@ class ActiveTest(Base):
         self.assertEqual(self.watts(MSR), 25)
         self.assertFalse(power.game(self.ctx, "abc")["ok"])
 
+    def test_a_late_game_call_from_the_same_session_changes_nothing(self):
+        self.on()
+        power.profile(self.ctx, "1091500", "Cyberpunk 2077", True)
+        self.set("1091500", pl1_w=15)
+        written = power.game(self.ctx, "1091500", ["s1", 2])["applied"]["written"]
+        self.assertEqual(written, [f"{MMIO}/pl1", f"{MSR}/pl1"])
+        res = power.game(self.ctx, None, ["s1", 1])           # sent before the one above, arrived after it
+        self.assertEqual((res["ok"], res["stale"], res["applied"]), (True, True, None))
+        self.assertEqual(self.watts(MSR), 15)                  # the game's profile stays
+        self.assertEqual(self.active()["key"], "1091500")
+        power.game(self.ctx, None, ["s1", 2])                  # the same seq again (a retry) goes
+        self.assertEqual(self.watts(MSR), 25)
+        power.game(self.ctx, "1091500", ["s2", 1])             # a reloaded frontend counts from 1 again
+        self.assertEqual(self.watts(MSR), 15)
+        power.game(self.ctx, None)                             # no order: always goes
+        self.assertEqual(self.watts(MSR), 25)
+        for bad in (["s1"], ["", 1], ["s1", -1], ["s1", True], ["s1", "2"], "s1", ["x" * 65, 1]):
+            self.assertFalse(power.game(self.ctx, "1091500", bad)["ok"], bad)
+        self.assertEqual(self.watts(MSR), 25)
+
     def test_disabled_writes_nothing(self):
         power.profile(self.ctx, "1", None, True)
         self.set("1", pl1_w=10)
@@ -1140,6 +1160,68 @@ class FixTest(Base):
         self.assertTrue(res["ok"], res)
         self.assertEqual(self.sc.actions(), [argv("unmask", PPD), argv("enable", PPD), argv("start", PPD)])
 
+    def test_fix_all_runs_each_fix_and_keeps_undo_per_item(self):
+        self.assertFalse(power.enable(self.ctx, True)["ok"])                # thermald blocks turning it on
+        res = power.fix_all(self.ctx, ["ppd", "thermald", "ppd"])         # each id once
+        self.assertTrue(res["ok"], res)
+        self.assertIsNone(res["error"])
+        from tests.test_xess import ts_fields
+        self.assertEqual(set(res), ts_fields("PowerFixAllRes") | {"ok", "error"})
+        self.assertEqual(set(res["results"][0]), ts_fields("PowerFixItem"))
+        self.assertEqual([(r["id"], r["ok"], r["error"]) for r in res["results"]],
+                         [("ppd", True, None), ("thermald", True, None)])
+        self.assertEqual([s["action"] for s in res["results"][0]["steps"]], ["stop", "disable", "mask"])
+        self.assertEqual(self.sc.actions(), [argv("stop", PPD), argv("disable", PPD), argv("mask", PPD),
+                                             argv("stop", "thermald.service"), argv("disable", "thermald.service"),
+                                             argv("mask", "thermald.service")])
+        self.assertEqual(res["conflicts"], [])
+        self.assertEqual(sorted(f["id"] for f in res["fixed"]), ["ppd", "thermald"])
+        self.assertEqual(set(self.record()), {"ppd", "thermald"})          # one record each
+        self.assertIsNone(res["state"]["cpu_blocked"])
+        self.assertIsNone(res["applied"])                                     # power control is still off
+        json.dumps(res)
+        self.on()                                                             # now it turns on
+        self.sc.calls.clear()
+        res = power.unfix(self.ctx, "thermald")                               # Undo: one item, the other stays off
+        self.assertTrue(res["ok"], res)
+        self.assertEqual(self.sc.actions(), [argv("unmask", "thermald.service"), argv("enable", "thermald.service"),
+                                             argv("start", "thermald.service")])
+        self.assertEqual(set(self.record()), {"ppd"})
+        self.assertEqual(self.sc.units[PPD], ["masked", "masked", False])
+
+    def test_fix_all_reports_a_partial_failure_per_item(self):
+        self.only(PPD, "thermald.service", "tuned.service", "tuned-ppd.service")
+        real = self.sc.__call__
+
+        def failing(av, **kw):          # thermald's disable fails; ppd's goes through
+            if "disable" in av and "thermald.service" in av:
+                return sysexec.Result(1, "", "Failed to disable unit: Access denied")
+            return real(av, **kw)
+
+        with mock.patch.object(sysexec, "run", failing):
+            res = power.fix_all(self.ctx, ["thermald", "tuned", "ppd"])
+        self.assertFalse(res["ok"])
+        by = {r["id"]: r for r in res["results"]}
+        self.assertEqual(list(by), ["thermald", "tuned", "ppd"])
+        self.assertFalse(by["thermald"]["ok"])
+        self.assertIn("thermald.service", by["thermald"]["error"])
+        self.assertEqual(by["tuned"]["error"], "tuned is not running")         # refused, nothing run for it
+        self.assertTrue(by["ppd"]["ok"], by["ppd"])                           # the rest still ran
+        self.assertEqual(res["error"], "2 of 3 were not turned off")
+        self.assertEqual(set(self.record()), {"thermald", "ppd"})             # the failed one keeps its record (Undo)
+        self.assertFalse(any("tuned" in u for a in self.sc.actions() for u in a))
+
+    def test_fix_all_refuses_bad_input_with_nothing_run(self):
+        for cids in (None, "ppd", [], ["ppd", 3], {"ppd": 1}, ["ppd"] * (len(power.FIXABLE) + 1)):
+            res = power.fix_all(self.ctx, cids)
+            self.assertFalse(res["ok"], cids)
+            self.assertEqual(res["results"], [], cids)
+            self.assertIn("power_fix_all", res["error"])
+            json.dumps(res)
+        res = power.fix_all(self.ctx, ["hhd", "../x"])                         # each refused by fix() itself
+        self.assertEqual([(r["id"], r["ok"]) for r in res["results"]], [("hhd", False), ("../x", False)])
+        self.assertEqual(self.sc.actions(), [])
+
     def test_unfix(self):
         self.only(PPD)
         self.on()
@@ -1287,7 +1369,9 @@ class NothingThereTest(Base):
         self.assertEqual(set(info["profiles"]["default"]["main"]), ts_fields("PowerValues"))
         self.assertEqual(set(power.summary(self.ctx)) - {"ok", "error"}, ts_fields("PowerSummary"))
         res = power.enable(self.ctx, True)
-        self.assertEqual(set(res) - {"conflicts"}, ts_fields("PowerChangeRes") - {"conflicts"})
+        self.assertEqual(set(res) - {"conflicts"}, ts_fields("PowerChangeRes") - {"conflicts", "stale"})
+        self.assertLessEqual(set(power.game(self.ctx, None, ["s", 2])), ts_fields("PowerChangeRes"))
+        self.assertEqual(set(power.game(self.ctx, None, ["s", 1])), ts_fields("PowerChangeRes") - {"conflicts"})
         self.assertEqual(set(res["applied"]), ts_fields("PowerApply"))
         self.assertEqual(set(power.fix(self.ctx, "ppd")), ts_fields("PowerFixRes") | {"ok", "error"})
         self.units = units("bazzite")
@@ -1333,11 +1417,12 @@ class NewFieldsTest(NewBase):
                                  ("soc_offset", 4, 3), ("cpu_cap_p_mhz", 399, 400), ("cpu_cap_lpe_mhz", 6001, 6000),
                                  ("gpu_power_profile", "fast", "power_saving"), ("epp_e", "default", "power"),
                                  ("fan_mode", "loud", "quiet"), ("scx_mode", "lowlatency", "gaming"),
-                                 ("soc_balance", True, 3), ("cpu_max_pct", "70", 70)):
+                                 ("soc_balance", True, 3), ("cpu_max_pct", "70", 70), ("pl2_follow", 1, True),
+                                 ("pl2_follow", "on", False)):
             self.refused(field, **{field: bad})
             self.set(**{field: good})
             self.set(**{field: None})
-        self.assertEqual(len(power.FIELDS), 19)
+        self.assertEqual(len(power.FIELDS), 20)
 
     def test_bad_values_in_the_file_read_as_null(self):
         main = dict(power._empty_values(), cpu_max_pct=20, soc_balance=4, fan_mode="loud", epp_p="power",
@@ -2030,6 +2115,102 @@ class LowBatteryTest(Base):
         self.assertEqual((self.watts(MSR), self.watts(MSR, "short_term")), (7, 52))
         self.set(slot="low", pl1_w=9)                           # edits what runs: applied at once
         self.assertEqual(self.watts(MSR), 9)
+
+
+class Pl2FollowTest(Base):
+    """T1-1 (amended by C-3): opt-in "Steadier fps after loads", boost = sustained +25 % (battery) / +50 % (AC)."""
+
+    def boost(self):
+        return self.watts(MSR, "short_term"), self.watts(MMIO, "short_term")
+
+    def plug_and_settle(self, online):
+        self.tick()
+        self.plug(online)
+        for _ in range(4):
+            self.tick(1.0)
+
+    def test_off_by_default_everywhere(self):
+        info = power.info(self.ctx, False)["info"]
+        self.assertIsNone(info["profiles"]["default"]["main"]["pl2_follow"])
+        power.profile(self.ctx, "9", None, True)
+        self.assertIsNone(power.info(self.ctx, False)["info"]["profiles"]["9"]["main"]["pl2_follow"])
+        self.assertIsNone(power._battery_values()["pl2_follow"])
+        self.on()
+        self.set(pl1_w=12)
+        self.assertEqual(self.boost(), (52, 52))                 # off: the firmware's boost, as before
+
+    def test_follow_pl2(self):
+        self.assertEqual(power.follow_pl2(12, 52, False), 15)
+        self.assertEqual(power.follow_pl2(10, 52, None), 13)     # 12.5 rounds half up (as power.ts), AC unknown
+        self.assertEqual(power.follow_pl2(12, 52, True), 18)
+        self.assertEqual(power.follow_pl2(40, 52, True), 52)     # at most pl2_max
+        self.assertEqual(power.follow_pl2(40, 30, True), 40)     # never below sustained
+
+    def test_follow_pl2_matches_the_shared_fixture(self):
+        path = os.path.join(os.path.dirname(__file__), "fixtures", "power", "follow.json")
+        with open(path) as f:
+            cases = json.load(f)["cases"]
+        self.assertGreaterEqual(len(cases), 8)
+        for c in cases:
+            self.assertEqual(power.follow_pl2(c["pl1"], c["pl2_max"], c["ac"]), c["pl2"], c)
+
+    def test_battery_and_ac(self):
+        self.on()
+        res = self.set(pl1_w=12, pl2_follow=True)
+        self.assertEqual(self.boost(), (15, 15))
+        self.assertEqual((res["state"]["applied_values"]["pl2_w"], res["state"]["applied_values"]["pl2_follow"]),
+                         (15, True))
+        self.plug_and_settle(True)
+        self.assertEqual(self.boost(), (18, 18))
+        self.set(pl1_w=40)
+        self.assertEqual(self.boost(), (52, 52))
+        self.plug_and_settle(False)
+        self.assertEqual(self.watts(MSR), 35)                     # battery ceiling
+        self.assertEqual(self.boost(), (44, 44))                  # of the clamped sustained power
+
+    def test_needs_sustained_and_an_explicit_boost_wins(self):
+        self.on()
+        self.set(pl2_follow=True)
+        self.assertEqual(self.w.calls, [])                        # no sustained value: nothing to follow
+        self.set(pl1_w=16, pl2_w=30)
+        self.assertEqual(self.boost(), (30, 30))
+        st = power.state(self.ctx)["state"]
+        self.assertIsNone(st["applied_values"]["pl2_follow"])
+        self.set(pl2_w=None)
+        self.assertEqual(self.boost(), (20, 20))
+        self.set(pl2_follow=None)
+        self.assertEqual(self.boost(), (52, 52))
+
+    def test_a_game_profile_has_its_own(self):
+        self.on()
+        self.set(pl1_w=12)
+        power.profile(self.ctx, "1091500", "Cyberpunk 2077", True)
+        self.set(key="1091500", pl2_follow=True)
+        self.assertEqual(self.boost(), (52, 52))                  # Default runs
+        power.game(self.ctx, "1091500")
+        self.assertEqual(self.boost(), (15, 15))
+        power.game(self.ctx, None)
+        self.assertEqual(self.boost(), (52, 52))
+
+    def test_low_battery(self):
+        pf.battery_pct(self.ctx, 50, "Discharging")
+        self.on()
+        self.set(pl1_w=24, pl2_follow=True)
+        self.assertEqual(self.boost(), (30, 30))
+        pf.battery_pct(self.ctx, 10)
+        self.tick(power.LOW_CHECK_S)
+        self.tick()
+        # the Battery preset's 10 W runs; boost: 10 W following (13 W) is lower than the preset's 15 W
+        self.assertEqual((self.watts(MSR), self.boost()), (10, (13, 13)))
+        p = power._get(self.ctx)
+        follow = dict(power._empty_values(), pl1_w=8, pl2_follow=True)
+        merged = power._merge_low(p, follow, power._battery_values())
+        # 8 W following is 10 W boost, lower than the preset's 15 W: it keeps following (never raises a limit)
+        self.assertEqual((merged["pl1_w"], merged["pl2_w"], merged["pl2_follow"]), (8, None, True))
+        merged = power._merge_low(p, power._empty_values(), dict(power._empty_values(), pl1_w=12, pl2_follow=True))
+        self.assertEqual((merged["pl1_w"], merged["pl2_w"], merged["pl2_follow"]), (12, None, True))
+        merged = power._merge_low(p, follow, dict(power._empty_values(), pl2_follow=False))
+        self.assertTrue(merged["pl2_follow"])                    # the low slot cannot raise boost by turning it off
 
 
 class GameNowTest(Base):

@@ -3,20 +3,21 @@ import { definePlugin, routerHook } from "@decky/api";
 import { DialogButton, Focusable, staticClasses } from "@decky/ui";
 import { MdSettings, MdVideogameAsset } from "react-icons/md";
 
-import { power_game } from "./backend";
 import { watchAutoSetup } from "./components/AutoSetup";
+import { Boundary } from "./components/Boundary";
 import { openPage, ROUTE } from "./nav";
-import { FullPage } from "./pages/Full";
+import { FullPageRoute } from "./pages/Full";
 import { QuickPanel } from "./pages/Quick";
 import { onMainAppChange, runningApp } from "./steam";
-import { clearPendingFor, flushPower, notePower, stopPolling } from "./store";
+import { clearPendingFor, flushPower, stopPolling, switchGame } from "./store";
 
 export default definePlugin(() => {
   // exact: false, so /oxp3deck/<tab> reaches the page and SidebarNavigation picks the tab
-  routerHook.addRoute(ROUTE, FullPage, { exact: false });
-  // power profiles follow the running game: the backend hears every change, and the game running at load
-  const stopPower = onMainAppChange((a) => { power_game(a).then(notePower); });
-  power_game(runningApp()?.appid ?? null).then(notePower);
+  routerHook.addRoute(ROUTE, FullPageRoute, { exact: false });
+  // power profiles follow the running game: the backend hears every change, and the game running at load, one call
+  // at a time and only the newest waiting one (store.ts switchGame); a failure shows in the Power group
+  const stopPower = onMainAppChange((a) => switchGame(a));
+  switchGame(runningApp()?.appid ?? null);
   // a game that starts again has applied its "Restart the game" changes
   const stopPending = onMainAppChange((a) => clearPendingFor(a));
   // automatic setup: a few seconds after a game quits (never while it runs), the session events, the library scan
@@ -33,7 +34,7 @@ export default definePlugin(() => {
         </DialogButton>
       </Focusable>
     ),
-    content: <QuickPanel />,
+    content: <Boundary what="Quick Access panel" wrap="section"><QuickPanel /></Boundary>,
     icon: <MdVideogameAsset />,
     onDismount() {
       stopPower();

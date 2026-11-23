@@ -6,13 +6,14 @@ import { callable } from "@decky/api";
 
 import type {
   AutoChangeIn, AutoFacts, AutoGameRes, AutoMode, AutoPendingRes, AutoPlanRes, AutoSessionRes, AutoStateRes, AutoUndoRes,
-  ApplyOpts, CatalogRes, OptiChoices, OptiInfoRes, DriversRes, ExtrasInfoRes, ExtrasOptions, ExtrasWhat, GameInfoRes, JobListRes, JobRes, JobStart, KernelRes, Overview, Oxp3UpdateCheck,
-  PlanRes, PowerAdviceRes, PowerChangeRes, PowerFixRes, PowerImportRes, PowerInfoRes, PowerLiveRes, PowerOptions, PowerStateRes, PowerValues, Res,
+  ApplyOpts, CatalogRes, FileFreshRes, OptiChoices, OptiInfoRes, DriversRes, ExtrasInfoRes, ExtrasOptions, ExtrasWhat, GameInfoRes, JobListRes, JobRes, JobStart, KernelRes, Overview, Oxp3UpdateCheck,
+  PlanRes, PowerAdviceRes, PowerChangeRes, PowerFixAllRes, PowerFixRes, PowerImportRes, PowerInfoRes, PowerLiveRes, PowerOptions, PowerStateRes, PowerValues, Res,
   ShimRes, Slot, StatusRes, XessStateRes, XessUpdateCheck,
 } from "./types";
 
 // ---- overview ----------------------------------------------------------------------------------------------------
 export const get_overview = callable<[], Overview>("get_overview");
+export const file_fresh = callable<[file: string], FileFreshRes>("file_fresh");
 
 // ---- oxp3-tool ---------------------------------------------------------------------------------------------------
 export const oxp3_status = callable<[], StatusRes>("oxp3_status");
@@ -66,10 +67,11 @@ export const power_enable = callable<[on: boolean], PowerChangeRes>("power_enabl
 export const power_options = callable<[opts: Partial<PowerOptions>], PowerChangeRes>("power_options");
 export const power_set = callable<[key: string, slot: Slot, values: Partial<PowerValues>], PowerChangeRes>("power_set");
 export const power_profile = callable<[appid: string, name: string | null, on: boolean], PowerChangeRes>("power_profile");
-export const power_game = callable<[appid: string | null], PowerChangeRes>("power_game");
+export const power_game = callable<[appid: string | null, order?: [session: string, seq: number] | null], PowerChangeRes>("power_game");
 export const power_take_control = callable<[], PowerChangeRes>("power_take_control");
 export const power_import_sdtdp = callable<[], PowerImportRes>("power_import_sdtdp");
 export const power_fix = callable<[cid: string], PowerFixRes>("power_fix");
+export const power_fix_all = callable<[cids: string[]], PowerFixAllRes>("power_fix_all");
 export const power_unfix = callable<[cid: string], PowerFixRes>("power_unfix");
 export const power_live = callable<[], PowerLiveRes>("power_live");
 export const power_selftest = callable<[], JobStart>("power_selftest");

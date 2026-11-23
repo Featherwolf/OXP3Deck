@@ -4,7 +4,7 @@
 import { fit } from "./autosetup";
 import { friendlyName, lockedLine } from "./conflicts";
 import { liveLine } from "./live";
-import { blockers, capRows, editSlot, EMPTY, fwValues, GOVERNOR_PERFORMANCE, lowStored, shown, type Slot, usesCaps, watts } from "./power";
+import { blockers, capRows, editSlot, EMPTY, follows, fwValues, GOVERNOR_PERFORMANCE, lowStored, shown, type Slot, usesCaps, watts } from "./power";
 import { firstSentence, MAX_LINE } from "./text";
 import type { ExtrasState, Live, PowerConflict, PowerInfo, PowerState, PowerValues, ScxMode, XessSummary } from "./types";
 
@@ -147,6 +147,13 @@ export const gameSummary = (name: string, mode: "auto" | "manual" | null, ownPro
   return `${fit(name || "This game", Math.max(10, room))} · ${tail}`;
 };
 
+/**
+ * The "More for this game" button's line (quick This game): the ✗ rows that only the Games tab shows (`problems`),
+ * then what is there. Short: ≤ MAX_LINE.
+ */
+export const gameMoreLine = (problems: number): string =>
+  fit(problems > 0 ? `${problems} ${problems > 1 ? "problems" : "problem"} to check there. Driver, logs, Proton, tips.` : "Driver, DirectX 12, logs, Proton, tips and more.", MAX_LINE);
+
 const profileName = (s: PowerState) => (s.active.key === "default" ? "Default" : s.active.name || `App ${s.active.key}`);
 const mhz = (x: number | null) => (x == null ? "default" : `${x}`);
 
@@ -167,7 +174,7 @@ export const powerSummary = (s: PowerState | null, v: PowerValues | null,
     s.low?.active || s.active.slot === "low" ? "Low battery" : null,
     opts.preset || null,
     x.pl1_w == null ? "default" : watts(x.pl1_w),
-    `boost ${x.pl2_w == null ? "default" : watts(x.pl2_w)}`,
+    `boost ${x.pl2_w != null ? watts(x.pl2_w) : follows(x) ? "follows" : "default"}`,
     gpu, profileName(s),
     opts.yieldedTo ? `Left to ${opts.yieldedTo}` : null,
     opts.gpuHeld ? "GPU held back" : null,

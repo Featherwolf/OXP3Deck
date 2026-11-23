@@ -205,7 +205,7 @@ export const OptiRows: FC<{ app: RunningApp; quick?: boolean; running: boolean; 
   const kindLine = setup.kind === "tested" ? "OXP3 Deck's tested setup for this game."
     : setup.kind === "known" ? `Set up as OptiScaler's wiki documents this game${info?.fit === "poor" ? " (with limits on this device)" : ""}; not tested on this device.`
     : "Experimental: no one has tested OptiScaler with this game here. OXP3 Deck found the game's exe, its graphics API and a free file name from the game's files; the steps in the game are the generic ones.";
-  if (res.data && !res.data.ok) return <Problem what="OptiScaler" error={res.data.error} />;
+  if (res.data && !res.data.ok) return <Problem what="OptiScaler" error={res.data.error} onRetry={res.reload} />;
 
   const lab = choiceLabels(choices);
   const pl = planLines(info?.launch ?? rec?.plan ?? info?.launch_new ?? null, rec?.dropped);
@@ -381,7 +381,7 @@ export const OptiRows: FC<{ app: RunningApp; quick?: boolean; running: boolean; 
         </WithDetails>
       )}
       {myJob && <JobView job={myJob} quick={quick} />}
-      <Problem what="OptiScaler" error={act.error} />
+      <Problem what="OptiScaler" error={act.error} onRetry={act.retry} />
       <Problem what="OptiScaler launch options" error={launchErr} />
       {waiting && rec?.pending && (
         <Status ok={null} label={`Will be added when you quit ${app.name}`} detail="OptiScaler's launch options."

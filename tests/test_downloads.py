@@ -133,6 +133,45 @@ class LatestReleaseTest(NetTestCase):
         self.assertEqual(downloads.latest_release_tag(REPO), "v1.3+2")
 
 
+class NewestReleaseTest(NetTestCase):
+    """ROADMAP T1-9 / FUT-07: OXP3Deck marks every 0.x release a pre-release, which /releases/latest skips."""
+    REPO = "Featherwolf/OXP3Deck"
+    API = "https://api.github.com/repos/Featherwolf/OXP3Deck/releases?per_page=30"
+
+    def test_highest_semver_pre_releases_included(self):
+        rels = [{"tag_name": "v0.4.2", "prerelease": True}, {"tag_name": "v0.10.0-beta.1", "prerelease": True},
+                {"tag_name": "v0.6.0", "draft": True}, {"tag_name": "nightly"}, {"tag_name": "v0.9.3"},
+                {"tag_name": "../v9.9.9"}, "junk", {"tag_name": 7}]
+        net = self.net({self.API: FakeResponse(json.dumps(rels).encode())})
+        self.assertEqual(downloads.newest_release_tag(self.REPO), "v0.10.0-beta.1")
+        self.assertEqual(len(net.requests), 1)
+        self.assertEqual(net.requests[0].get_header("Accept"), "application/vnd.github+json")
+
+    def test_semver_order(self):
+        k = downloads.semver_key
+        self.assertLess(k("v1.0.0-alpha"), k("v1.0.0-alpha.1"))
+        self.assertLess(k("1.0.0-alpha.1"), k("1.0.0-beta"))
+        self.assertLess(k("1.0.0-beta.2"), k("1.0.0-beta.11"))
+        self.assertLess(k("1.0.0-rc.1"), k("1.0.0"))
+        self.assertLess(k("0.9.9"), k("0.10.0"))
+        self.assertEqual(k("v0.5.0"), k("0.5.0+build.3"))
+        for bad in (None, "", "0.5", "v0.5.0.1", "latest", "1.2.3-"):
+            self.assertIsNone(k(bad), bad)
+
+    def test_failures(self):
+        self.net({self.API: FakeResponse(b"[{\"tag_name\": \"nightly\"}]")})
+        with self.assertRaisesRegex(DownloadError, "no version tag"):
+            downloads.newest_release_tag(self.REPO)
+        self.net({self.API: FakeResponse(b"<html>")})
+        with self.assertRaisesRegex(DownloadError, "not JSON"):
+            downloads.newest_release_tag(self.REPO)
+        self.net({self.API: http_error(self.API, 403)})
+        with self.assertRaisesRegex(DownloadError, "rate limit"):
+            downloads.newest_release_tag(self.REPO)
+        with self.assertRaises(DownloadError):
+            downloads.newest_release_tag("../x")
+
+
 class DownloadTest(NetTestCase):
     URL = f"https://github.com/{REPO}/releases/download/20261104/xess-xmx-linux-20261104.zip"
     BODY = os.urandom(300_000)

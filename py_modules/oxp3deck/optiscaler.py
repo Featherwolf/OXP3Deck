@@ -314,25 +314,29 @@ def _record_path(ctx) -> str:
     return os.path.join(ctx.settings_dir, RECORD_NAME)
 
 
+RECORD_VERSION = 1
+RECORD_KEYS = ("version", "global", "games", "packages")
+
+
 def _empty() -> dict:
-    return {"version": 1, "global": {"overlay": False}, "games": {}, "packages": {}}
+    return {"version": RECORD_VERSION, "global": {"overlay": False}, "games": {}, "packages": {}}
 
 
 def _load(ctx) -> dict:
-    raw = context.read_small(_record_path(ctx), 4 << 20)
+    """The record. Private keys (never saved as such): _problem (context.load_guarded: damaged or from a newer OXP3
+    Deck; saves are refused) and _keep (top-level and "global" keys this version does not know, written back as
+    they were). Game entries are kept whole."""
     rec = _empty()
-    if raw is None:
+    data, problem = context.load_guarded(_record_path(ctx), RECORD_VERSION, 4 << 20)
+    rec["_problem"] = problem
+    rec["_keep"] = {"top": {}, "global": {}}
+    if data is None:
         return rec
-    try:
-        data = json.loads(raw.decode("utf-8"))
-    except ValueError:
-        log.warning("optiscaler: %s is not valid JSON; starting empty", _record_path(ctx))
-        return rec
-    if not isinstance(data, dict):
-        return rec
+    rec["_keep"]["top"] = {k: v for k, v in data.items() if k not in RECORD_KEYS}
     g = data.get("global")
     if isinstance(g, dict):
         rec["global"]["overlay"] = g.get("overlay") is True
+        rec["_keep"]["global"] = {k: v for k, v in g.items() if k != "overlay"}
     games = data.get("games")
     if isinstance(games, dict):
         rec["games"] = {k: v for k, v in games.items() if _APPID.match(str(k)) and isinstance(v, dict)}
@@ -342,9 +346,54 @@ def _load(ctx) -> dict:
     return rec
 
 
+def _blob(rec: dict) -> bytes:
+    keep = rec.get("_keep") or {}
+    out = dict(keep.get("top") or {})
+    out.update({k: v for k, v in rec.items() if not k.startswith("_")})
+    out["global"] = dict(keep.get("global") or {}, **rec["global"])
+    out["version"] = RECORD_VERSION
+    return (json.dumps(out, indent=1, sort_keys=True) + "\n").encode("utf-8")
+
+
 def _save(ctx, rec: dict) -> None:
-    blob = (json.dumps(rec, indent=1, sort_keys=True) + "\n").encode("utf-8")
-    context.write_atomic(_record_path(ctx), blob, 0o644)
+    """Raises context.Refused while the record has a problem (record_why); OSError."""
+    context.guard_save(_record_path(ctx), rec.get("_problem"))
+    context.write_atomic(_record_path(ctx), _blob(rec), 0o644)
+
+
+def record_why(ctx) -> str | None:
+    """Why the record cannot be saved now (damaged until Start fresh, or from a newer OXP3 Deck), or None. Every
+    install, change and remove is refused before it starts: its files would otherwise go unrecorded."""
+    with _LOCK:
+        p = _load(ctx)["_problem"]
+    return context.refused_text(RECORD_NAME, p) if p else None
+
+
+def file_problem(ctx) -> dict | None:
+    """FileProblem {file, kind "damaged" | "newer", copy, version} for the Status section, or None."""
+    try:
+        with _LOCK:
+            p = _load(ctx)["_problem"]
+    except Exception:
+        log.exception("optiscaler: file_problem")
+        return None
+    return dict(p, file=RECORD_NAME) if p else None
+
+
+def start_fresh(ctx) -> dict:
+    """{ok, error}: Start fresh (the user tapped it): the damaged or newer record is set aside and an empty one
+    written. OptiScaler files installed earlier stay in those games (OXP3 Deck then sees them as another tool's)."""
+    try:
+        with _LOCK:
+            if _load(ctx)["_problem"] is None:
+                return {"ok": True, "error": None}
+            context.start_fresh(_record_path(ctx), _blob(_empty()), 0o644)
+        return {"ok": True, "error": None}
+    except context.Refused as e:
+        return {"ok": False, "error": str(e)}
+    except OSError as e:
+        log.warning("optiscaler: start fresh: %s", e)
+        return {"ok": False, "error": f"OptiScaler: cannot write {RECORD_NAME}: {e.strerror or e}"}
 
 
 def _game_rec(ctx, appid: str) -> dict | None:
@@ -965,6 +1014,9 @@ def check(ctx, appid, *, installing: bool, auto: bool = False, ignore_running: b
     appid = str(appid or "")
     if not _APPID.match(appid):
         return no(NO_SETUP)
+    why = record_why(ctx)
+    if why:
+        return no(why)
     name = _name(ctx, appid)
     if not ignore_running and steamlib.running_game(ctx) == appid:
         return no(f"Quit {name} first.")
@@ -1306,6 +1358,8 @@ def prune_cache(ctx) -> list[str]:
         return []
     with _LOCK:
         rec = _load(ctx)
+    if rec["_problem"]:
+        return []                  # the builds the games use are not known
     used = {g.get("build") for g in rec["games"].values()} | set(BUILDS)
     gone = []
     for n in names:
@@ -1997,6 +2051,9 @@ def options(ctx, opts) -> dict:
     """{overlay: bool}: global; each installed game's ini is rewritten when that game is not running."""
     if not isinstance(opts, dict) or not isinstance(opts.get("overlay"), bool):
         return {"ok": False, "error": "OptiScaler options: overlay must be true or false", "opti": None}
+    why = record_why(ctx)
+    if why:
+        return {"ok": False, "error": why, "opti": None}
     running = steamlib.running_game(ctx)
     done, later, failed = [], [], []
     with _LOCK:

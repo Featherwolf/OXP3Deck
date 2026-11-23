@@ -5,8 +5,8 @@ import { readFileSync } from "node:fs";
 import { test } from "node:test";
 
 import {
-  cameBackText, controls, explainBody, fixable, FIXABLE, fixConfirm, fixedLines, friendlyName, lockedLine, MASKABLE,
-  oneLine, undoConfirm,
+  cameBackText, controls, explainBody, fixable, FIXABLE, fixAllConfirm, fixAllFailures, fixAllRows, fixConfirm, fixedLines,
+  friendlyName, lockedLine, MASKABLE, oneLine, undoConfirm,
 } from "../../src/conflicts.ts";
 
 const py = readFileSync(new URL("../../py_modules/oxp3deck/power.py", import.meta.url), "utf8");
@@ -225,4 +225,35 @@ test("controls and lockedLine", () => {
 test("the Fix for me and Undo dialogs carry their effect tag (Now)", () => {
   assert.equal(fixConfirm({ id: "ppd", name: "power-profiles-daemon", fix_units: ["power-profiles-daemon.service"] }).effect, "now");
   assert.equal(undoConfirm({ id: "ppd", name: "x", units: [] }, "").effect, "now");
+});
+
+test("Fix all: only the rows with their own Fix for me, one short confirm with every command", () => {
+  const rows = [row("ppd"), row("thermald"), row("hhd", { kind: "shares", ignorable: true }), row("tuned", { ignored: true }),
+    row("powerstation", { fix_units: [] })];
+  assert.deepEqual(fixAllRows(rows).map((r) => r.id), ["ppd", "thermald"]);
+  assert.deepEqual(fixAllRows([row("hhd", { fix_units: ["hhd@x.service"] })]), [], "never an id outside FIXABLE");
+  const d = fixAllConfirm(fixAllRows(rows), true);
+  assert.equal(d.title, "Turn off 2 programs?");
+  assert.match(d.text, /^OXP3 Deck turns off Power Profiles and Thermal daemon, one after another\./);
+  assert.match(d.text, /Nothing is uninstalled\./);
+  assert.match(d.text, /Each gets its own Undo\./);
+  assert.match(d.text, /energy preference and CPU boost/, "ppd is a cpu conflict and power control is on");
+  assert.doesNotMatch(fixAllConfirm([row("thermald"), row("powerstation")], true).text, /energy preference/);
+  assert.doesNotMatch(d.text, /systemctl|\.service/, "the commands are lines, not text");
+  // every command of each row's own Fix for me, under its name, in order
+  assert.deepEqual(d.lines, ["# Power Profiles", ...fixConfirm(row("ppd"), true).lines,
+    `# ${friendlyName("thermald")}`, ...fixConfirm(row("thermald"), true).lines]);
+  assert.match(d.text, /Masked ones/);
+  assert.doesNotMatch(fixAllConfirm([row("powerstation"), row("oxp3-tdp-sync")]).text, /Masked/, "nothing masked");
+  assert.equal(d.ok, "Turn them off");
+  assert.equal(d.effect, "now");
+  assert.ok(d.text.length < 260, d.text);
+});
+
+test("Fix all: each failure keeps its own name and error", () => {
+  const out = fixAllFailures([{ id: "ppd", ok: true, error: null }, { id: "thermald", ok: false, error: "thermald.service: Access denied" },
+    { id: "powerstation", ok: false, error: null }], [row("powerstation", { name: "PowerStation" })]);
+  assert.deepEqual(out, [{ id: "thermald", name: friendlyName("thermald"), error: "thermald.service: Access denied" },
+    { id: "powerstation", name: friendlyName("powerstation", "PowerStation"), error: "failed" }]);
+  assert.deepEqual(fixAllFailures([]), []);
 });

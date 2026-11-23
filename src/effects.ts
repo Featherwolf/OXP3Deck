@@ -20,7 +20,7 @@ const XESS_PKG: Effect[] = ["idle", "session"];
 /** The tag of every setting, by setting id (the table in DESIGN.md). */
 export const EFFECTS: Record<string, EffectSpec> = {
   "power.enable": NOW, "power.game_profile": NOW,
-  "power.pl1": NOW, "power.pl2": NOW, "power.gpu_min": NOW, "power.gpu_max": NOW, "power.epp": NOW, "power.turbo": NOW,
+  "power.pl1": NOW, "power.pl2": NOW, "power.pl2_follow": NOW, "power.gpu_min": NOW, "power.gpu_max": NOW, "power.epp": NOW, "power.turbo": NOW,
   "power.reset": NOW, "power.new_profile": NOW, "power.delete_profile": NOW,
   "power.per_game": NOW, "power.split_ac": NOW, "power.extended": NOW, "power.poll_s": NOW,
   "power.cpu_max_pct": NOW, "power.soc": NOW, "power.soc_offset": NOW, "power.gpu_profile": NOW, "power.cpu_min_pct": NOW,
@@ -45,7 +45,8 @@ export const EFFECTS: Record<string, EffectSpec> = {
   "game.opti": "game", "game.opti_upscaler": "game", "game.opti_fg": "game", "game.opti_input": "game",
   "game.opti_remove": "game", "game.opti_update": "game", "game.opti_overlay": "game",
   "kernel.try": "reboot", "kernel.keep": "reboot",
-  "oxp3.install": NOW,
+  "oxp3.install": NOW, "updates.auto": NOW,
+  "settings.fresh": NOW,
   reboot: NOW,
 };
 

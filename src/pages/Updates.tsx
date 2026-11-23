@@ -11,6 +11,8 @@ import { JobView, TaskSection } from "../components/JobView";
 import { useRunningApp } from "../steam";
 import { useCurrentJob, useResource } from "../store";
 import { firstSentence, fitsOneLine } from "../text";
+import { FileRows } from "../components/FileRows";
+import { AutoCheckToggle, PluginNotice, useAutoChecks } from "../components/UpdateRows";
 import type { Job, JobListRes, Overview, Oxp3UpdateCheck, XessStateRes, XessUpdateCheck } from "../types";
 import { when } from "../util";
 import { checkText, offerLabel, repairText, xessOffer } from "../xessoffer";
@@ -58,6 +60,7 @@ export const UpdatesTab: FC = () => {
   const o = ov.data?.ok ? ov.data : null;
   const i = o?.oxp3;
   const x = xs.data?.ok ? xs.data.xess : null;
+  useAutoChecks(o);
 
   // a usable oxp3-tool updates only when the check found something; a missing or too old one always gets the offer
   const check = oc.data?.ok ? oc.data : null;
@@ -77,9 +80,10 @@ export const UpdatesTab: FC = () => {
   return (
     <>
       <TaskSection />
+      {!!o?.files?.length && <PanelSection title="Settings files"><FileRows files={o.files} /></PanelSection>}
       <PanelSection title="Fixes tool">
         <PanelSectionRow>
-          {!o && <Problem what="Overview" error={ov.data && !ov.data.ok ? ov.data.error : null} />}
+          {!o && <Problem what="Overview" error={ov.data && !ov.data.ok ? ov.data.error : null} onRetry={ov.reload} />}
           {i && (
             <Status ok={oxp3Usable(i)} label={i.installed ? `Fixes tool ${i.version ?? "?"}` : "Fixes tool not installed"}
               detail={!i.installed ? "Needed for controller, sleep and screen fixes" : !oxp3Usable(i) ? "Too old: update it" : offer ? "Update available" : check ? "Up to date" : undefined}
@@ -100,7 +104,7 @@ export const UpdatesTab: FC = () => {
               {oxp.busy === "install" ? "Working…" : `${offer.update ? "Update" : "Install"} fixes tool${offer.version ? ` ${offer.version}` : ""}`}
             </ButtonItem>
           )}
-          <Problem what="oxp3-tool" error={oxp.error} />
+          <Problem what="oxp3-tool" error={oxp.error} onRetry={oxp.retry} />
         </PanelSectionRow>
         {oxp.job && <JobView job={oxp.job} lines={6} />}
       </PanelSection>
@@ -126,9 +130,15 @@ export const UpdatesTab: FC = () => {
               </ButtonItem>
             </WithDetails>
           )}
-          <Problem what="xess-xmx-linux" error={xes.error} />
+          <Problem what="xess-xmx-linux" error={xes.error} onRetry={xes.retry} />
         </PanelSectionRow>
         {xes.job && <JobView job={xes.job} lines={6} />}
+      </PanelSection>
+      <PanelSection title="Automatic checks">
+        <PanelSectionRow>
+          <AutoCheckToggle o={o} onChanged={ov.reload} />
+          <PluginNotice o={o} />
+        </PanelSectionRow>
       </PanelSection>
       <PanelSection title="Report a problem">
         <PanelSectionRow>
@@ -139,14 +149,14 @@ export const UpdatesTab: FC = () => {
               {diag.busy ? "Starting…" : `Save a problem report${INFO}`}
             </ButtonItem>
           </WithDetails>
-          <Problem what="Problem report" error={diag.error} />
+          <Problem what="Problem report" error={diag.error} onRetry={diag.retry} />
           {o && <Note label="OXP3 Deck" details={{ title: "OXP3 Deck", body: `Version ${o.plugin_version}.`, lines: [`user: ${o.user}`, `home: ${o.home}`] }}>{`Version ${o.plugin_version}`}</Note>}
         </PanelSectionRow>
         {diag.job && <JobView job={diag.job} lines={6} />}
       </PanelSection>
       <PanelSection title="Last tasks">
         <PanelSectionRow>
-          <Problem what="Tasks" error={jl.data && !jl.data.ok ? jl.data.error : null} />
+          <Problem what="Tasks" error={jl.data && !jl.data.ok ? jl.data.error : null} onRetry={jl.reload} />
           {jl.data?.ok && !jl.data.jobs?.length && <Note>No tasks yet.</Note>}
         </PanelSectionRow>
         {((jl.data?.ok && jl.data.jobs) || []).map((j) => <JobRow key={j.id} j={j} />)}

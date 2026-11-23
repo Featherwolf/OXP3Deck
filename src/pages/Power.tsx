@@ -6,7 +6,7 @@ import { FC, useEffect, useRef, useState } from "react";
 
 import { useAction } from "../actions";
 import { power_import_sdtdp, power_info, power_options, power_profile } from "../backend";
-import { ConflictRow, ConflictRows, FixedRows } from "../components/ConflictRow";
+import { ConflictRow, ConflictRows, FixAllRow, FixedRows } from "../components/ConflictRow";
 import { confirm, DetailsSpec, paragraphs } from "../components/confirm";
 import { BatteryNote, ChargeRows, LpmdToggle, useExtrasState } from "../components/ExtrasControls";
 import { explain, explainWhen, label, Note, Problem, Status, WithDetails } from "../components/Hint";
@@ -115,7 +115,7 @@ const OptionsSection: FC<{ info: PowerInfo; state: PowerState }> = ({ info, stat
         )}
         <PollSlider info={info} />
         <PerfOptions info={info} busy={!!act.busy} set={set} />
-        <Problem what="Option" error={act.error} />
+        <Problem what="Option" error={act.error} onRetry={act.retry} />
       </PanelSectionRow>
     </PanelSection>
   );
@@ -190,7 +190,7 @@ const EditorSection: FC<{ info: PowerInfo; state: PowerState; x: ExtrasState | n
             Delete profile
           </ButtonItem>
         )}
-        <Problem what="Profile" error={act.error} />
+        <Problem what="Profile" error={act.error} onRetry={act.retry} />
       </PanelSectionRow>
     </PanelSection>
   );
@@ -206,6 +206,7 @@ const ConflictsSection: FC<{ info: PowerInfo; x: ExtrasState | null }> = ({ info
     <PanelSection title="Other power programs">
       <PanelSectionRow>
         {!info.conflicts.length && <Status ok label="No conflicts" detail="Nothing else changes these settings." />}
+        <FixAllRow rows={info.conflicts} info={info} />
         {info.conflicts.map((c) => <ConflictRow key={c.id} c={c} info={info} />)}
         <LpmdToggle x={x} />
       </PanelSectionRow>
@@ -227,7 +228,7 @@ const ConflictsSection: FC<{ info: PowerInfo; x: ExtrasState | null }> = ({ info
             {act.busy === "check" ? "Checking…" : label("Check again", checkD)}
           </ButtonItem>
         </WithDetails>
-        <Problem what="Check" error={act.error} />
+        <Problem what="Check" error={act.error} onRetry={act.retry} />
       </PanelSectionRow>
     </PanelSection>
   );
@@ -289,7 +290,7 @@ const ImportSection: FC = () => {
           detail="Now disable SimpleDeckyTDP in Decky's settings." />}
         {lines && lines.skipped.length > 0 && <Status ok={null} label={`Skipped ${lines.skipped.length}`}
           details={det(`Skipped ${lines.skipped.length}`, lines.skipped)} />}
-        <Problem what="Import" error={act.error} />
+        <Problem what="Import" error={act.error} onRetry={act.retry} />
       </PanelSectionRow>
     </PanelSection>
   );
@@ -322,7 +323,7 @@ const PollSlider: FC<{ info: PowerInfo }> = ({ info }) => {
           onChange={(i) => { const v = pollValue(i); setDraft(v); send(v); }}
           description={explainWhen("How often OXP3 Deck checks your settings are still in place.", EFFECTS["power.poll_s"])} />
       </WithDetails>
-      <Problem what="How often to check" error={act.error} />
+      <Problem what="How often to check" error={act.error} onRetry={act.retry} />
     </>
   );
 };
@@ -349,7 +350,7 @@ export const PowerTab: FC = () => {
       <PanelSection title="Power">
         <PanelSectionRow>
           {!p.error && <Status ok={null} label="Reading the power limits…" />}
-          <Problem what="Power" error={p.error} />
+          <Problem what="Power" error={p.error} onRetry={p.reloadInfo} />
         </PanelSectionRow>
       </PanelSection>
     );

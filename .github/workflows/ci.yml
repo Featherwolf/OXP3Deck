@@ -1,0 +1,42 @@
+name: CI
+
+# The same checks as `pnpm check` and release.yml, on every push and pull request: the Python tests, the node
+# tests, the TypeScript check and a zip build. It does not compare the build with release/OXP3Deck.zip, which is
+# only rebuilt for a release; release.yml does that.
+on:
+  push:
+  pull_request:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  test:
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+      - uses: pnpm/action-setup@v4   # the version comes from package.json's packageManager
+      - uses: actions/setup-node@v4
+        with:
+          node-version: "22"   # 22.18 or later runs src/*.ts in the node tests without a flag
+          cache: pnpm
+      - name: Install the frontend's dependencies
+        run: pnpm install --frozen-lockfile
+      - name: Build the frontend
+        run: pnpm build
+      - name: Python tests
+        run: python -m unittest discover -s tests -t .
+      - name: JS tests
+        run: pnpm test:js
+      - name: TypeScript check
+        run: pnpm typecheck
+      - name: Lint
+        run: |
+          python -m pip install ruff
+          ruff check .
+      - name: Build the zip
+        run: python3 tools/build_zip.py --skip-checks --out "$RUNNER_TEMP/OXP3Deck.zip"

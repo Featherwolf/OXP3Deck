@@ -343,7 +343,7 @@ test("the preset row is a horizontal Focusable of DialogButtons with no Custom b
   assert.match(row, /<Focusable flow-children="horizontal"[^>]*>\s*\{PRESET_IDS\.map\(\(id\) => \(\s*<DialogButton /);
   assert.doesNotMatch(row, />\s*Custom\s*</);
   assert.doesNotMatch(row, /"custom"\)\s*}\s*>/);
-  assert.match(row, /powerWriter\.write\(profileKey, slot, presetValues\(id, state\.range, slot, opts, caps\)\)/);
+  assert.match(row, /powerWriter\.write\(profileKey, slot, presetWrite\(presetValues\(id, state\.range, slot, opts, caps\), stored\)\)/);
   assert.match(row, /EFFECTS\["power\.preset"\]/);
   assert.match(row, /"Turn on power control first\."/);
   assert.match(row, /UNDO_MS/);
@@ -439,4 +439,66 @@ test("fix-integrate: the power tip names the profile Use N W writes; low-slot ro
   assert.match(q, /info && !lowRuns \? presetOf\(/);
   assert.match(src("components/PerfRows.tsx"), /\{slot === "low" && \(/);
   assert.doesNotMatch(src("components/PerfRows.tsx"), /[^t] values for: Low battery/);
+});
+
+// ---- T1-1 (C-3): "Steadier fps after loads" (pl2_follow) -------------------------------------------------------------
+
+test("followPl2 matches power.py follow_pl2 (shared fixture)", () => {
+  const F = JSON.parse(readFileSync(new URL("../fixtures/power/follow.json", import.meta.url), "utf8"));
+  assert.ok(F.cases.length >= 8);
+  for (const c of F.cases) assert.equal(P.followPl2(c.pl1, c.pl2_max, c.ac), c.pl2, JSON.stringify(c));
+  assert.deepEqual(P.PL2_FOLLOW, { battery: 1.25, ac: 1.5 });
+});
+
+test("follows: on, sustained set, boost left to it; off by default", () => {
+  assert.equal(P.EMPTY.pl2_follow, null);
+  assert.equal("pl2_follow" in P.RESET, true, "reset turns it off");
+  assert.equal(P.follows({ ...P.EMPTY, pl1_w: 12, pl2_follow: true }), true);
+  assert.equal(P.follows({ ...P.EMPTY, pl2_follow: true }), false, "no sustained value");
+  assert.equal(P.follows({ ...P.EMPTY, pl1_w: 12, pl2_w: 20, pl2_follow: true }), false, "an explicit boost wins");
+  assert.equal(P.follows({ ...P.EMPTY, pl1_w: 12 }), false);
+  assert.equal(P.followText(false), "follows sustained (+25 %)");
+  assert.equal(P.followText(null), "follows sustained (+25 %)");
+  assert.equal(P.followText(true), "follows sustained (+50 %)");
+  assert.deepEqual(["ac", "low", "main"].map((s) => P.slotAc(s, false)), [true, false, false]);
+  assert.equal(P.slotAc("main", true), true);
+  assert.equal(P.slotAc("main", undefined), null);
+});
+
+test("pl1Change leaves a following boost alone", () => {
+  assert.deepEqual(P.pl1Change(30, 25), { pl1_w: 30, pl2_w: 30 });
+  assert.deepEqual(P.pl1Change(30, 25, true), { pl1_w: 30 });
+});
+
+test("presets and pl2_follow: an own boost turns it off, Performance keeps it, Undo brings it back", () => {
+  const r = FIX.range.battery;
+  const o = { split_ac: false, extended: false };
+  const stored = { ...P.EMPTY, pl1_w: 20, pl2_follow: true };
+  const bat = P.presetWrite(P.presetValues("battery", r, "main", o, FULL), stored);
+  assert.equal(bat.pl2_follow, null);
+  assert.equal(bat.pl2_w, 15);
+  assert.equal("pl2_follow" in P.presetWrite(P.presetValues("performance", r, "main", o, FULL), stored), false);
+  assert.equal("pl2_follow" in P.presetWrite(P.presetValues("battery", r, "main", o, FULL), P.EMPTY), false);
+  assert.equal(P.presetFieldsOf(stored).pl2_follow, true);
+  assert.equal("pl2_follow" in P.presetFieldsOf(P.EMPTY), false);
+  // Performance with it on still reads as Performance; the line says boost follows
+  const perf = { ...stored, ...P.presetValues("performance", r, "main", o, FULL) };
+  assert.equal(P.presetOf(perf, r, "main", o, FULL), "performance");
+  assert.equal(P.presetLine("performance", perf, true), "Performance: 28 W, boost follows sustained");
+  assert.equal(P.presetLine("performance", { ...perf, pl2_follow: null }, true), "Performance: 28 W, boost device default");
+});
+
+test("the Boost slider, the toggle and the quick summary", () => {
+  const pc = src("components/PowerControls.tsx");
+  assert.match(pc, /label\(fol \? `Boost power · \$\{followText\(folAc\)\}` : "Boost power", pl2D\)/);
+  assert.match(pc, /label\("Steadier fps after loads", folD\)/);
+  assert.match(pc, /c \? \{ pl2_follow: true, pl2_w: null \} : \{ pl2_follow: null \}/);
+  assert.match(pc, /EFFECTS\["power\.pl2_follow"\]/);
+  assert.match(pc, /not a battery setting/);
+  assert.match(pc, /pl1Change\(clampW\(x, r\), pl2, fol\)/);
+  assert.equal(EFFECTS["power.pl2_follow"], "now");
+  assert.match(src("components/PerfRows.tsx"), /presetWrite\(presetValues\(id, state\.range, slot, opts, caps\), stored\)/);
+  const s = { enabled: true, blocked: null, low: null, active: { key: "default", name: "Default", slot: "main", app: null, ac: false },
+    range: { gpu_min: null, gpu_max: null }, values: P.EMPTY };
+  assert.equal(Q.powerSummary(s, { ...P.EMPTY, pl1_w: 12, pl2_follow: true }), "12 W · boost follows · Default");
 });

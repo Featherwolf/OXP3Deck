@@ -380,6 +380,16 @@ test("undoChange by kind and acceptOffer", async () => {
   assert.equal(ru.ok, false);
   assert.equal(ru.error, "Quit Game first.");
   assert.ok(!run.log.some((l) => /^(set|undo)/.test(l)));
+  // auto.json read-only (damaged or newer): refused before Steam is touched, for every kind
+  for (const c of [LAUNCH, { ...LAUNCH, id: "proton-1", kind: "proton", launch: null, proton: { from: "proton_9", from_priority: 250, to: "x", to_display: "x" } }]) {
+    const ro = fakes(plan(), { text: "XESS=latest %command% -dx12" });
+    ro.d.readOnly = async () => "auto.json is from a newer OXP3 Deck, so it is read-only here.";
+    const rr = await a.undoChange(ro.d, "10", c, "user", "Game");
+    assert.equal(rr.ok, false);
+    assert.match(rr.error, /read-only/);
+    assert.ok(!ro.log.some((l) => /^(get|set|compat|undo)/.test(l)), ro.log.join(","));
+    assert.equal(ro.st.text, "XESS=latest %command% -dx12");
+  }
   // offers: FSR as an accepted launch change; Proton by the listed tool's name; OptiScaler with accepted
   const f = fakes(plan(), { text: "%command%" });
   const fr = await a.acceptOffer(f.d, "10", "Game", { id: "fsr", label: "FSR → XeSS", line: "FSR → XeSS: the game's FSR runs on XeSS.", why: "w" }, { tools: [], compat: null });
@@ -458,6 +468,16 @@ test("the switch: one confirm with its effect, then auto_enable(true, true); the
   const g = src("components/GameControls.tsx");
   assert.ok(g.indexOf("<AutoSetupRows ") > 0 && g.indexOf("<AutoSetupRows ") < g.indexOf('label={label("XeSS version"'), "above the XeSS options");
   assert.match(src("components/AutoSetup.tsx"), /<LegacyAutoRows app=\{app\}/, "an old record keeps its row and Undo");
+});
+
+test("auto.json read-only: no Undo, Try again, mode change or offer; Undo checks it before Steam", () => {
+  const s = src("components/AutoSetup.tsx");
+  assert.match(s, /const readOnly = st\.data\?\.ok \? st\.data\.read_only \?\? null : null;/);
+  assert.match(s, /\{!readOnly && <WithDetails details=\{\{ title: `Undo: /);
+  assert.match(s, /\{!readOnly && <ButtonItem layout="below" disabled=\{!!act\.busy \|\| running\} onClick=\{\(\) => retry\(c\)\}/);
+  assert.match(s, /\{skipped \|\| readOnly \? \(/);
+  assert.match(s, /\{!skipped && !readOnly && \(plan\?\.offers/);
+  assert.match(s, /readOnly: async \(\) => \{ const st = await auto_state\(\); return st\.ok \? st\.read_only \?\? null : null; \}/);
 });
 
 test("the rows' tags and the exit order; the scan's limits", () => {

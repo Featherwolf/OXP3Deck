@@ -265,6 +265,8 @@ export type PassDeps = {
   optiIn: (appid: string) => Promise<boolean>;
   legacyRec: (appid: string) => Promise<AutoRecord | undefined>;
   toast: (text: string) => void;
+  /** Why auto.json cannot be saved now (AutoStateRes.read_only), else null; checked before an Undo changes anything. */
+  readOnly?: () => Promise<string | null>;
 };
 
 export type PassCause = "exit" | "open" | "scan";
@@ -286,6 +288,8 @@ export const undoChange = async (d: PassDeps, appid: string, c: AutoChange, reas
   Promise<{ ok: boolean; error: string | null; game: AutoGame | null; text: string | null }> => {
   const fail = (error: string | null) => ({ ok: false, error: error || "did not work", game: null, text: null });
   if (d.isRunning(appid)) return fail(RUNNING_ERR(name));
+  const ro = d.readOnly ? await d.readOnly() : null;
+  if (ro) return fail(ro);                                  // before Steam is touched: the backend could not mark it
   let text: string | null = null;
   if (c.kind === "launch") {
     if (!c.launch) return fail("This change has no record of what it did.");

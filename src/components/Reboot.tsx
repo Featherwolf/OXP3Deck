@@ -42,7 +42,7 @@ export const RebootRow: FC<{ o: Overview | null | undefined; st: Oxp3Status | nu
           {act.busy ? "Rebooting…" : label("Reboot to finish", details)}
         </ButtonItem>
       </WithDetails>
-      <Problem what="Reboot" error={act.error} />
+      <Problem what="Reboot" error={act.error} onRetry={act.retry} />
     </PanelSectionRow>
   );
 };

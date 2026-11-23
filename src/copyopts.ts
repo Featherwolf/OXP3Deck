@@ -81,6 +81,12 @@ export const copyLine = (i: CopyInput): CopyLine | null => {
   return { line, reason, adds };
 };
 
+/**
+ * The copy row is needed, not only offered: Steam refused the write, a shortcut, or Steam did not return the launch
+ * options. The quick panel's This game shows the row only then (the rest is on the Games tab).
+ */
+export const copyNeeded = (c: CopyLine | null): boolean => !!c && (c.reason === "rejected" || c.reason === "shortcut" || c.reason === "unreadable");
+
 /** What an OptiScaler plan changed in the line: the keys it set (where they were not so), its entries and arguments. */
 const optiText = (plan: LaunchPlan, args: string[], lists: string[], before: Partial<Record<ManagedKey, string>>): string[] => [
   ...Object.entries(plan.set ?? {}).filter(([k, v]) => before[k as ManagedKey] !== v).map(([k, v]) => `${k}=${v}`),

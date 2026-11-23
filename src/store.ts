@@ -4,18 +4,19 @@
 // and someone is looking at it.
 import { useEffect, useReducer, useRef } from "react";
 
-import { extras_info, job_status, power_live, power_set, power_state } from "./backend";
+import { extras_info, job_status, power_game, power_live, power_set, power_state } from "./backend";
 import type { EffectSpec } from "./effects";
+import { makeLatest } from "./latest";
 import { makeWriter } from "./power";
 import type { ExtrasInfoRes, Job, Live, PowerChangeRes, PowerFixRes, PowerInfoRes, PowerStateRes } from "./types";
 
 type Entry = { data: unknown; inflight: Promise<unknown> | null; subs: Set<() => void>;
-               loader: (() => Promise<unknown>) | null; stale: boolean };
+               loader: (() => Promise<unknown>) | null; stale: boolean; at: number | null };
 const entries = new Map<string, Entry>();
 
 const entry = (key: string): Entry => {
   let e = entries.get(key);
-  if (!e) { e = { data: undefined, inflight: null, subs: new Set(), loader: null, stale: false }; entries.set(key, e); }
+  if (!e) { e = { data: undefined, inflight: null, subs: new Set(), loader: null, stale: false, at: null }; entries.set(key, e); }
   return e;
 };
 const notify = (subs: Set<() => void>) => subs.forEach((f) => { try { f(); } catch { /* a dead subscriber */ } });
@@ -25,7 +26,7 @@ export const load = <T>(key: string, loader: () => Promise<T>): Promise<T> => {
   e.loader = loader;
   if (e.inflight) return e.inflight as Promise<T>;
   const p: Promise<T> = loader()
-    .then((d) => { e.data = d; e.stale = false; return d; })
+    .then((d) => { e.data = d; e.stale = false; e.at = Date.now() / 1000; return d; })
     .catch(() => e.data as T)
     .finally(() => { if (e.inflight === p) e.inflight = null; notify(e.subs); });
   e.inflight = p;
@@ -35,11 +36,16 @@ export const load = <T>(key: string, loader: () => Promise<T>): Promise<T> => {
 
 export const peek = <T>(key: string): T | undefined => entries.get(key)?.data as T | undefined;
 
-/** Replace the cached answer for key (an answer that came another way, e.g. the power writer's state). */
-export const put = <T>(key: string, data: T) => {
+/** When key's answer landed (seconds, the backend's clock: same machine), or null when none has. */
+export const filledAt = (key: string): number | null => entries.get(key)?.at ?? null;
+
+/** Replace the cached answer for key (an answer that came another way, e.g. the power writer's state). `at`: when it
+ * was made (seconds; default now). */
+export const put = <T>(key: string, data: T, at?: number) => {
   const e = entry(key);
   e.data = data;
   e.stale = false;
+  e.at = at ?? Date.now() / 1000;
   notify(e.subs);
 };
 
@@ -233,7 +239,7 @@ export const FIX_RELOAD_MS = 12000;
  * (only when the backend answered with them), and power-info once more after FIX_RELOAD_MS, so a unit that a program
  * started again shows as "came back" without a manual "Check again".
  */
-export const notePowerFix = (r: PowerFixRes): string | null => {
+export const notePowerFix = (r: Pick<PowerFixRes, "ok" | "error" | "state" | "conflicts" | "fixed">): string | null => {
   if (r.state) put<PowerStateRes>("power-state", { ok: true, error: null, state: r.state });
   const cur = peek<PowerInfoRes>("power-info");
   if (r.state && cur?.ok && cur.info && Array.isArray(r.conflicts) && Array.isArray(r.fixed)) {
@@ -244,6 +250,36 @@ export const notePowerFix = (r: PowerFixRes): string | null => {
   invalidate("overview");
   setTimeout(() => invalidate("power-info"), FIX_RELOAD_MS);
   return r.ok ? null : r.error || "refused";
+};
+
+// ---- the per-game profile switch -----------------------------------------------------------------------------------
+
+// this frontend's id for power_game's order: a reloaded frontend starts its count again without looking stale
+const SESSION = Math.random().toString(36).slice(2, 12) || "s";
+let gameError: string | null = null;
+const gameSubs = new Set<() => void>();
+const setGameError = (e: string | null) => {
+  if (e === gameError) return;
+  gameError = e;
+  notify(gameSubs);
+};
+
+/** power_game one call at a time, in order; only the newest game waiting goes after the one in flight. */
+const gameQueue = makeLatest((appid: string | null, seq: number) => power_game(appid, [SESSION, seq]), {
+  onAnswer: (r, _appid, stale) => { if (!stale) setGameError(notePower(r)); },
+  onError: (e, _appid, stale) => {
+    if (!stale) setGameError(`power_game: ${e instanceof Error ? e.message : String(e) || "no answer"}`);
+  },
+});
+
+/** Tell the backend which game runs (null: none), so its profile applies. A failure shows as a Problem row. */
+export const switchGame = (appid: string | null) => gameQueue.push(appid);
+
+/** The last game switch's error (null once one works). */
+export const useGameSwitchError = (): string | null => {
+  const [, bump] = useReducer((n: number) => n + 1, 0);
+  useEffect(() => { gameSubs.add(bump); return () => { gameSubs.delete(bump); }; }, []);
+  return gameError;
 };
 
 /** For a panel closing and onDismount: send what the sliders still hold. */

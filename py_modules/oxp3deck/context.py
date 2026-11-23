@@ -7,6 +7,7 @@ them are untrusted input and files written there must not follow a link the user
 from __future__ import annotations
 
 import copy
+import errno
 import json
 import logging
 import os
@@ -14,6 +15,7 @@ import pwd
 import secrets
 import stat
 import threading
+import time
 from dataclasses import dataclass
 
 from . import userexec
@@ -141,27 +143,202 @@ def write_atomic(path: str, data: bytes, mode: int = 0o644) -> None:
             except OSError:
                 pass
             raise
+        _fsync_dir(dfd)
     finally:
         os.close(dfd)
+
+
+def _fsync_dir(dfd: int) -> None:
+    """The folder's entries to disk (the rename survives a power cut). A file system that cannot sync a folder is
+    no error."""
+    try:
+        os.fsync(dfd)
+    except OSError as e:
+        if e.errno not in (errno.EINVAL, errno.ENOTSUP, errno.EOPNOTSUPP, errno.EBADF):
+            raise
+
+
+# ---- damaged and newer settings files (ROADMAP T1-5) ---------------------------------------------------------------
+
+KEEP_COPIES = 3              # damaged (or set-aside) copies kept per file and kind
+_now = time.time             # tests replace it
+
+
+class Refused(OSError):
+    """A save the file's guard refuses: damaged until the user taps Start fresh, or written by a newer OXP3 Deck.
+    Its text is plain (it is shown as is)."""
+
+
+def _copy_prefix(name: str, tag: str) -> str:
+    return f"{name}.{tag}-"
+
+
+def _copy_names(dfd: int, name: str, tag: str) -> list[str]:
+    """Oldest first: by the time in the name, then by the -2, -3 ... added within one second."""
+    pre = _copy_prefix(name, tag)
+    n = len(pre) + 15                                    # YYYYmmdd-HHMMSS
+    return sorted((x for x in os.listdir(dfd) if x.startswith(pre) and not x.endswith(".tmp")),
+                  key=lambda x: (x[:n], len(x), x))
+
+
+def copies(path: str, tag: str = "corrupt") -> list[str]:
+    """The names of `path`'s set-aside copies (<name>.<tag>-<time>), oldest first; [] when the folder cannot be
+    read."""
+    folder, name = os.path.split(os.path.abspath(path))
+    try:
+        dfd = _open_folder(folder)
+    except OSError:
+        return []
+    try:
+        return _copy_names(dfd, name, tag)
+    except OSError:
+        return []
+    finally:
+        os.close(dfd)
+
+
+def quarantine(path: str, tag: str = "corrupt") -> str | None:
+    """Rename `path` to <name>.<tag>-<YYYYmmdd-HHMMSS> in its folder (the link itself when it is one), keeping the
+    newest KEEP_COPIES such copies. The new name, or None when nothing could be moved (logged)."""
+    folder, name = os.path.split(os.path.abspath(path))
+    try:
+        dfd = _open_folder(folder)
+    except OSError as e:
+        log.warning("settings: cannot open the folder of %s to set it aside: %s", path, e)
+        return None
+    try:
+        base = _copy_prefix(name, tag) + time.strftime("%Y%m%d-%H%M%S", time.localtime(_now()))
+        # within one second: base-2, base-3 ... after the highest one there (an older one may have been removed)
+        nums = [1 if x == base else int(x[len(base) + 1:]) for x in os.listdir(dfd)
+                if x == base or (x.startswith(base + "-") and x[len(base) + 1:].isdigit())]
+        new = f"{base}-{max(nums) + 1}" if nums else base
+        os.rename(name, new, src_dir_fd=dfd, dst_dir_fd=dfd)
+        _fsync_dir(dfd)
+        for x in _copy_names(dfd, name, tag)[:-KEEP_COPIES]:
+            try:
+                os.unlink(x, dir_fd=dfd)
+            except OSError as e:
+                log.warning("settings: cannot remove the old copy %s: %s", x, e)
+        log.warning("settings: %s set aside as %s", path, new)
+        return new
+    except OSError as e:
+        log.warning("settings: cannot set %s aside: %s", path, e)
+        return None
+    finally:
+        os.close(dfd)
+
+
+def _exists(path: str) -> bool:
+    try:
+        os.lstat(path)
+        return True
+    except OSError:
+        return False
+
+
+def read_json(path: str, max_bytes: int = 1_000_000) -> tuple[dict | None, bool]:
+    """(the file's JSON object, False), (None, False) when there is no file, or (None, True) when it is damaged: not
+    JSON, not an object, too big, or not a regular file. A damaged file is NOT moved here (quarantine)."""
+    raw = read_small(path, max_bytes)
+    if raw is None:
+        return None, _exists(path)
+    try:
+        data = json.loads(raw.decode("utf-8"))
+    except ValueError as e:              # UnicodeDecodeError too
+        log.warning("settings: %s is not valid JSON: %s", path, e)
+        return None, True
+    if not isinstance(data, dict):
+        log.warning("settings: %s does not hold a JSON object", path)
+        return None, True
+    return data, False
+
+
+def _version(data: dict) -> int | None:
+    v = data.get("version")
+    return v if isinstance(v, int) and not isinstance(v, bool) else None
+
+
+def load_guarded(path: str, version: int, max_bytes: int) -> tuple[dict | None, dict | None]:
+    """A state file the user must not lose (auto.json, optiscaler.json): (data, problem). A damaged file is set aside
+    (quarantine) and stays a problem until Start fresh writes a new one: also while no file is there and a damaged
+    copy is (problem {kind "damaged", copy}). A file whose "version" is above `version` loads (data) but is
+    read-only (problem {kind "newer", version}). Saves are refused while there is a problem (guard_save)."""
+    data, bad = read_json(path, max_bytes)
+    if bad:
+        moved = quarantine(path)
+        return None, {"kind": "damaged", "copy": moved, "moved": moved is not None}
+    if data is None:
+        old = copies(path)
+        return None, ({"kind": "damaged", "copy": old[-1], "moved": True} if old else None)
+    v = _version(data)
+    if v is not None and v > version:
+        return data, {"kind": "newer", "version": v}
+    return data, None
+
+
+def refused_text(name: str, problem: dict) -> str:
+    """The error of a save the problem refuses."""
+    if problem.get("kind") == "newer":
+        return (f"{name} is from a newer OXP3 Deck, so it is read-only here. Update OXP3 Deck, or tap Start fresh "
+                "in the Status section.")
+    return f"{name} was damaged, so saving is paused. Tap Start fresh in the Status section."
+
+
+def guard_save(path: str, problem: dict | None) -> None:
+    """Raises Refused while the file has a problem (load_guarded)."""
+    if problem:
+        raise Refused(refused_text(os.path.basename(path), problem))
+
+
+def start_fresh(path: str, blob: bytes, mode: int = 0o644) -> None:
+    """Start fresh: a file still at `path` is set aside first (a newer one as <name>.newer-<time>, a damaged one as
+    .corrupt-), then `blob` is written. Raises OSError (Refused when the old file could not be set aside: it is
+    never overwritten)."""
+    data, bad = read_json(path, 64 << 20)
+    if bad or data is not None:
+        tag = "corrupt" if bad else "newer"
+        if quarantine(path, tag) is None:
+            raise Refused(f"{os.path.basename(path)} could not be set aside, so nothing was changed.")
+    write_atomic(path, blob, mode)
+
+
+_PROBLEMS: dict[str, dict] = {}      # path: FileProblem of a Settings file found damaged in this process
+_PLOCK = threading.Lock()
+
+
+def note_reset(path: str, moved: str | None) -> None:
+    with _PLOCK:
+        _PROBLEMS[os.path.abspath(path)] = {"file": os.path.basename(path), "kind": "reset", "copy": moved}
+
+
+def reset_problems(folder: str | None = None) -> list[dict]:
+    """The Settings files found damaged and started afresh in this process (in `folder` when given), until
+    dismissed: FileProblem {file, kind "reset", copy}."""
+    with _PLOCK:
+        return [dict(p) for k, p in sorted(_PROBLEMS.items())
+                if folder is None or os.path.dirname(k) == os.path.abspath(folder)]
+
+
+def dismiss_reset(path: str) -> bool:
+    with _PLOCK:
+        return _PROBLEMS.pop(os.path.abspath(path), None) is not None
 
 
 class Settings:
     """settings.json: a flat JSON object, kept in memory and written whole on every change. Never raises: set()
     and update() return None, or an error text when the value is not JSON or the file could not be written (the
-    value is then kept in memory only)."""
+    value is then kept in memory only). A damaged file is set aside (<name>.corrupt-<time>, quarantine) and noted
+    for the Status section (reset_problems); it starts empty."""
 
     def __init__(self, path: str):
         self.path = path
         self._lock = threading.Lock()
         self._data: dict = {}
-        raw = read_small(path)
-        if raw is not None:
-            try:
-                data = json.loads(raw.decode("utf-8"))
-            except ValueError as e:
-                log.warning("settings: %s is not valid JSON, starting empty: %s", path, e)
-                data = {}
-            self._data = data if isinstance(data, dict) else {}
+        data, bad = read_json(path)
+        if bad:
+            log.warning("settings: %s is damaged; it starts empty", path)
+            note_reset(path, quarantine(path))
+        self._data = data or {}
 
     def get(self, key: str, default=None):
         with self._lock:

@@ -1,0 +1,65 @@
+{
+ "comment": "T1-1 pl2_follow: follow_pl2(pl1, pl2_max, ac) in power.py and followPl2 in power.ts must give pl2 (\u00d71.25 on battery or AC unknown, \u00d71.5 on AC, rounded half up, at most pl2_max, never below pl1). Read by tests/test_power.py and tests/js/perf.test.mjs.",
+ "cases": [
+  {
+   "pl1": 12,
+   "pl2_max": 52,
+   "ac": false,
+   "pl2": 15
+  },
+  {
+   "pl1": 10,
+   "pl2_max": 52,
+   "ac": null,
+   "pl2": 13
+  },
+  {
+   "pl1": 10,
+   "pl2_max": 52,
+   "ac": false,
+   "pl2": 13
+  },
+  {
+   "pl1": 12,
+   "pl2_max": 52,
+   "ac": true,
+   "pl2": 18
+  },
+  {
+   "pl1": 17,
+   "pl2_max": 52,
+   "ac": true,
+   "pl2": 26
+  },
+  {
+   "pl1": 28,
+   "pl2_max": 52,
+   "ac": false,
+   "pl2": 35
+  },
+  {
+   "pl1": 35,
+   "pl2_max": 52,
+   "ac": false,
+   "pl2": 44
+  },
+  {
+   "pl1": 40,
+   "pl2_max": 52,
+   "ac": true,
+   "pl2": 52
+  },
+  {
+   "pl1": 40,
+   "pl2_max": 30,
+   "ac": true,
+   "pl2": 40
+  },
+  {
+   "pl1": 5,
+   "pl2_max": 52,
+   "ac": false,
+   "pl2": 6
+  }
+ ]
+}

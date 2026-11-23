@@ -1,7 +1,7 @@
 // The flows behind the buttons that change the system: each asks first (with oxp3-tool's dry-run plan where there
 // is one), then starts the backend job. They answer an error text for the red row under the button, or null (done,
 // started, or cancelled).
-import { useState } from "react";
+import { useRef, useState } from "react";
 
 import { oxp3_apply, oxp3_install, oxp3_plan, oxp3_revert, reboot, xess_install, xess_state, xess_uninstall } from "./backend";
 import { confirm } from "./components/confirm";
@@ -12,14 +12,19 @@ import type { ApplyOpts, Job, JobStart, XessState } from "./types";
 import { toast } from "./util";
 import { installLines, installTitle, XessOffer } from "./xessoffer";
 
-/** One control's busy state ("which action runs"), the last error, and the job its last action started. */
+/**
+ * One control's busy state ("which action runs"), the last error, and the job its last action started. `retry`
+ * (only while that error shows) runs the failed action again, from its start: a flow that asks first asks again.
+ */
 export const useAction = () => {
   const [busy, setBusy] = useState<string | null>(null);
   const [error, setError] = useState<string | null>(null);
   const [job, setJob] = useState<Job | null>(null);
+  const last = useRef<{ name: string; fn: () => Promise<string | null | void> } | null>(null);
   usePinned(error);       // in a quick panel group: stays shown once the group is closed
   const run = async (name: string, fn: () => Promise<string | null | void>) => {
     if (busy) return;
+    last.current = { name, fn };
     setBusy(name);
     setError(null);
     const before = currentJob()?.id;
@@ -33,7 +38,11 @@ export const useAction = () => {
       if (now && now.id !== before) setJob(now);
     }
   };
-  return { busy, error, job, run, setError };
+  const l = last.current;
+  const retry = error && l && !busy ? () => run(l.name, l.fn) : null;
+  // an error set from outside has no action to run again
+  const set = (e: string | null) => { last.current = null; setError(e); };
+  return { busy, error, job, run, retry, setError: set };
 };
 
 /** Why a new task cannot start now (one task at a time), or null. */

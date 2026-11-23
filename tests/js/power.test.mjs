@@ -334,10 +334,10 @@ test("blockers: blocking and not ignored", () => {
 
 // ---- 0.4 ---------------------------------------------------------------------------------------------------------
 
-test("FIELDS and EMPTY have the 19 names of power.py, in its order", () => {
+test("FIELDS and EMPTY have the 20 names of power.py, in its order", () => {
   assert.deepEqual([...FIELDS], ["pl1_w", "pl2_w", "gpu_min_mhz", "gpu_max_mhz", "epp", "turbo",
     "cpu_max_pct", "cpu_min_pct", "soc_balance", "soc_offset", "gpu_power_profile",
-    "cpu_cap_p_mhz", "cpu_cap_e_mhz", "cpu_cap_lpe_mhz", "epp_p", "epp_e", "epp_lpe", "fan_mode", "scx_mode"]);
+    "cpu_cap_p_mhz", "cpu_cap_e_mhz", "cpu_cap_lpe_mhz", "epp_p", "epp_e", "epp_lpe", "fan_mode", "scx_mode", "pl2_follow"]);
   assert.deepEqual(Object.keys(EMPTY).sort(), [...FIELDS].sort());
   assert.ok(Object.values(EMPTY).every((v) => v === null));
   // reset leaves the fan and the scheduler mode alone

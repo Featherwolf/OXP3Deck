@@ -1,11 +1,13 @@
 // Adapted from ClawDeck (MIT, Copyright (c) 2026 IHulkSmashI and ClawDeck contributors). See THIRD_PARTY_NOTICES.md.
 // Based on ClawDeck's FullPage (src/pages.tsx): the full page.
-// One tab per area, navigated with the D-pad on the left like Steam's own settings.
+// One tab per area, navigated with the D-pad on the left like Steam's own settings. Each tab's content is inside a
+// Boundary (components/Boundary.tsx): a render error shows a red row with Retry in that tab only.
 import { SidebarNavigation } from "@decky/ui";
 import { FC, useEffect } from "react";
 import { MdBolt, MdBuild, MdGamepad, MdHistory, MdMemory, MdSportsEsports, MdAutoAwesome } from "react-icons/md";
 
 import { get_overview, oxp3_status } from "../backend";
+import { Boundary } from "../components/Boundary";
 import { ROUTE } from "../nav";
 import { syncJob, useCurrentJob, useResource } from "../store";
 import type { Overview, StatusRes } from "../types";
@@ -35,6 +37,9 @@ export const FullPage: FC = () => {
       { title: "Games", icon: <MdSportsEsports />, route: `${ROUTE}/games`, content: <GamesTab /> },
       { title: "Kernel", icon: <MdMemory />, route: `${ROUTE}/kernel`, content: <KernelTab />, visible: limine },
       { title: "Updates & logs", icon: <MdHistory />, route: `${ROUTE}/updates`, content: <UpdatesTab /> },
-    ]} />
+    ].map((p) => ({ ...p, content: <Boundary key={p.route} what={p.title} wrap="section">{p.content}</Boundary> }))} />
   );
 };
+
+/** The route: the page inside a Boundary too (a render error in the sidebar itself). */
+export const FullPageRoute: FC = () => <Boundary what="All settings" wrap="section"><FullPage /></Boundary>;

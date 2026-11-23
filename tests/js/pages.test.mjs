@@ -50,8 +50,8 @@ test("old folders xess_remove_folder always refuses get no Remove button (RC-2)"
 
 test("index.tsx follows the running app for power_game and stops it in onDismount", () => {
   const s = src("index.tsx");
-  assert.match(s, /const stopPower = onMainAppChange\(\(a\) => \{ power_game\(a\)\.then\(notePower\); \}\)/);
-  assert.match(s, /power_game\(runningApp\(\)\?\.appid \?\? null\)\.then\(notePower\)/);
+  assert.match(s, /const stopPower = onMainAppChange\(\(a\) => switchGame\(a\)\)/);
+  assert.match(s, /switchGame\(runningApp\(\)\?\.appid \?\? null\)/);
   const dismount = s.slice(s.indexOf("onDismount()"));
   assert.match(dismount, /stopPower\(\)/);
 });
@@ -77,6 +77,35 @@ test("the quick panel's groups in order: Status, Live, This game, Power, CPU, Fa
   assert.match(body, /<Oxp3Section o=\{o\} st=\{st\.data\} loading=\{st\.loading\} \/>/);
 });
 
+test("quick This game is slim (T1-3): the expert rows only on the Games tab, behind More for this game", () => {
+  const s = src("components/GameControls.tsx");
+  const body = s.slice(s.indexOf("  return ("));
+  // the expert rows sit inside one `full &&` block that starts after Frame generation and ends before Saving…
+  const start = body.indexOf("{full && (<>");
+  const end = body.indexOf("</>)}");
+  assert.ok(start > body.indexOf('label={label("Frame generation", fgD)}'), "the full-only block starts after Frame generation");
+  assert.ok(start > body.indexOf('label={label("XeSS version", xessD)}'));
+  const block = body.slice(start, end);
+  for (const row of ["Show 5x–8x (experimental)", "Graphics driver", "Compatibility mode", "Start in DirectX 12", "Save XeSS logs", "FSR → XeSS"])
+    assert.ok(block.includes(`label={label("${row}"`), `${row} is full-page only`);
+  // Proton, tips, the ✗ checks and the no-frame-generation row: full page only; red issues and Last run stay
+  assert.match(body, /\{full && game && <Status ok=\{game\.compat_tool_shimmed\}/);
+  assert.match(body, /\{full && \(game\?\.advice \?\? \[\]\)\.map\(/);
+  assert.match(body, /\{full && checks\.map\(/);
+  assert.match(s, /const redIssue = \(i: GameIssue\) => i\.fg_crash && fgSet;/);
+  assert.match(body, /\{lr && <Status ok=\{lr\.ok\} label=\{lr\.label\}/);
+  assert.doesNotMatch(body.slice(start, end), /AutoSetupRows|Last run|Fix the typo/);
+  // copy launch options only when it is needed; OptiScaler once it is in the game
+  assert.match(s, /const showCopy = full \|\| copyNeeded\(copyLine\(copyInput\)\);/);
+  assert.match(body, /\{showCopy && <CopyLaunchRows input=\{copyInput\} game=\{app\.name\} \/>\}/);
+  // the button: last, quick only, opens the Games tab, no effect tag (it changes nothing)
+  assert.match(body, /\{quick && \(\s*<ButtonItem layout="below" onClick=\{\(\) => openPage\("games"\)\} description=\{explain\(gameMoreLine\(hidden\)\)\}>\s*More for this game\s*<\/ButtonItem>/);
+  assert.ok(body.indexOf("More for this game") > body.indexOf("{lr && <Status"));
+  // the Games tab renders GameControls without quick: everything there
+  assert.match(src("pages/Games.tsx"), /<GameControls key=\{game\.appid\} app=\{game\} running=\{!!app\} \/>/);
+  assert.match(src("pages/Quick.tsx"), /<GameControls app=\{app\} quick running \/>/);
+});
+
 // ---- Quick Access groups (DESIGN.md "Quick Access groups") ---------------------------------------------------------
 
 test("a group's header is a focusable Field that A toggles; no title on its PanelSection; closed: alerts, no body", () => {
@@ -84,7 +113,7 @@ test("a group's header is a focusable Field that A toggles; no title on its Pane
   const header = g.slice(g.indexOf('<PanelSectionRow key="header">'));
   assert.match(header, /^<PanelSectionRow key="header">\s*<Field focusable highlightOnFocus bottomSeparator="standard"\s*onActivate=\{\(\) => g\.toggle\(id\)\} onOKActionDescription=\{open \? "Close" : "Open"\}/);
   assert.doesNotMatch(g, /<PanelSection title=/);
-  assert.match(g, /\{open \? \(\s*<GroupCtx\.Provider key="body" value=\{id\}>\{children\}<\/GroupCtx\.Provider>\s*\) : \(\s*<Fragment key="alerts">\s*\{alerts\}/);
+  assert.match(g, /\{open \? \(\s*<Boundary key="body" what=\{title\}><GroupCtx\.Provider value=\{id\}>\{children\}<\/GroupCtx\.Provider><\/Boundary>\s*\) : \(\s*<Boundary key="alerts" what=\{title\}>\s*\{alerts\}/);
   assert.doesNotMatch(g, /display: ?"none"/, "a closed body is not mounted, not hidden");
   assert.doesNotMatch(g, /\.focus\(\)/, "no programmatic focus");
   // remembered per device, read synchronously at the first render
@@ -143,7 +172,7 @@ test("power-state is polled only while active (it wakes the GPU)", () => {
 test("every power call in api.ts is wrapped in backend.ts with an empty state", () => {
   const api = src("api.ts");
   const names = [...api.matchAll(/callable<.*?>\("(power_[a-z_]+)"\)/g)].map((m) => m[1]);
-  assert.equal(names.length, 16);   // 12 + performance batch: power_selftest, power_measure, power_advice, power_advice_dismiss
+  assert.equal(names.length, 17);   // 12 + performance batch: power_selftest, power_measure, power_advice, power_advice_dismiss; + power_fix_all
   const b = src("backend.ts");
   for (const n of names) assert.match(b, new RegExp(`export const ${n} = guard\\("${n}", `), n);
 });
@@ -247,6 +276,29 @@ test("power_fix and power_unfix run only after a confirm in the same flow, never
   assert.doesNotMatch(src("components/ConflictRow.tsx"), /useEffect\([^)]*power_(un)?fix/);
 });
 
+test("Fix all: shown for 2+ fixable rows, asks once, then power_fix_all; Undo stays per item", () => {
+  const s = src("components/ConflictRow.tsx");
+  const fn = s.slice(s.indexOf("export const FixAllRow"), s.indexOf("/** One active conflict."));
+  assert.match(fn, /const list = fixAllRows\(rows\);/);
+  assert.match(fn, /list\.length >= 2 && \(\s*<ButtonItem/);
+  assert.match(fn, /`Fix all \(\$\{list\.length\}\)`/);
+  const flow = fn.slice(fn.indexOf('act.run("fix-all"'), fn.indexOf("power_fix_all("));
+  assert.match(flow, /if \(!\(await confirm\(/, "one confirm before power_fix_all");
+  assert.match(flow, /fixAllConfirm\(list, /);
+  assert.match(fn, /power_fix_all\(list\.map\(\(c\) => c\.id\)\)/);
+  assert.match(fn, /const err = notePowerFix\(r\);/);
+  assert.match(fn, /markRecent\(it\.id, /, "each fixed item gets the Undo its own Fix for me gives");
+  assert.match(fn, /shown\.map\(\(f\) => <Problem key=\{f\.id\} what=\{f\.name\} error=\{f\.error\} \/>\)/, "a Problem row per failed item");
+  // power_fix_all is called nowhere else, never from an effect
+  const users = allSources().filter((n) => n !== "api.ts" && n !== "backend.ts" && /\bpower_fix_all\(/.test(src(n)));
+  assert.deepEqual(users, ["components/ConflictRow.tsx"]);
+  assert.doesNotMatch(s, /useEffect\([^)]*power_fix_all/);
+  // where the rows are: every ConflictRows, and the Power tab's list
+  assert.match(s, /<FixAllRow rows=\{all\} info=\{info\} \/>/);
+  assert.match(src("pages/Power.tsx"), /<FixAllRow rows=\{info\.conflicts\} info=\{info\} \/>/);
+  assert.match(src("api.ts"), /power_fix_all = callable<\[cids: string\[\]\], PowerFixAllRes>\("power_fix_all"\)/);
+});
+
 test("a fix's answer refreshes the caches at once and once more after the backend's recheck", () => {
   const s = src("store.ts");
   assert.match(s, /export const FIX_RELOAD_MS = 12000;/);
@@ -309,9 +361,9 @@ test("automatic launch options never write while that game runs", () => {
     assert.ok(fnStart > 0 && s.slice(fnStart, m.index).includes("isRunning(appid)"), "in the same function");
   }
   // only AutoLaunch.tsx, AutoSetup.tsx (through autosetup.ts's pass, which gets its writer from AutoSetup.tsx), GameControls
-  // (the user's own picks) and OptiControls (OptiScaler's plan) write launch options
+  // (the user's own picks), OptiControls (OptiScaler's plan) and XessLog (Save XeSS logs off after one run) write launch options
   const writers = allSources().filter((n) => !["steam.ts"].includes(n) && /\bsetLaunchOptions\(/.test(src(n)));
-  assert.deepEqual(writers.sort(), ["autosetup.ts", "components/AutoLaunch.tsx", "components/AutoSetup.tsx", "components/GameControls.tsx", "components/OptiControls.tsx"]);
+  assert.deepEqual(writers.sort(), ["autosetup.ts", "components/AutoLaunch.tsx", "components/AutoSetup.tsx", "components/GameControls.tsx", "components/OptiControls.tsx", "components/XessLog.tsx"]);
   assert.doesNotMatch(src("autosetup.ts"), /from "\.\/steam"/, "autosetup.ts writes only through the deps it is given");
   assert.match(src("index.tsx"), /const stopAuto = watchAutoSetup\(\);/);
   assert.match(src("index.tsx"), /stopAuto\(\);/);
@@ -397,8 +449,10 @@ test("frame generation: a known crash asks first, the general warning is in the 
   assert.match(s, /if \(o\.data && !\(await risky\(fgIssue, /);
   assert.match(s, /if \(m\.data && !\(await risky\(fsrIssue, m\.label\)\)\) return;/);
   assert.match(s, /fgIssue \? "Crashes this game: leave it on Game default\."/);
-  assert.match(s, /\(game\?\.known_issues \?\? \[\]\)\.map\(/);
-  assert.match(s, /\(game\?\.checks \?\? \[\]\)\.map\(/);
+  assert.match(s, /const issues = steam \? game\?\.known_issues \?\? \[\] : \[\];/);
+  assert.match(s, /\{issues\.filter\(\(i\) => full \|\| redIssue\(i\)\)\.map\(/);
+  assert.match(s, /const checks = steam \? game\?\.checks \?\? \[\] : \[\];/);
+  assert.match(s, /\{full && checks\.map\(/);
 });
 
 test("the CPU status line shows the values in effect, and the quick panel shows it under the CPU controls", async () => {
@@ -429,7 +483,7 @@ test("no libxess_fg.dll counts only without an FSR route (FSR=xess / FSR_FG brin
   const s = src("components/GameControls.tsx");
   assert.match(s, /const noFgLib = game\?\.has_fg === false && !cur\.FSR && !cur\.FSR_FG;/);
   assert.doesNotMatch(s, /game\?\.has_fg === false \?/);
-  assert.match(s, /\{steam && cur\.XESS_FG && noFgLib && \(/);
+  assert.match(s, /\{full && steam && cur\.XESS_FG && noFgLib && \(/);
 });
 
 test("Start in DirectX 12: a per-game toggle that writes only its argument, with the effect tag", async () => {

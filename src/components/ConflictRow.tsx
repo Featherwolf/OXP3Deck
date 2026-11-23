@@ -2,11 +2,13 @@
 // with its Details, "Fix for me" / "Fix again" (turns its systemd units off after a confirm), "Undo", "I've handled
 // it" for one OXP3 Deck cannot turn off, and "How to fix". The texts are conflicts.ts's.
 import { ButtonItem } from "@decky/ui";
-import { FC, useEffect, useReducer } from "react";
+import { FC, useEffect, useReducer, useState } from "react";
 
 import { useAction } from "../actions";
-import { power_fix, power_options, power_unfix } from "../backend";
-import { explainBody, fixConfirm, fixedLines, friendlyName, isCpu, oneLine, undoConfirm } from "../conflicts";
+import { power_fix, power_fix_all, power_options, power_unfix } from "../backend";
+import {
+  explainBody, fixAllConfirm, fixAllFailures, fixAllRows, fixConfirm, fixedLines, friendlyName, isCpu, oneLine, undoConfirm,
+} from "../conflicts";
 import { notePower, notePowerFix, powerWriter } from "../store";
 import type { PowerConflict, PowerFixed, PowerFixRes, PowerInfo } from "../types";
 import { when } from "../util";
@@ -44,7 +46,7 @@ const fixedDetails = (rec: PowerFixed, notes?: string[]): DetailsSpec => ({
 });
 
 /** The fix's own outcome lines: a step that failed, and the backend's notes (intel_lpmd's top speed). */
-const stepErrors = (r: PowerFixRes): string[] =>
+const stepErrors = (r: Pick<PowerFixRes, "steps">): string[] =>
   (r.steps ?? []).filter((s) => !s.ok).map((s) => `${s.action} ${s.unit}: ${s.error ?? "failed"}`);
 
 // ---- the flows ------------------------------------------------------------------------------------------------------------
@@ -71,6 +73,44 @@ const useFix = (info?: PowerInfo | null) => {
     return err;
   });
   return { act, fix, undo };
+};
+
+/** "Fix all (N)": for 2 or more rows with their own Fix for me. One confirm that lists them, then power_fix_all (never
+ * on its own); each one turned off gets its own Undo as after its own Fix for me, each one that was not gets its own
+ * Problem row here (its own Fix for me below stays the way to try it again). */
+export const FixAllRow: FC<{ rows: PowerConflict[]; info: PowerInfo | null }> = ({ rows, info }) => {
+  const act = useAction();
+  const [failed, setFailed] = useState<ReturnType<typeof fixAllFailures>>([]);
+  const list = fixAllRows(rows);
+  const active = new Set(rows.map((c) => c.id));
+  const shown = failed.filter((f) => active.has(f.id));
+  if (list.length < 2 && !shown.length && !act.error) return null;
+  const all = () => act.run("fix-all", async () => {
+    const d = fixAllConfirm(list, !!info?.state?.enabled);
+    if (!(await confirm({ title: d.title, text: d.text, lines: d.lines, linesTitle: d.linesTitle, ok: d.ok, effect: d.effect }))) return null;
+    setFailed([]);
+    await powerWriter.drain();
+    const r = await power_fix_all(list.map((c) => c.id));
+    const err = notePowerFix(r);
+    const results = r.results ?? [];
+    for (const it of results) {
+      if ((r.fixed ?? []).some((f) => f.id === it.id)) markRecent(it.id, [...(it.notes ?? []), ...stepErrors(it)]);
+    }
+    setFailed(fixAllFailures(results, list));
+    return results.length ? null : err;         // per item below; the whole call's error only when nothing ran
+  });
+  return (
+    <>
+      {list.length >= 2 && (
+        <ButtonItem layout="below" disabled={!!act.busy} onClick={all}
+          description={explainWhen(`Turns these ${list.length} off at once. You can undo each.`, EFFECTS["power.fix"])}>
+          {act.busy ? "Turning them off…" : `Fix all (${list.length})`}
+        </ButtonItem>
+      )}
+      {shown.map((f) => <Problem key={f.id} what={f.name} error={f.error} />)}
+      <Problem what="Fix all" error={act.error} onRetry={act.retry} />
+    </>
+  );
 };
 
 /** One active conflict. `quick`: the quick panel (Undo only right after its own fix; the Power tab has them all). */
@@ -114,7 +154,7 @@ export const ConflictRow: FC<{ c: PowerConflict; info: PowerInfo | null; quick?:
           How to fix
         </ButtonItem>
       )}
-      <Problem what={name} error={act.error} />
+      <Problem what={name} error={act.error} onRetry={act.retry} />
     </>
   );
 };
@@ -123,7 +163,7 @@ export const ConflictRow: FC<{ c: PowerConflict; info: PowerInfo | null; quick?:
 export const ConflictRows: FC<{ ids?: string[] | null; rows?: PowerConflict[] | null; info: PowerInfo | null; quick?: boolean }> =
   ({ ids, rows, info, quick }) => {
     const all = rows ?? (info?.conflicts ?? []).filter((c) => (ids ?? []).includes(c.id));
-    return <>{all.map((c) => <ConflictRow key={c.id} c={c} info={info} quick={quick} />)}</>;
+    return <><FixAllRow rows={all} info={info} />{all.map((c) => <ConflictRow key={c.id} c={c} info={info} quick={quick} />)}</>;
   };
 
 /** A record of something OXP3 Deck turned off that does not run now: "<name> is off", with Undo. */
@@ -138,7 +178,7 @@ export const FixedRow: FC<{ rec: PowerFixed; notes?: string[] }> = ({ rec, notes
         description={explainWhen("Re-enables what OXP3 Deck turned off.", EFFECTS["power.unfix"])}>
         {act.busy ? "Turning it on…" : "Undo: turn it back on"}
       </ButtonItem>
-      <Problem what={`Undo ${name}`} error={act.error} />
+      <Problem what={`Undo ${name}`} error={act.error} onRetry={act.retry} />
     </>
   );
 };

@@ -86,6 +86,8 @@ py_modules/oxp3deck/
                        "OptiScaler"); any game through resolve() (0.5.1, "OptiScaler for any game")
   optigames.py         OptiScaler's known-games table (from its wiki), the games not offered, and the pure rules that
                        find a game's exe, API and a free proxy name (0.5.1)
+  updates.py           the daily update checks: oxp3-tool's and xess-xmx-linux's checks and OXP3 Deck's newest release
+                       (pre-releases too), once a day; only checks (ROADMAP T1-9, "Daily update checks")
   autosetup.py         "Set up games automatically": per-game mode, the plan (OptiScaler, launch keys, the Proton
                        move), the change records, crash bookkeeping; auto.json (0.6, "Automatic setup")
 src/                   frontend (TypeScript, @decky/ui)
@@ -100,6 +102,7 @@ src/                   frontend (TypeScript, @decky/ui)
   power.ts             power control's serial writer and texts (pure, tested under node)
   effects.ts           "When it takes effect": the tags, the tag of every setting, pending texts (pure, node-tested)
   autolaunch.ts        automatic launch options: what to add, the record, Undo (pure, node-tested)
+  xesslog.ts           Save XeSS logs for one run: the record, the step after a game quits (pure, node-tested)
   autosetup.ts         automatic setup's texts, the hand-set check, summaries (pure, node-tested; 0.6)
   copyopts.ts          "Copy launch options": the line to paste by hand, why, its texts (pure, node-tested)
   opti.ts              OptiScaler's launch-option plan applied and undone, its choices, checklist and texts (pure,
@@ -107,6 +110,7 @@ src/                   frontend (TypeScript, @decky/ui)
   clipboard.ts         copy text in Steam's CEF: execCommand / navigator.clipboard chain (framework-free, node-tested)
   live.ts              the live readouts' line and Details texts (pure, node-tested)
   conflicts.ts         the conflicts' friendly names, one-liners, Details and Fix / Undo dialogs (pure, node-tested)
+  updates.ts           the daily checks: which answers fill the update caches, the notices' texts (pure, node-tested)
   text.ts              firstSentence and the one-line limit (pure, node-tested)
   pages/, components/  the quick panel, the full page's tabs (pages/Power.tsx), shared rows (Hint: explain,
                        explainWhen, Status, Note, Problem, WithDetails, label; confirm: confirm, showDetails;
@@ -115,11 +119,14 @@ src/                   frontend (TypeScript, @decky/ui)
 tests/                 unittest, with a stub `decky` module and fake roots; fixtures/oxp3: real oxp3-tool --json
                        output (tests/make_fixtures.py regenerates it from an OXP3-Tool-for-Bazzite checkout's
                        CLI, found next to this repository or by OXP3_TOOL_SRC); js/: node tests
-                       of launchopts.ts and xessoffer.ts; test_main.py also checks that api.ts and main.py name the
+                       of launchopts.ts and xessoffer.ts (js/index.js loads them all for `node --test tests/js`);
+                       test_main.py also checks that api.ts and main.py name the
                        same methods and that main.py calls the real modules' functions with arguments they take;
                        powerfake.py builds fake power sysfs trees for test_powerhw.py and test_power.py, with canned
                        `systemctl list-units` output and a SimpleDeckyTDP settings.json in fixtures/power
-tools/build_zip.py     assembles OXP3Deck.zip from dist/, the backend files and vendor/oxp3-tool
+tools/build_zip.py     assembles OXP3Deck.zip from dist/, the backend files and vendor/oxp3-tool; runs pnpm check's
+                       commands first and refuses to build when one fails (--skip-checks)
+tools/compare_zips.py  release.yml: the committed zip and a fresh build hold the same names, modes and bytes
 tools/vendor_oxp3_tool.py  refreshes vendor/oxp3-tool (+ .sha256) from OXP3-Tool-for-Bazzite's dist/
 vendor/                the oxp3-tool the zip carries as bin/oxp3-tool
 third_party/           @decky/api 1.1.3's source, kept for its licence (LGPL-2.1, THIRD_PARTY_NOTICES.md); not built
@@ -329,7 +336,9 @@ type GameInfo = {
                                         // libxess*.dll / libxell.dll and FSR 3.1+'s amd_fidelityfx_*.dll, searched
                                         // 10 folders deep (as tools/proton-hook.py), at most 20000 entries
   last_run: { trace: boolean, fallback: string|null, compile_failed: boolean, canary: boolean,
-              xell_unsupported: boolean|null, logged_at: number|null } | null,
+              xell_unsupported: boolean|null, logged_at: number|null,
+              log_at: number|null } | null,  // log_at: newest of the logs only XESS_LOG writes (igdext_trace,
+                                              // igdext_xell, igdext_xefg, igcl_stub); no canary or compile marker
                                         // from the prefix (null: no prefix; xell_unsupported null: not logged)
   advice: string[],                     // e.g. "XeSS 2.0.1: add XESS=latest", "XeLL 1.2: frame generation may fail"
   // 0.4.x
@@ -431,7 +440,7 @@ get_setting(key: string): any; set_setting(key: string, value: any): { ok, error
 ```
 
 Settings the frontend may read and write: `xess_driver` (a Mesa prefix such as "26.3", or null),
-`xess_shim_system` (boolean) and `ui_*` keys (at most 64, each a JSON value of up to 4 KB); any other key reads as
+`xess_shim_system` (boolean), `update_auto` (boolean, "Check for updates automatically"; missing = on) and `ui_*` keys (at most 64, each a JSON value of up to 4 KB); any other key reads as
 null and is refused. `reboot()` is refused while a job runs, an oxp3-tool run holds `/run/oxp3-tool.lock` (one that
 outlived a plugin restart, or one from a terminal), an xess-xmx-linux script from before a plugin restart still runs
 (`xess.script_running`) or a boot-entry rebuild is unfinished. xess_set_driver,
@@ -462,6 +471,56 @@ xess-xmx-linux script from before the plugin restarted is still running (...); t
 checked and removed under one lock, and removed only while it is still the one read (or written), so a thread that
 finds an old record ended cannot remove the live one a job has written since.
 
+### Settings files (ROADMAP T1-5: never silently wipe them)
+
+- **Damaged** (not JSON, not an object, not UTF-8, too big, or not a regular file): the file is renamed to
+  `<name>.corrupt-<YYYYmmdd-HHMMSS>` in its folder (`context.quarantine`; `-2`, `-3` … within one second; the newest
+  3 copies per file are kept) before anything can save over it. settings.json, power.json, extras.json,
+  advisor.json and selftest.json (`context.Settings`) then start empty and save normally; the Status section shows
+  "<name>: file was damaged" until OK. auto.json and optiscaler.json (`context.load_guarded`) refuse every save
+  (`context.Refused`, plain text) while the file is damaged, and also while it is missing and a damaged copy is
+  there (so the refusal outlives a restart), until the user taps **Start fresh** (confirmed; it writes an empty
+  file; the copies stay). While optiscaler.json cannot be saved, `optiscaler.check` refuses every install, change
+  and remove before it starts (their files would go unrecorded), `options` is refused and `prune_cache` removes
+  nothing; while auto.json cannot be saved, `auto_pending` is empty (no passes) and the automatic OptiScaler install
+  is refused.
+- **Newer** (`version` above this code's: autosetup.VERSION, optiscaler.RECORD_VERSION): loaded and shown but
+  read-only, row "Settings are from a newer OXP3 Deck"; Start fresh sets it aside as `<name>.newer-<time>` first.
+- **Passthrough**: keys this version does not know (auto.json: top level and each game; optiscaler.json: top level
+  and `global`; its game entries are kept whole) are written back as they were.
+- **write_atomic** fsyncs the file, renames it, then fsyncs the folder (a file system that cannot is no error).
+- **autosetup trim** (MAX_GAMES, and the 1 MB size limit) never drops a game with something in effect
+  (`_in_use`: a live change: launch options, a Proton move, an OptiScaler install; a crash rollback due; a run in
+  progress): it drops the longest-unseen other game, then old ended changes, else refuses the save.
+- **API**: `get_overview().files: FileProblem[]` ({file, kind "damaged" | "newer" | "reset", copy, version, action
+  "fresh" | "dismiss"}); `file_fresh(file): {ok, error, files}` (Start fresh on auto.json / optiscaler.json, OK on
+  another file). Rows: `components/FileRows.tsx` (texts in `src/files.ts`), in the Status section and the Updates
+  & logs tab.
+
+### Daily update checks (ROADMAP T1-9 + C-5)
+
+- **Backend** (`updates.py`, a task main.py's `_main` starts and `_unload` cancels): a first look `UPDATE_FIRST_S`
+  (180 s) after the start, then one every `UPDATE_WAKE_S` (10 min). `updates.tick` runs a check when it is due (a day
+  since the last one that worked, and an hour since the last try) and skips it while the switch is off, a game runs
+  (`power.game_now`), a job runs, or there is no default route (`/proc/net/route`, `/proc/net/ipv6_route`: no network
+  call). A check runs, in order, `oxp3tool.update_check`, `xess.check_update` and `updates.plugin_check` (OXP3 Deck's
+  newest release: `downloads.newest_release_tag`, the `/releases` API, pre-releases included, the highest semver;
+  `/releases/latest` skips pre-releases and every 0.x OXP3 Deck release is one): three GitHub API requests
+  per check. A step that fails is logged only, its last good answer stays, and the next try is an hour later. State: settings.json `updates_auto` {checked_at, tried_at,
+  oxp3, xess, plugin}.
+- **Only checks.** Nothing installs on its own (C-5: oxp3-tool's update is a job, and its helpers must follow it).
+  `get_overview().updates: UpdatesAuto | null` ({on, checked_at, install_url, oxp3, xess, plugin}; plugin's `update` is
+  worked out again against the running version).
+- **Frontend** (`components/UpdateRows.tsx`, texts in `src/updates.ts`): `useAutoChecks(o)` puts the answers into the
+  `manual:oxp3-check` / `manual:xess-check` caches (only one made for what is installed now and newer than the
+  cache's: a later tap wins), so the closed XeSS and Device fixes groups say "Update available". Status section:
+  "oxp3-tool X bundled" **Install** (the installed one is older; `installOxp3`: asks first, the oxp3-install job; a
+  toast afterwards says helpers like the Xbox key may need Apply again), "Apply again (N)" for fixes whose status
+  note says "older oxp3-tool" (the plan first), and "OXP3 Deck X available" **Copy install URL**
+  (`https://raw.githubusercontent.com/Featherwolf/OXP3Deck/HEAD/release/OXP3Deck.zip`, pasted into Decky's
+  Developer → Install Plugin from URL; no Decky internals). Updates & logs tab, "Automatic checks": the switch
+  "Check for updates automatically" (tag Now), the last check's time, the plugin notice.
+
 ## Frontend
 
 - 0.4: every setting carries a "When it takes effect" tag and greyed-out controls say why ("When it takes
@@ -475,7 +534,8 @@ finds an old record ended cannot remove the live one a job has written since.
   - XeSS: status line (driver, live, re-login needed), Install / Update / Repair button (xessoffer.ts: Update only
     to a release tag newer than the installed one, from the overview's summary or a check tapped in this session;
     Repair, install.sh again for the same release, when `xess_state` says `repair`, with its reason).
-  - This game (only while a game runs): XeSS options as dropdowns writing the launch options, the advice lines.
+  - This game (only while a game runs): automatic setup, XeSS version, Frame generation, the red rows, Last run and
+    "More for this game" (the Games tab: driver, DirectX 12, logs, FSR → XeSS, 5x–8x, Proton, tips, copy launch options).
   - "More" button → full page.
 - **Full page** (`/oxp3deck/<tab>`, SidebarNavigation): Fixes, Buttons, XeSS, Games, Kernel (CachyOS + Limine
   only), Updates & logs.
@@ -537,6 +597,17 @@ to ours). One mechanism, the same on every screen:
 - **Details body**, always in this order, each part only when it says something: what it does → when it takes
   effect (0.4: the tag's text, then any condition) → risks / when to leave it alone → how to fix (for a problem) → "Technical:" the names (PL1, EPP, unit names,
   env variables, paths, commands) as `lines`. Technical names appear only here.
+- **Retry and Copy (ROADMAP N-3)**: under every `Problem` row, one horizontal `Focusable` row of small buttons
+  (`RetryCopy` in Hint.tsx): **Copy** (`problemText`: the title and the whole error, through clipboard.ts; when no
+  method works, the text in a Details window) and, when `onRetry` is given, **Retry**. `useAction().retry` runs the
+  failed action again from its start (a flow that asks first asks again; null while it runs or without an error);
+  a resource that failed to load passes its `reload` (or `invalidate(key)`). A refused power write, a failed job and
+  the live poller get Copy only.
+- **Error boundaries (ROADMAP N-3)**: `components/Boundary.tsx` (our own class; @decky/ui's `ErrorBoundary` is
+  Steam's, found at run time) around each Quick Access group's body and closed rows (keyed, so opening or closing
+  starts afresh), the Status section, the whole quick panel, each full-page tab and the page. A render error shows
+  one red row, "This section hit an error", its first line, Details (the stack's first lines), Retry (mounts the
+  section again) and Copy details (`crashText`, src/boundary.ts).
 - **Problem rows with a fix**: a conflict, and the EPP/CPU boost controls while one blocks them, get the row pattern
   below ("Conflict rows").
 
@@ -557,6 +628,13 @@ fallback for an id it does not know):
 4. When the row is ignorable: ButtonItem **"I've handled it"** (was "I have done that"), description "Only once it no
    longer changes these settings." → `power_options({ignore})`.
 5. Without `fix_units`: ButtonItem **"How to fix"** → `showDetails(explainBody(row))`.
+
+**"Fix all (N)"** (ROADMAP T1-8, `FixAllRow`, above the rows of every `ConflictRows` and of the Power tab's list):
+shown when 2 or more rows have their own Fix for me (`fixAllRows`: a `FIXABLE` id with `fix_units`, not marked
+handled). One `confirm(fixAllConfirm(rows, info.state.enabled))` (the names in one short sentence, each row's exact
+commands as lines under "# <name>") → `power_fix_all(ids)` (after `powerWriter.drain()`). Each item turned off gets
+its own Undo exactly as after its own Fix for me (also in the quick panel); each item that was not gets its own
+Problem row "<name>: did not work" under the button (its own Fix for me stays the way to try again).
 
 Records whose conflict is gone are listed on the Power tab under "Turned off by OXP3 Deck": `Status` ✓ "<friendly
 name> is off", detail "Turned off <date>.", and ButtonItem **"Undo: turn it back on"**, description "Re-enables what
@@ -698,7 +776,8 @@ is filled in. Rows not listed keep their text.
 | Games | 5x–8x | "Show 5x–8x (experimental)" | "Adds more choices above. Not supported by Intel." |
 | Games | MESA | "Graphics driver" | "Only change if this game misbehaves." |
 | Games | force_vk_vendor | "Compatibility mode" | "Only for games that need it; XeSS slows down." |
-| Games | XESS_LOG | "Save XeSS logs" | "For bug reports; leave off otherwise." |
+| Games | XESS_LOG | "Save XeSS logs" | "For bug reports; leave off otherwise." / on: "Logging on: costs performance." (kept: "… Kept on.") |
+| Games | XESS_LOG off | "Logging turned off after one run" ⓘ (+ "Keep logging on") | "Its logs are saved." / "Logs every run until you turn it off." |
 | Games | FSR | "FSR → XeSS" | per mode ≤ 60 chars |
 | Games | Proton | "Proton: <name>" ✓/✗ | "XeSS fast mode ready" / "Needs the XeSS add-on" / "Some settings won't work" |
 | Games | non-Steam | "Paste these launch options" ⓘ | "OXP3 Deck can't write them for this game." |
@@ -1184,6 +1263,13 @@ on CachyOS and Bazzite alike), `tuned-ppd.service` (the same bus names, `Systemd
    `state`; `conflicts` (the fresh rows); `fixed` (all records). A failed command: `ok: false`, `error` = its last
    stderr line ("<unit>: <text>"), the record stays (Undo still works for what did change).
 
+**`fix_all(ctx, cids)`** (`power_fix_all`, "Fix all"): `cids` must be a non-empty list of str, at most
+`len(FIXABLE)` long (else `{ok: false, error: "power_fix_all: expected a list of conflict ids", results: []}`).
+Under one hold of `_LOCK` (no tick or other call in between) it runs `fix(ctx, cid)` for each id once, in the order
+sent; a failed one does not stop the rest. Answer `PowerFixAllRes`: `results` (`{id, ok, error, steps, notes}` per
+id), `ok` only when all are, `error` the one failure's error or "<k> of <n> were not turned off", and `state`,
+`conflicts`, `fixed`, `applied` as after the last fix. Each fix writes its own record, so Undo stays per item.
+
 **`unfix(ctx, cid)`** (`power_unfix`): `cid` must be a `FIXABLE` key with a record. Each recorded unit (checked
 against `FIXABLE[cid]`) is `show`n first. One that reads `masked` and has `was_masked: false` (a `MASKABLE` unit
 OXP3 Deck masked) is unmasked first: `systemctl --no-ask-password unmask -- <those units>`; a failing unmask keeps
@@ -1288,10 +1374,11 @@ async def power_enable(self, on)                     # _mod("power").enable(self
 async def power_options(self, opts)                  # _mod("power").options(self.ctx, opts)
 async def power_set(self, key, slot, values)         # _mod("power").set_values(self.ctx, key, slot, values)
 async def power_profile(self, appid, name, on)       # _mod("power").profile(self.ctx, appid, name, on)
-async def power_game(self, appid)                    # _mod("power").game(self.ctx, appid)
+async def power_game(self, appid, order=None)       # _mod("power").game(self.ctx, appid, order)
 async def power_take_control(self)                   # _mod("power").take_control(self.ctx)
 async def power_import_sdtdp(self)                   # _mod("power").import_sdtdp(self.ctx)
 async def power_fix(self, cid)                       # _mod("power").fix(self.ctx, cid)
+async def power_fix_all(self, cids)                  # _mod("power").fix_all(self.ctx, cids)
 async def power_unfix(self, cid)                     # _mod("power").unfix(self.ctx, cid)
 ```
 
@@ -1393,7 +1480,7 @@ export const power_enable = callable<[on: boolean], PowerChangeRes>("power_enabl
 export const power_options = callable<[opts: Partial<PowerOptions>], PowerChangeRes>("power_options");
 export const power_set = callable<[key: string, slot: "main" | "ac", values: Partial<PowerValues>], PowerChangeRes>("power_set");
 export const power_profile = callable<[appid: string, name: string | null, on: boolean], PowerChangeRes>("power_profile");
-export const power_game = callable<[appid: string | null], PowerChangeRes>("power_game");
+export const power_game = callable<[appid: string | null, order?: [session: string, seq: number] | null], PowerChangeRes>("power_game");
 export const power_take_control = callable<[], PowerChangeRes>("power_take_control");
 export const power_import_sdtdp = callable<[], PowerImportRes>("power_import_sdtdp");
 export const power_fix = callable<[cid: string], PowerFixRes>("power_fix");
@@ -1441,8 +1528,13 @@ SimpleDeckyTDP's files. Offered only when `sdtdp_found`.
   `GameSessions.RegisterForAppLifetimeNotifications` (re-read `Router.MainRunningApp` at once and after 1 s) plus a
   3 s `setInterval` comparing `runningApp()` (focus switches between running apps); `cb` only on a change.
   `useRunningApp` uses the same emitter (each 1 s re-read timer is dropped from the watch's set when it fires). No AC or suspend listeners in the frontend (the backend sees both).
-- **`src/index.tsx`**: in `definePlugin`, `const stopPower = onMainAppChange((a) => power_game(a))` and one
-  `power_game(runningApp()?.appid ?? null)` at load; `onDismount` calls `stopPower()`.
+- **`src/index.tsx`**: in `definePlugin`, `const stopPower = onMainAppChange((a) => switchGame(a))` and one
+  `switchGame(runningApp()?.appid ?? null)` at load; `onDismount` calls `stopPower()`. `switchGame` (store.ts) sends
+  power_game through a latest-wins queue (src/latest.ts): one call at a time, and only the newest game waiting goes
+  after the one in flight. Each call carries `order = [session, seq]` (a random id per frontend load, a count); the
+  backend answers a lower seq from the same session with `stale: true` and changes nothing. A refused or failed
+  switch shows as a "Game profile switch" Problem row (with Retry) in the Power status rows, and clears on the next
+  switch that works.
 - **`src/store.ts`**: `useResource("power-info", () => power_info(false))` on the pages; a `usePowerState(active)` that
   reloads `power-state` every 2 s only while mounted and `active` (the panel or tab shows), never otherwise (reading
   the GPU clocks wakes the GPU); `invalidate("power")` after each change; the writer's `onState` updates the cached
@@ -2160,6 +2252,41 @@ the game starts in DirectX 12, with `-dx12` after `%command%` (plus `--launcher-
   tag); `tests/test_games.py` `FrameGenerationRefusedTest` (the owner's log, generic codes, a later success, no log,
   the bounded read, links and folders not read).
 
+## Save XeSS logs: one run (ROADMAP T1-12 / C-7)
+
+**What XESS_LOG costs (checked in xess-xmx-linux's source, main at f06dc39, 20 November 2026).** The hook
+(`tools/proton-hook.py` `logs()`) turns `XESS_LOG=1` into `IGDEXT_TRACE=1 IGDEXT_XELL_LOG=1 IGDEXT_XEFG_LOG=1
+XESS_FG_LOG=1`; `XESS_LOG=2` adds Proton's log, `ANV_CM_DEBUG`, the layer's, vkwrap's and the D3D11 bridge's logs (its
+own words: "the game runs slower"). With `XESS_LOG=1` no log writes a line every frame, but the cost is continuous:
+the shim's trace (`Trace.cpp`, opened and closed per line) logs extension calls, mostly at start-up; the XeLL hook
+(`XellHook.cpp` `Hook_Sleep`) times every `xellSleep` (every frame), watches XInput, and writes the first calls, every
+600th call and stats every 100 frames; the XeSS-FG hook asks XeSS-FG for its own debug-level log (closed source, so
+its rate is unknown), checks each tagged resource every frame and logs camera data every 300 frames and every
+`SetUiCompositionState` call. So "costs performance" holds (small per frame, and the files grow all session), and
+the one-run rule stays.
+
+**Rule.** After a run that wrote a fresh log, the plugin takes `XESS_LOG` out of that game's launch options, unless the
+game is set to keep logging. Frontend only (`src/xesslog.ts`, pure and node-tested; `components/XessLog.tsx`):
+
+- **Record** `ui_xess_log` (settings.json, newest 40 games): `{[appid]: {on_at, keep?, off_at?}}` (Unix seconds).
+  The Save XeSS logs toggle writes `{on_at: now}` when turned on and drops the record when turned off.
+- **When**: in `AutoSetup.tsx` `exitFlow` (a few seconds after the game quits, never while it runs; whatever the
+  automatic setup's switch says), after OptiScaler's waiting launch options and before the pass. `exitStep`:
+  - logging on, kept: nothing;
+  - on, no record (set by hand or before this version) or a record from an earlier turn-off: the record starts now,
+    the next run decides;
+  - on, and `game_info(appid).game.last_run.log_at` is newer than `on_at`: `setLaunchOptions` with only `XESS_LOG`
+    removed (`setManaged`; `isRunning` checked right before), record `{on_at, off_at: now}`, toast "XeSS logging
+    turned off for <name> after one run."; a failed write leaves it on for the next exit to try. The game is not
+    marked Manual (the plugin's own change);
+  - on, no fresh log (the game did not use XeSS, a Proton without the hook): stays on;
+  - off with a note: the note ends at an exit at least 120 s after `off_at` (the end of the next run; the same exit
+    is often seen twice).
+- **UI** (GameControls): while on, the toggle's line is "Logging on: costs performance." ("… Kept on." when kept);
+  the quick panel's This game shows it as a row too, since the toggle is on the Games tab only. After a turn-off, on
+  the Games tab: "Logging turned off after one run" ⓘ ("Its logs are saved.") and the button "Keep logging on"
+  (`keep: true`, XESS_LOG=1 back; effect tag Restart the game). Turning the toggle off clears keep.
+
 ## When it takes effect (effect tags)
 
 Every setting shows when it takes effect, in the short-line style, next to its one line, in its confirm dialog and,
@@ -2205,6 +2332,7 @@ after a change that is not immediate, in a pending row.
 | `power.enable` | Power control (TDP) | Now |
 | `power.game_profile` | Separate profile for <game> | Now |
 | `power.pl1`, `power.pl2`, `power.gpu_min`, `power.gpu_max`, `power.epp`, `power.turbo` | the sliders and choices | Now |
+| `power.pl2_follow` | Steadier fps after loads | Now |
 | `power.reset`, `power.new_profile`, `power.delete_profile` | Reset to device defaults, New / Delete profile | Now |
 | `power.per_game`, `power.split_ac`, `power.extended`, `power.poll_s` | Power tab options | Now |
 | `power.cpu_max_pct`, `power.soc`, `power.gpu_profile`, `power.cpu_min_pct`, `power.cpu_caps`, `power.epp_split` | new controls | Now |
@@ -2413,7 +2541,7 @@ row moves out of Power); the rows themselves, their texts, tags and Details stay
 |---|---|---|---|---|---|
 | 0 | — | none (always shown, no header) | always | device status, "Do not reboot yet" (red), "Reboot to finish", the running job (`JobView quick`) | — |
 | 1 | `live` | "Live" | always | one row per readout (`liveRows`, as the Power tab's "Live readouts") | closed |
-| 2 | `game` | "This game" | a game runs | AutoSetupSwitch, the "XeSS settings for this game" note, "Separate profile for <game>" (moved here from Power, power control on and per-game profiles allowed), `GameControls quick running` | open |
+| 2 | `game` | "This game" | a game runs | AutoSetupSwitch, the "XeSS settings for this game" note, "Separate profile for <game>" (moved here from Power, power control on and per-game profiles allowed), `GameControls quick running` (slim, below) | open |
 | 3 | `power` | "Power" | always | the power status line, "Power control (TDP)", Paused, Sustained power, Boost power, GPU maximum speed, GPU power saving, the Power red rows (below) | open |
 | 4 | `cpu` | "CPU" | power control on with a CPU control, or the scheduler mode exists | CPU speed cap, CPU vs GPU balance, CPU minimum speed, Show advanced CPU options (+ per-core rows), CPU boost, CPU now, CPU scheduler mode | closed |
 | 5 | `battery` | "Fan & battery" | any of fan / charge limit / charge behaviour exists (`ExtrasState`) | Fan, Battery charge limit, Run from charger | closed |
@@ -2423,6 +2551,18 @@ row moves out of Power); the rows themselves, their texts, tags and Details stay
 
 (Performance batch: Power gains the preset row, the low-battery row and the VRR row; This game gains the power
 tip rows: "Performance batch → A, C, D, E".)
+
+**`GameControls quick` is slim (ROADMAP T1-3)**, so Power is a few presses down while a game runs. It keeps: the
+"XeSS fast mode not installed" row, the automatic setup rows (state, rollback, Undo), the launch options typo, XeSS
+version, Frame generation, Saving / Saved / the pending rows / Problem, the paste rows when OXP3 Deck cannot write,
+"Copy launch options" only when it is needed (`copyNeeded`: Steam refused, a shortcut, unreadable), OptiScaler once it
+is in the game (its upscaler and frame generation replace the greyed XeSS ones), Game check errors, the red known
+issues (a crash with frame generation set), Last run, and last "More for this game" (`openPage("games")`, no effect
+tag; its line `gameMoreLine(n)` counts the ✗ rows only the Games tab shows). The Games tab (no `quick`) shows
+everything: 5x–8x, Graphics driver, Compatibility mode, Start in DirectX 12, Save XeSS logs, FSR → XeSS, Proton, the
+other known issues, the log checks, "No XeSS frame generation in this game", tips, the Launch options row, Copy
+launch options and OptiScaler's install. The moved rows apply only at the next start anyway. This game stays open
+by default.
 
 Why this order and these cuts:
 - **Live is second** (not after CPU): closed, its header's summary is today's "Live" line (`liveLine`), so the panel
@@ -4204,6 +4344,30 @@ failed job with the stopped text as its error (the partial result is still store
 `pl2_w` (for `MeasureResult`); `power.time_windows(ctx)` wraps `powerhw.time_windows` for the self-test; the
 shared fixture's shape is `{range: {battery, ac}, caps, fields, cases: [{name, slot, opts, range, ceiling,
 presets: {id: {field: value}}}]}`.)
+
+### F. Boost follows sustained power, opt-in (T1-1 amended by C-3; N-5 read part already in B)
+
+- **Field** `pl2_follow: bool | null` in every `PowerValues` slot (`FIELDS` grows to 20; null = off). Off for every
+  profile, new ones included: nothing turns it on but the toggle (a new game profile copies Default, as always).
+- **`power._resolve`**: when the slot's `pl1_w` is set, `pl2_w` is null and `pl2_follow` is true, PL2 =
+  `follow_pl2(pl1, pl2_max, ac)` = `max(pl1, min(pl2_max, floor(pl1 × k + 0.5)))`, k = 1.5 on AC, 1.25 on battery or
+  AC unknown (half up, as power.ts `followPl2`; `tests/fixtures/power/follow.json` keeps them equal), of the clamped
+  PL1. An explicit `pl2_w` wins. The applied values carry `pl2_follow: true` while it acts. An AC change re-applies
+  as before, so the factor follows the charger.
+- **Low slot** (`_merge_low`): `pl2_follow` is on when either side has it (it only lowers boost); a following normal
+  boost counts as `follow_pl2(merged pl1, …, battery)`, so the Battery preset's 15 W never raises it.
+- **Presets**: unchanged values. A preset with its own boost (all but Performance) also writes `pl2_follow: null`
+  when it was on (`presetWrite`); Undo restores it (`presetFieldsOf` keeps a true `pl2_follow`). `presetLine` and
+  `powerSummary` say "boost follows sustained" / "boost follows".
+- **UI** (ValuesEditor, right under Boost power, quick panel too): toggle "Steadier fps after loads ⓘ", one line
+  "Smaller power burst after loading screens." (tag `power.pl2_follow`, Now), greyed "Set sustained power first."
+  while sustained is the device default. On writes `{pl2_follow: true, pl2_w: null}`; off writes `{pl2_follow:
+  null}`. While it acts the Boost slider is greyed, shows the computed value and is labelled "Boost power · follows
+  sustained (+25 %)" ("+50 %" for a slot that runs on AC); the sustained slider no longer drags boost along. Details:
+  what it limits, "not a battery setting", the device's time windows (`timeWindowsLine`), and that a hand-set boost
+  is replaced and an own-boost preset turns it off.
+- **Why opt-in** (C-3): RAPL holds the average at PL1 over tau; PL2 only shapes the burst after idle or loading, so
+  the gain is less fps see-saw for about tau after a load, not battery. Unmeasured on the OXP3.
 
 ### Interfaces (main.py, api.ts, backend.ts, types.ts)
 

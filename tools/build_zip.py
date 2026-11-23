@@ -1,8 +1,13 @@
 #!/usr/bin/env python3
 """Build release/OXP3Deck.zip, the file Decky installs with "Install Plugin from URL" or "from ZIP File".
 
-    pnpm build && pnpm zip                   # writes release/OXP3Deck.zip
+    pnpm build && pnpm zip                   # runs the checks, then writes release/OXP3Deck.zip
     python3 tools/build_zip.py --out FILE    # writes FILE instead
+    python3 tools/build_zip.py --skip-checks # builds without running the checks (says so)
+
+Before it builds, it runs the same checks as `pnpm check` (the Python tests, the node tests and tsc --noEmit, side by
+side, about 40 s) and refuses to build when one fails or cannot start. --skip-checks is for a run that has just done
+them itself (release.yml, tests/test_package.py).
 
 The zip holds one folder named after plugin.json's "name": the frontend (dist/), the backend (main.py and
 py_modules/oxp3deck/*.py), a copy of oxp3-tool (vendor/oxp3-tool, checked against its .sha256;
@@ -24,6 +29,7 @@ import json
 import os
 import re
 import stat
+import subprocess
 import sys
 import tempfile
 import zipfile
@@ -42,6 +48,16 @@ DOCS = ("LICENSE", "THIRD_PARTY_NOTICES.md", "README.md", "CREDITS.md")
 TOOL = "oxp3-tool"
 # The name is also the plugin's folder and the zip's file name, and Decky builds paths from it.
 NAME_RE = re.compile(r"^[A-Za-z0-9._-]+$")
+
+
+# What `pnpm check` runs (package.json), run without pnpm so the builder only needs python3, node and node_modules.
+CHECKS = (
+    ("Python tests", [sys.executable, "-m", "unittest", "discover", "-s", "tests", "-t", "."]),
+    ("JS tests", ["node", "--test", "tests/js"]),
+    ("TypeScript check", ["node", "node_modules/typescript/bin/tsc", "--noEmit"]),
+)
+# Set for the checks' own processes, so a test that runs this builder does not start the checks again.
+NESTED = "OXP3DECK_BUILD_CHECKS"
 
 
 class BuildError(Exception):
@@ -230,10 +246,44 @@ def build(out: Path | None = None, plugin: Path = PLUGIN, vendor: Path | None = 
     return out, hashlib.sha256(data).hexdigest(), plan
 
 
+def run_checks(checks=None, cwd: Path = PLUGIN) -> list[tuple[str, str]]:
+    """Run the checks side by side; returns (label, output) for each one that failed or could not start."""
+    checks = CHECKS if checks is None else checks
+    env = dict(os.environ, **{NESTED: "1"})
+    procs, failed = [], []
+    for label, argv in checks:
+        try:
+            procs.append((label, subprocess.Popen(argv, cwd=str(cwd), env=env, stdin=subprocess.DEVNULL,
+                                                  stdout=subprocess.PIPE, stderr=subprocess.STDOUT, text=True,
+                                                  errors="replace")))
+        except OSError as e:
+            failed.append((label, f"could not start {argv[0]}: {e}"))
+    for label, proc in procs:
+        out, _ = proc.communicate()
+        if proc.returncode != 0:
+            failed.append((label, out))
+    return failed
+
+
 def main(argv: list[str] | None = None) -> int:
     p = argparse.ArgumentParser(description=__doc__.splitlines()[0])
     p.add_argument("--out", type=Path, help="where to write the zip (default: release/<name>.zip)")
+    p.add_argument("--skip-checks", action="store_true",
+                   help="build without running the tests and the TypeScript check first")
     args = p.parse_args(argv)
+    if args.skip_checks:
+        print("warning: checks skipped (--skip-checks)", file=sys.stderr)
+    elif os.environ.get(NESTED):
+        pass   # started by one of the checks below: they are running already
+    else:
+        failed = run_checks()
+        for label, out in failed:
+            print(f"--- {label} failed ---\n{out.rstrip()}", file=sys.stderr)
+        if failed:
+            names = ", ".join(label for label, _ in failed)
+            print(f"build_zip: not built, failed: {names} (fix them, or pass --skip-checks)", file=sys.stderr)
+            return 1
+        print("checks passed: " + ", ".join(label for label, _ in CHECKS))
     try:
         out, digest, plan = build(args.out.resolve() if args.out else None)
     except (BuildError, OSError) as e:

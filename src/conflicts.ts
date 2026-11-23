@@ -277,6 +277,37 @@ export const undoConfirm = (rec: Pick<PowerFixed, "id" | "name" | "units">, date
   };
 };
 
+type FixRow = Pick<PowerConflict, "id" | "name"> & Partial<Pick<PowerConflict, "fix_units" | "fix_plan" | "ignored">>;
+const andList = (xs: string[]) => (xs.length < 2 ? xs.join("") : `${xs.slice(0, -1).join(", ")} and ${xs[xs.length - 1]}`);
+
+/** The rows "Fix all" covers: the ones with their own Fix for me (units to turn off, not marked handled). The button
+ * shows only for 2 or more. */
+export const fixAllRows = <T extends FixRow>(rows: T[]): T[] =>
+  rows.filter((r) => fixable(r.id) && !!r.fix_units?.length && !r.ignored);
+
+/** The one confirmation of "Fix all": the names in short text, each one's exact commands as lines (the costs are in
+ * each row's Details). `powerOn` as in fixConfirm. */
+export const fixAllConfirm = (rows: FixRow[], powerOn?: boolean): DialogText => {
+  const names = rows.map((r) => friendlyName(r.id, r.name));
+  const each = rows.map((r) => fixConfirm(r, powerOn));
+  const masks = each.some((d) => d.lines.some((l) => l.includes(" mask -- ")));
+  const cpu = powerOn && rows.some((r) => CPU.has(r.id)) ? " Then OXP3 Deck can set energy preference and CPU boost." : "";
+  return {
+    title: `Turn off ${rows.length} programs?`,
+    text: `OXP3 Deck turns off ${andList(names)}, one after another.${masks ? " Masked ones cannot be started again by anything else." : ""} Nothing is uninstalled.${cpu} Each gets its own Undo.`,
+    lines: rows.flatMap((_r, i) => [`# ${names[i]}`, ...each[i].lines]),
+    linesTitle: "Commands (run as root):",
+    ok: "Turn them off",
+    effect: "now",
+  };
+};
+
+/** "Fix all"'s outcome: each item that was not turned off, with its friendly name and its own error. */
+export const fixAllFailures = (results: { id: string; ok: boolean; error: string | null }[], rows: FixRow[] = []):
+  { id: string; name: string; error: string }[] =>
+  results.filter((r) => !r.ok).map((r) =>
+    ({ id: r.id, name: friendlyName(r.id, rows.find((x) => x.id === r.id)?.name), error: r.error || "failed" }));
+
 /** The Undo row's Details: the units as they were before OXP3 Deck changed them. */
 export const fixedLines = (rec: Pick<PowerFixed, "units">): string[] =>
   rec.units.map((u) => `${u.unit}: was ${u.was_enabled || "unknown"}${u.was_active ? ", running" : ", not running"}${u.was_masked === false ? ", not masked (OXP3 Deck masked it)" : ""}`);

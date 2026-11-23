@@ -6,6 +6,8 @@ name: Release
 # - Pushing an annotated tag such as v0.1.0. The tag's message becomes the notes.
 # The version must match package.json and the version inside the committed zip (run pnpm build && pnpm zip and
 # commit release/OXP3Deck.zip first). Versions below 1.0.0 are published as pre-releases.
+# Before publishing it runs the Python tests, the node tests and the TypeScript check, rebuilds the zip from the
+# tagged sources and stops unless the rebuilt zip holds the same files and bytes as the committed one.
 on:
   push:
     tags: ["v*"]
@@ -46,6 +48,25 @@ jobs:
           if bad or not (want == repo == inner) or hashlib.sha256(tool).hexdigest() != sums:
               sys.exit("the zip is damaged or its version does not match the tag: rebuild and commit it")
           PY
+      - uses: pnpm/action-setup@v4   # the version comes from package.json's packageManager
+      - uses: actions/setup-node@v4
+        with:
+          node-version: "22"   # 22.18 or later runs src/*.ts in the node tests without a flag
+          cache: pnpm
+      - name: Install the frontend's dependencies
+        run: pnpm install --frozen-lockfile
+      - name: Build the frontend
+        run: pnpm build
+      - name: Python tests
+        run: python -m unittest discover -s tests -t .
+      - name: JS tests
+        run: pnpm test:js
+      - name: TypeScript check
+        run: pnpm typecheck
+      - name: Check the committed zip matches a fresh build
+        run: |
+          python3 tools/build_zip.py --skip-checks --out "$RUNNER_TEMP/rebuilt/OXP3Deck.zip"
+          python3 tools/compare_zips.py release/OXP3Deck.zip "$RUNNER_TEMP/rebuilt/OXP3Deck.zip"
       - name: Publish
         env:
           GH_TOKEN: ${{ github.token }}
