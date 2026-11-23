@@ -54,14 +54,19 @@ sampler = _load("sampler")           # the background sampler and the per-game p
 extras = _load("extras")
 optiscaler = _load("optiscaler")
 autosetup = _load("autosetup")
+updates = _load("updates")            # the daily update checks (ROADMAP T1-9)
 
 OXP3_VENDOR = "ONE-NETBOOK"          # oxp3_tool/detect.py OXP3_SYS_VENDOR / OXP3_PRODUCT_NAME
 OXP3_PRODUCT = "ONEXPLAYER 3"
-SETTING_KEYS = {"xess_driver": (str, type(None)), "xess_shim_system": (bool,)}
+SETTING_KEYS = {"xess_driver": (str, type(None)), "xess_shim_system": (bool,),
+                "update_auto": (bool,)}   # updates.SWITCH_KEY (a test keeps them equal)
 UI_KEY = re.compile(r"^ui_[A-Za-z0-9_]{1,60}$")
+FILE_NAME = re.compile(r"[a-z][a-z0-9_-]{0,40}\.json")     # a settings file in DECKY_PLUGIN_SETTINGS_DIR (file_fresh)
 MAX_SETTING_BYTES = 4096
 MAX_UI_KEYS = 64
 POWER_TICK_S = 2                     # the power watch loop's period: power.TICK_S (a test keeps them equal)
+UPDATE_FIRST_S = 180                 # the first automatic update check after a start: updates.FIRST_S
+UPDATE_WAKE_S = 600                  # then a look every 10 min whether one is due: updates.WAKE_S
 UNLOAD_EXTRAS_S = 3                  # extras.unload's budget: Decky kills the process 5 s after asking it to stop
 REBOOT_KEY = "oxp3_reboot_pending"   # settings.json: {boot_id, value} from the last oxp3-tool status
 OXP3_STILL_RUNNING = ("the plugin restarted while oxp3-tool was running; it may still be running: read the status "
@@ -149,6 +154,7 @@ class Plugin:
         self._broken = None
         self._boot = None
         self._watch = None
+        self._updates = None
         try:
             self.ctx = context.from_decky()
             self.settings = context.Settings(os.path.join(self.ctx.settings_dir, "settings.json"))
@@ -249,6 +255,38 @@ class Plugin:
             log.error("start-up check failed (carrying on):\n%s", traceback.format_exc())
         if self._broken is None and self._watch is None:
             self._watch = asyncio.get_running_loop().create_task(self._power_watch())
+        if self._broken is None and self._updates is None:
+            self._updates = asyncio.get_running_loop().create_task(self._update_watch())
+
+    async def _update_watch(self):
+        """The daily update checks (DESIGN.md "Daily update checks"): a first look UPDATE_FIRST_S after the start,
+        then one every UPDATE_WAKE_S; updates.tick decides whether a check is due and runs it. Failures are logged
+        only; the loop ends when the updates module did not load."""
+        await asyncio.sleep(UPDATE_FIRST_S)
+        while True:
+            try:
+                did = await asyncio.get_running_loop().run_in_executor(None, self._update_tick)
+                if did not in ("off", "not due"):
+                    log.info("automatic update check: %s", did)
+            except Unavailable as e:
+                log.error("update checks stopped: %s", e)
+                return
+            except Exception:
+                log.error("automatic update check failed:\n%s", traceback.format_exc())
+            await asyncio.sleep(UPDATE_WAKE_S)
+
+    def _update_tick(self) -> str:
+        u = _mod("updates")
+        running = self.jobs.running()
+        try:
+            game = _mod("power").game_now(self.ctx).get("app")
+        except Exception:
+            game = None              # unknown (power did not load): a few small requests are no harm mid-game
+        version = str(getattr(decky, "DECKY_PLUGIN_VERSION", "") or "")
+        steps = {"oxp3": lambda: _mod("oxp3tool").update_check(self.ctx, self.settings),
+                 "xess": lambda: _mod("xess").check_update(self.ctx, self.settings),
+                 "plugin": lambda: _mod("updates").plugin_check(version)}
+        return u.tick(self.ctx, self.settings, busy=running.title if running else None, game=game, steps=steps)
 
     async def _power_watch(self):
         """AC changes, resume, the boot apply and drift are seen here (DESIGN.md "Events"), then the extras' tick
@@ -372,6 +410,9 @@ class Plugin:
         if self._watch is not None:
             self._watch.cancel()
             self._watch = None
+        if self._updates is not None:
+            self._updates.cancel()
+            self._updates = None
         # A running self-test stops before its next probe and puts the profile back (its finally) first.
         if self._broken is None and selftest is not None:
             try:
@@ -426,7 +467,44 @@ class Plugin:
             "reboot_pending": part("reboot", self._reboot_pending, False),
             "do_not_reboot": part("rebuild marker", lambda: _mod("oxp3tool").rebuild_unfinished(ctx), None),
             "power": part("power", lambda: _mod("power").summary(ctx), None),
+            "files": part("files", self._file_problems, []),
+            "updates": part("updates", lambda: _mod("updates").state(
+                self.settings, str(getattr(decky, "DECKY_PLUGIN_VERSION", "") or "")), None),
         }
+
+    # ---- damaged or newer settings files (ROADMAP T1-5) ------------------------------------------------------------
+
+    def _file_problems(self) -> list:
+        """FileProblem rows for the Status section: auto.json and optiscaler.json (damaged until Start fresh, or
+        from a newer OXP3 Deck: saves refused), then the other settings files found damaged and started empty."""
+        out = []
+        for mod in ("autosetup", "optiscaler"):
+            try:                                        # a module that did not load must not hide the other rows
+                p = _mod(mod).file_problem(self.ctx)
+            except Exception:
+                log.error("file problems: %s:\n%s", mod, traceback.format_exc())
+                continue
+            if p:
+                out.append(dict(p, action="fresh"))
+        for p in context.reset_problems(self.ctx.settings_dir):
+            out.append(dict(p, action="dismiss"))
+        return out
+
+    async def file_fresh(self, file):
+        """Start fresh on auto.json or optiscaler.json (the old file is set aside), or dismiss the row of another
+        settings file that already started empty. {ok, error, files}."""
+        def go():
+            if file == "auto.json":
+                res = _mod("autosetup").start_fresh(self.ctx)
+            elif file == "optiscaler.json":
+                res = _mod("optiscaler").start_fresh(self.ctx)
+            elif isinstance(file, str) and FILE_NAME.fullmatch(file):
+                context.dismiss_reset(os.path.join(self.ctx.settings_dir, file))
+                res = {"ok": True, "error": None}
+            else:
+                return {"ok": False, "error": "file_fresh: not a settings file", "files": []}
+            return dict(res, files=self._file_problems())
+        return await self._call("file_fresh", go)
 
     # ---- oxp3-tool -----------------------------------------------------------------------------------------------
 
@@ -666,8 +744,8 @@ class Plugin:
         return await self._call("power_profile",
                                 lambda: self._synced(_mod("power").profile(self.ctx, appid, name, on)))
 
-    async def power_game(self, appid):
-        return await self._call("power_game", lambda: self._synced(_mod("power").game(self.ctx, appid)))
+    async def power_game(self, appid, order=None):
+        return await self._call("power_game", lambda: self._synced(_mod("power").game(self.ctx, appid, order)))
 
     async def power_take_control(self):
         return await self._call("power_take_control", lambda: self._synced(_mod("power").take_control(self.ctx)))
@@ -678,6 +756,10 @@ class Plugin:
     async def power_fix(self, cid):
         """Fix for me: stop and disable conflict `cid`'s whitelisted services (the frontend asks first)."""
         return await self._call("power_fix", lambda: _mod("power").fix(self.ctx, cid))
+
+    async def power_fix_all(self, cids):
+        """Fix all: power_fix for each of these conflict ids under one lock (the frontend asks once, listing them)."""
+        return await self._call("power_fix_all", lambda: _mod("power").fix_all(self.ctx, cids))
 
     async def power_unfix(self, cid):
         """Undo of power_fix: enable and start again exactly what it turned off."""

@@ -67,7 +67,7 @@ export const KernelTab: FC = () => {
         <PanelSectionRow>
           {!k && kr.loading && <Status ok={null} label="Reading the kernels…" />}
           {!k && !kr.loading && running && <Status ok={null} label="Waiting for the running task" />}
-          <Problem what="oxp3-tool kernel" error={kr.data && !kr.data.ok ? kr.data.error : null} />
+          <Problem what="oxp3-tool kernel" error={kr.data && !kr.data.ok ? kr.data.error : null} onRetry={kr.reload} />
         </PanelSectionRow>
         {k?.kernels.map((x) => (
           <PanelSectionRow key={x.package}>
@@ -108,7 +108,7 @@ export const KernelTab: FC = () => {
                 </ButtonItem>
               </WithDetails>
             )}
-            <Problem what="Kernel" error={act.error} />
+            <Problem what="Kernel" error={act.error} onRetry={act.retry} />
           </PanelSectionRow>
           {act.job && <JobView job={act.job} lines={6} />}
         </PanelSection>

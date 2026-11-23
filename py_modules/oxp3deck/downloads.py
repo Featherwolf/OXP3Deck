@@ -106,6 +106,44 @@ def latest_release_tag(repo: str) -> str:
     raise DownloadError(f"latest release of {repo}: {why}; {api} named no usable tag")
 
 
+_SEMVER = re.compile(r"^v?(\d{1,9})\.(\d{1,9})\.(\d{1,9})(?:-([0-9A-Za-z.-]{1,60}))?(?:\+[0-9A-Za-z.-]*)?$")
+
+
+def semver_key(tag) -> tuple | None:
+    """A sort key for "v1.2.3" / "1.2.3-beta.2" (semver order: a pre-release sorts below its release), or None."""
+    m = _SEMVER.match(str(tag or "").strip())
+    if not m:
+        return None
+    pre = m.group(4)
+    # a release sorts above any of its pre-releases; numeric identifiers below alphanumeric ones
+    rest = (1,) if pre is None else (0, *[(0, int(p), "") if p.isdigit() else (1, 0, p) for p in pre.split(".")])
+    return (int(m.group(1)), int(m.group(2)), int(m.group(3)), *rest)
+
+
+def newest_release_tag(repo: str) -> str:
+    """The highest-version tag among the releases of owner/name, pre-releases included (the /releases API: the
+    /releases/latest redirect and API skip pre-releases, and OXP3Deck marks every 0.x release as one). Drafts and
+    tags that are not versions are left out. One API request (60 an hour per address). Raises DownloadError."""
+    if not _REPO.match(repo) or ".." in repo:
+        raise DownloadError(f"releases: bad repository name {repo!r}")
+    api = f"https://api.github.com/repos/{repo}/releases?per_page=30"
+    try:
+        data = json.loads(_get(api, 30, 2_000_000, "application/vnd.github+json"))
+    except ValueError as e:
+        raise DownloadError(f"releases of {repo}: {api}: not JSON") from e
+    best = None
+    for rel in data if isinstance(data, list) else []:
+        if not isinstance(rel, dict) or rel.get("draft"):
+            continue
+        tag = rel.get("tag_name")
+        key = semver_key(tag) if isinstance(tag, str) and _TAG.match(tag) else None
+        if key is not None and (best is None or key > best[0]):
+            best = (key, tag)
+    if best is None:
+        raise DownloadError(f"releases of {repo}: {api} named no version tag")
+    return best[1]
+
+
 def _check_private(folder: str) -> None:
     try:
         st = os.lstat(folder)

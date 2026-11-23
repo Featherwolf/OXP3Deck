@@ -27,6 +27,7 @@ const guard = <K extends ResName>(name: K, empty: Record<string, unknown> = {}):
 };
 
 export const get_overview = guard("get_overview");
+export const file_fresh = guard("file_fresh", { files: [] });
 export const oxp3_status = guard("oxp3_status");
 export const oxp3_catalog = guard("oxp3_catalog");
 export const oxp3_plan = guard("oxp3_plan");
@@ -52,7 +53,7 @@ export const opti_set = guard("opti_set", { opti: null });
 export const opti_remove = guard("opti_remove", { job: null });
 export const opti_update = guard("opti_update", { job: null });
 export const opti_options = guard("opti_options", { opti: null });
-export const auto_state = guard("auto_state", { on: false, confirmed_at: null, games: {} });
+export const auto_state = guard("auto_state", { on: false, confirmed_at: null, games: {}, read_only: null });
 export const auto_enable = guard("auto_enable", { on: false, confirmed_at: null, games: {} });
 export const auto_pending = guard("auto_pending", { appids: [] });
 export const auto_plan = guard("auto_plan", { plan: null });
@@ -74,6 +75,7 @@ export const power_take_control = guard("power_take_control", NO_CHANGE);
 export const power_import_sdtdp = guard("power_import_sdtdp", { imported: [], skipped: [], state: null });
 const NO_FIX = { steps: [], notes: [], state: null, conflicts: [], fixed: [], applied: null };
 export const power_fix = guard("power_fix", NO_FIX);
+export const power_fix_all = guard("power_fix_all", { results: [], state: null, conflicts: [], fixed: [], applied: null });
 export const power_unfix = guard("power_unfix", NO_FIX);
 export const power_live = guard("power_live", { live: null });
 export const power_selftest = guard("power_selftest", { job: null });

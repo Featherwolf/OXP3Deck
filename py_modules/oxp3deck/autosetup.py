@@ -234,18 +234,23 @@ def _norm_game(appid: str, g) -> dict | None:
     }
 
 
+TOP_KEYS = ("version", "on", "confirmed_at", "plan_version", "games")
+GAME_KEYS = ("appid", "name", "class", "skip_why", "mode", "mode_why", "mode_by", "seen_at", "plan_version", "changes",
+             "session", "rollback_due", "notice", "last_error")
+
+
 def _load(ctx) -> dict:
+    """The state. Private keys (never sent, never saved as such): _problem (context.load_guarded: damaged or from a
+    newer OXP3 Deck; saves are refused), _keep (top-level keys this version does not know) and _keep_games (each
+    game's unknown keys): both written back as they were."""
     st = _empty()
-    raw = context.read_small(_path(ctx), READ_MAX)
-    if raw is None:
+    data, problem = context.load_guarded(_path(ctx), VERSION, READ_MAX)
+    st["_problem"] = problem
+    st["_keep"] = {}
+    st["_keep_games"] = {}
+    if data is None:
         return st
-    try:
-        data = json.loads(raw.decode("utf-8"))
-    except ValueError:
-        log.warning("autosetup: %s is not valid JSON; starting empty", _path(ctx))
-        return st
-    if not isinstance(data, dict):
-        return st
+    st["_keep"] = {k: v for k, v in data.items() if k not in TOP_KEYS}
     st["on"] = data.get("on") is True
     st["confirmed_at"] = _num(data.get("confirmed_at"))
     gs = data.get("games")
@@ -255,12 +260,22 @@ def _load(ctx) -> dict:
             g = _norm_game(a, v) if a else None
             if g is not None:
                 st["games"][a] = g
+                extra = {x: y for x, y in v.items() if x not in GAME_KEYS}
+                if extra:
+                    st["_keep_games"][a] = extra
     _trim(st)
     return st
 
 
 def _live(g: dict) -> list[dict]:
     return [c for c in g["changes"] if c["state"] == "live"]
+
+
+def _in_use(g: dict) -> bool:
+    """The game still has something of ours in effect, or bookkeeping that undoes it: a live change (launch
+    options, a Proton move, an OptiScaler install), a crash rollback due, or a run in progress. The trim never
+    drops it: without its record the change could not be undone."""
+    return bool(_live(g)) or g["rollback_due"] is not None or g["session"]["started_at"] is not None
 
 
 def _trim_changes(g: dict) -> None:
@@ -273,30 +288,90 @@ def _trim_changes(g: dict) -> None:
         g["changes"].remove(min(old, key=lambda c: c["at"]))
 
 
+def _drop_quiet(st: dict) -> bool:
+    """Drops the longest-unseen game with nothing in use (_in_use); False when there is none."""
+    quiet = [g for g in st["games"].values() if not _in_use(g)]
+    if not quiet:
+        return False
+    a = min(quiet, key=lambda g: g["seen_at"])["appid"]
+    del st["games"][a]
+    st.get("_keep_games", {}).pop(a, None)
+    return True
+
+
 def _trim(st: dict) -> None:
     for g in st["games"].values():
         _trim_changes(g)
-    while len(st["games"]) > MAX_GAMES:
-        quiet = [g for g in st["games"].values() if not _live(g)] or list(st["games"].values())
-        del st["games"][min(quiet, key=lambda g: g["seen_at"])["appid"]]
+    while len(st["games"]) > MAX_GAMES and _drop_quiet(st):
+        pass
+
+
+def _drop_history(st: dict) -> bool:
+    """Drops the oldest ended change (undone, rolled back, superseded) of any game; False when there is none."""
+    old = [(c["at"], a, c) for a, g in st["games"].items() for c in g["changes"]
+           if c["state"] != "live" and c["id"] != g["rollback_due"]]
+    if not old:
+        return False
+    _at, a, c = min(old, key=lambda x: x[0])
+    st["games"][a]["changes"].remove(c)
+    return True
+
+
+def _blob(st: dict) -> bytes:
+    out = dict(st.get("_keep") or {})
+    out.update({k: v for k, v in st.items() if not k.startswith("_")})
+    keep = st.get("_keep_games") or {}
+    out["games"] = {a: dict(keep.get(a) or {}, **g) for a, g in st["games"].items()}
+    return (json.dumps(out, separators=(",", ":"), sort_keys=True) + "\n").encode("utf-8")
 
 
 def _save(ctx, st: dict) -> None:
+    """Raises context.Refused while the file has a problem, or when even without quiet games and old history it
+    would be too big to read back; OSError."""
+    context.guard_save(_path(ctx), st.get("_problem"))
     _trim(st)
     st["plan_version"] = PLAN_VERSION
+    st["version"] = VERSION
     while True:
-        blob = (json.dumps(st, separators=(",", ":"), sort_keys=True) + "\n").encode("utf-8")
-        if len(blob) <= READ_MAX or not st["games"]:
+        blob = _blob(st)
+        if len(blob) <= READ_MAX:
             break
-        quiet = [g for g in st["games"].values() if not _live(g)] or list(st["games"].values())
-        del st["games"][min(quiet, key=lambda g: g["seen_at"])["appid"]]
+        if not (_drop_quiet(st) or _drop_history(st)):
+            raise context.Refused(f"{STATE_NAME}: too many games with changes in effect to save")
     context.write_atomic(_path(ctx), blob, 0o644)
+
+
+def file_problem(ctx) -> dict | None:
+    """FileProblem {file, kind "damaged" | "newer", copy, version} for the Status section, or None."""
+    try:
+        with _LOCK:
+            p = _load(ctx)["_problem"]
+    except Exception:
+        log.exception("autosetup: file_problem")
+        return None
+    return dict(p, file=STATE_NAME) if p else None
+
+
+def start_fresh(ctx) -> dict:
+    """{ok, error}: Start fresh (the user tapped it): the damaged or newer auto.json is set aside and an empty one
+    written, so saving works again. Changes made earlier stay in the games; OXP3 Deck no longer lists them."""
+    def go():
+        with _LOCK:
+            if _load(ctx)["_problem"] is None:
+                return {"ok": True, "error": None}
+            st = _empty()
+            context.start_fresh(_path(ctx), _blob(st), 0o644)
+        return {"ok": True, "error": None}
+    return _safe("start_fresh", go)
 
 
 def _safe(name: str, fn):
     """fn() -> dict; an exception becomes {ok: false, error}."""
     try:
         return fn()
+    except context.Refused as e:
+        log.warning("autosetup: %s: %s", name, e)
+        return _err(str(e))
     except Exception as e:
         log.exception("autosetup: %s", name)
         return _err(f"automatic setup: {type(e).__name__}: {e}")
@@ -305,11 +380,14 @@ def _safe(name: str, fn):
 # ---- the switch ----------------------------------------------------------------------------------------------------
 
 def state(ctx) -> dict:
-    """AutoStateRes: {ok, error, on, confirmed_at, games}."""
+    """AutoStateRes: {ok, error, on, confirmed_at, games, read_only}. read_only: why auto.json cannot be saved
+    (damaged or from a newer OXP3 Deck), else None; the frontend then offers no Undo, Try again or mode change."""
     def go():
         with _LOCK:
             st = _load(ctx)
-        return {"ok": True, "error": None, "on": st["on"], "confirmed_at": st["confirmed_at"], "games": st["games"]}
+        ro = context.refused_text(STATE_NAME, st["_problem"]) if st["_problem"] else None
+        return {"ok": True, "error": None, "on": st["on"], "confirmed_at": st["confirmed_at"], "games": st["games"],
+                "read_only": ro}
     return _safe("state", go)
 
 
@@ -707,7 +785,7 @@ def pending(ctx, appids) -> dict:
             return _err(f"automatic setup: appids must be a list of at most {APPIDS_MAX} Steam app ids", appids=[])
         with _LOCK:
             st = _load(ctx)
-        if not st["on"]:
+        if not st["on"] or st["_problem"]:            # no passes while auto.json cannot be saved
             return {"ok": True, "error": None, "appids": []}
         want = []
         for x in dict.fromkeys(ids):
@@ -861,6 +939,8 @@ def undone(ctx, appid, change_id, reason="user") -> dict:
             return _err("automatic setup: bad change id", game=None, kind=None)
         with _LOCK:
             st = _load(ctx)
+            if st["_problem"]:                              # before the opti answer: its remove job must not start
+                return _err(context.refused_text(STATE_NAME, st["_problem"]), game=None, kind=None)
             a, g, bad = _game_or_err(st, appid)
             if bad:
                 return dict(bad, kind=None)
@@ -882,7 +962,10 @@ def opti_undo_precheck(ctx, appid, change_id) -> str | None:
         if a is None:
             return "automatic setup: not a Steam game"
         with _LOCK:
-            g = _load(ctx)["games"].get(a)
+            st = _load(ctx)
+        if st["_problem"]:
+            return context.refused_text(STATE_NAME, st["_problem"])
+        g = st["games"].get(a)
         c = next((x for x in (g or {}).get("changes", []) if x["id"] == change_id), None)
         if c is None or c["state"] != "live" or c["kind"] != "opti":
             return f"automatic setup: no live OptiScaler change {str(change_id)[:40]}"
@@ -1019,6 +1102,8 @@ def opti_precheck(ctx, settings, appid, accepted=False) -> str | None:
             return "automatic setup: not a Steam game"
         with _LOCK:
             st = _load(ctx)
+        if st["_problem"]:
+            return context.refused_text(STATE_NAME, st["_problem"])
         if not st["on"] and accepted is not True:
             return "Automatic setup is off."
         g = st["games"].get(a)

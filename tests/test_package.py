@@ -1,6 +1,8 @@
 """The manifest files and tools/build_zip.py (the OXP3Deck.zip users install with Decky)."""
+import contextlib
 import hashlib
 import importlib.util
+import io
 import json
 import os
 import re
@@ -11,9 +13,11 @@ import tempfile
 import unittest
 import zipfile
 from pathlib import Path
+from unittest import mock
 
 PLUGIN = Path(__file__).resolve().parent.parent   # the repository root
 BUILDER = PLUGIN / "tools" / "build_zip.py"
+COMPARER = PLUGIN / "tools" / "compare_zips.py"
 SEMVER = re.compile(r"^(0|[1-9]\d*)\.(0|[1-9]\d*)\.(0|[1-9]\d*)(-[0-9A-Za-z.-]+)?(\+[0-9A-Za-z.-]+)?$")
 
 
@@ -47,6 +51,161 @@ class ManifestTest(unittest.TestCase):
         self.assertRegex(package["version"], SEMVER)
         self.assertEqual(package["type"], "module")
         self.assertEqual(package["scripts"]["zip"], "python3 tools/build_zip.py")
+        self.assertEqual(package["scripts"]["test:js"], "node --test tests/js")
+        for script in ("test", "test:js", "typecheck"):
+            self.assertIn(f"pnpm {script}", package["scripts"]["check"])
+        # release.yml and ci.yml take pnpm's version from here
+        self.assertRegex(package.get("packageManager", ""), r"^pnpm@\d+\.\d+\.\d+$")
+
+    def test_builder_runs_what_check_runs(self):
+        """build_zip runs pnpm check's commands itself, so it needs no pnpm; keep the two lists the same."""
+        scripts = json.loads((PLUGIN / "package.json").read_text())["scripts"]
+        argvs = [argv for _label, argv in load_builder().CHECKS]
+        self.assertEqual(argvs[0][1:], scripts["test"].split()[1:])
+        self.assertEqual(argvs[1], scripts["test:js"].split())
+        self.assertEqual(argvs[2][-1], scripts["typecheck"].split()[-1])
+        self.assertEqual(Path(argvs[2][1]).parts[:2], ("node_modules", "typescript"))
+        # node 22 runs a folder given to --test as its index.js, which imports every *.test.mjs there
+        self.assertTrue((PLUGIN / "tests" / "js" / "index.js").is_file())
+
+
+class WorkflowTest(unittest.TestCase):
+    """The release only publishes after the checks and a rebuild that matches the committed zip."""
+
+    def read(self, name):
+        return (PLUGIN / ".github" / "workflows" / name).read_text()
+
+    def test_release_checks_before_publish(self):
+        text = self.read("release.yml")
+        publish = text.index("- name: Publish")
+        for step in ("python -m unittest discover -s tests -t .", "pnpm test:js", "pnpm typecheck",
+                     "pnpm install --frozen-lockfile", "pnpm build", "--skip-checks", "tools/compare_zips.py"):
+            self.assertIn(step, text[:publish], step)
+
+    def test_ci_runs_on_push_and_pull_request(self):
+        text = self.read("ci.yml")
+        for step in ("push:", "pull_request:", "pnpm install --frozen-lockfile", "pnpm test:js", "pnpm typecheck",
+                     "python -m unittest discover -s tests -t .", "pnpm build", "--skip-checks"):
+            self.assertIn(step, text, step)
+
+    def test_yaml_parses(self):
+        try:
+            import yaml
+        except ImportError:
+            self.skipTest("pyyaml is not installed")
+        for name in ("release.yml", "ci.yml"):
+            data = yaml.safe_load(self.read(name))
+            self.assertIn("jobs", data, name)
+
+
+class CompareZipsTest(unittest.TestCase):
+    """tools/compare_zips.py: release.yml's check that the committed zip is what the sources build."""
+
+    def setUp(self):
+        spec = importlib.util.spec_from_file_location("oxp3deck_compare_zips", COMPARER)
+        self.cz = importlib.util.module_from_spec(spec)
+        spec.loader.exec_module(self.cz)
+        self.tmp = tempfile.TemporaryDirectory()
+        self.addCleanup(self.tmp.cleanup)
+
+    def make(self, name, files, stamp=(1980, 1, 1, 0, 0, 0), mode=0o644):
+        path = Path(self.tmp.name) / name
+        with zipfile.ZipFile(path, "w") as zf:
+            for fname, data in files.items():
+                zi = zipfile.ZipInfo(fname, date_time=stamp)
+                zi.external_attr = (stat.S_IFREG | mode) << 16
+                zf.writestr(zi, data)
+        return str(path)
+
+    def test_same_files_other_times_match(self):
+        a = self.make("a.zip", {"x/a": b"1", "x/b": b"2"})
+        b = self.make("b.zip", {"x/b": b"2", "x/a": b"1"}, stamp=(2026, 11, 23, 1, 2, 4))
+        self.assertEqual(self.cz.differences(a, b), [])
+        self.assertEqual(self.cz.main([a, b]), 0)
+
+    def test_reports_contents_names_and_modes(self):
+        a = self.make("a.zip", {"x/a": b"1", "x/old": b""})
+        b = self.make("b.zip", {"x/a": b"2", "x/new": b""}, mode=0o755)
+        diff = self.cz.differences(a, b)
+        self.assertIn(f"only in {a}: x/old", diff)
+        self.assertIn(f"only in {b}: x/new", diff)
+        self.assertIn("x/a: contents differ", diff)
+        self.assertTrue(any(line.startswith("x/a: mode") for line in diff), diff)
+        with mock.patch("sys.stdout", io.StringIO()), mock.patch("sys.stderr", io.StringIO()):
+            self.assertEqual(self.cz.main([a, b]), 1)
+
+    def test_reports_a_name_stored_twice(self):
+        a = self.make("a.zip", {"x/a": b"1"})
+        b = Path(self.tmp.name) / "b.zip"
+        with zipfile.ZipFile(b, "w") as zf, mock.patch("warnings.warn"):
+            for data in (b"other", b"1"):                                  # the last copy matches a.zip
+                zi = zipfile.ZipInfo("x/a", date_time=(1980, 1, 1, 0, 0, 0))
+                zi.external_attr = (stat.S_IFREG | 0o644) << 16
+                zf.writestr(zi, data)
+        self.assertEqual(self.cz.differences(a, str(b)), [f"{b}: x/a is in the zip more than once"])
+
+    def test_bad_zip(self):
+        bad = Path(self.tmp.name) / "bad.zip"
+        bad.write_bytes(b"not a zip")
+        with mock.patch("sys.stderr", io.StringIO()):
+            self.assertEqual(self.cz.main([str(bad), str(bad)]), 1)
+
+
+class ChecksTest(unittest.TestCase):
+    """build_zip refuses to build when a check fails, unless --skip-checks."""
+
+    def setUp(self):
+        self.bz = load_builder()
+        self.tmp = tempfile.TemporaryDirectory()
+        self.addCleanup(self.tmp.cleanup)
+
+    def checks(self, *codes):
+        return tuple((f"check {i}", [sys.executable, "-c", f"print('out {i}'); raise SystemExit({c})"])
+                     for i, c in enumerate(codes))
+
+    def test_all_pass(self):
+        self.assertEqual(self.bz.run_checks(self.checks(0, 0), cwd=Path(self.tmp.name)), [])
+
+    def test_reports_each_failure_with_its_output(self):
+        failed = self.bz.run_checks(self.checks(0, 1, 2), cwd=Path(self.tmp.name))
+        self.assertEqual([label for label, _ in failed], ["check 1", "check 2"])
+        self.assertIn("out 1", failed[0][1])
+
+    def test_missing_program_fails(self):
+        failed = self.bz.run_checks((("gone", [str(Path(self.tmp.name) / "no-such-program")]),),
+                                    cwd=Path(self.tmp.name))
+        self.assertEqual(len(failed), 1)
+        self.assertIn("could not start", failed[0][1])
+
+    def test_checks_know_they_are_nested(self):
+        code = f"import os; raise SystemExit(0 if os.environ.get({self.bz.NESTED!r}) == '1' else 1)"
+        self.assertEqual(self.bz.run_checks((("env", [sys.executable, "-c", code]),), cwd=Path(self.tmp.name)), [])
+
+    def run_main(self, *args, codes=(0,)):
+        out = Path(self.tmp.name) / "OXP3Deck.zip"
+        err = io.StringIO()
+        built = mock.Mock(return_value=(out, "0" * 64, self.bz.Plan(top="OXP3Deck", version="1.0.0",
+                                                                   tool_version="1.0.0")))
+        env = {k: v for k, v in os.environ.items() if k != self.bz.NESTED}
+        with mock.patch.object(self.bz, "CHECKS", self.checks(*codes)), \
+                mock.patch.object(self.bz, "build", built), mock.patch.dict(os.environ, env, clear=True), \
+                contextlib.redirect_stderr(err), contextlib.redirect_stdout(io.StringIO()):
+            code = self.bz.main(["--out", str(out), *args])
+        return code, built.called, err.getvalue()
+
+    def test_refuses_to_build_when_a_check_fails(self):
+        code, built, err = self.run_main(codes=(0, 1))
+        self.assertEqual((code, built), (1, False))
+        self.assertIn("not built, failed: check 1", err)
+        self.assertIn("--skip-checks", err)
+
+    def test_builds_when_the_checks_pass(self):
+        self.assertEqual(self.run_main(codes=(0, 0))[:2], (0, True))
+
+    def test_skip_checks_builds_and_says_so(self):
+        code, built, err = self.run_main("--skip-checks", codes=(1,))
+        self.assertEqual((code, built), (0, True))
+        self.assertIn("checks skipped", err)
 
 
 class FakeTreeTest(unittest.TestCase):
@@ -155,8 +314,8 @@ class RealBuildTest(unittest.TestCase):
         cls.zips, cls.stdout = [], []
         for i in (1, 2):
             out = base / str(i) / "OXP3Deck.zip"
-            res = subprocess.run([sys.executable, "-I", str(BUILDER), "--out", str(out)], capture_output=True,
-                                 text=True, cwd=str(PLUGIN), stdin=subprocess.DEVNULL)
+            res = subprocess.run([sys.executable, "-I", str(BUILDER), "--skip-checks", "--out", str(out)],
+                                 capture_output=True, text=True, cwd=str(PLUGIN), stdin=subprocess.DEVNULL)
             if res.returncode != 0:
                 cls.tmp.cleanup()
                 raise AssertionError(f"build_zip failed: {res.stderr.strip()}")

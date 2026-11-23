@@ -303,7 +303,7 @@ test("every OptiScaler control has its game.opti tag and a running check before 
 
 test("GameControls: the OptiScaler section for a table game, the XeSS options greyed while it is in", () => {
   const s = src("components/GameControls.tsx");
-  assert.match(s, /\{optiEntry && \(\s*<PanelSectionRow>\s*<OptiRows /);
+  assert.match(s, /\{optiEntry && \(full \|\| optiOn\) && \(\s*<PanelSectionRow>\s*<OptiRows /);
   assert.match(s, /const optiWhy = optiOn \? "Set by OptiScaler for this game\." : null;/);
   // after an OptiScaler job the shared opti-info resource (reloaded by OptiRows) decides, not game_info's flag
   assert.match(s, /const optiOn = steam && \(oi\.data\?\.ok \? \["installed", "partial"\]\.includes\(oi\.data\.opti\?\.state \?\? ""\) : !!game\?\.opti_installed\);/);

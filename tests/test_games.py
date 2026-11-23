@@ -96,7 +96,7 @@ class GameInfoTest(GameBase):
                          (True, False, True))
         self.assertEqual(g["last_run"], {"trace": False, "fallback": None, "compile_failed": False, "canary": False,
                                          "xell_unsupported": None, "xell_builtin": None, "fg_fullscreen": None,
-                                         "xefg": None, "logged_at": None})
+                                         "xefg": None, "logged_at": None, "log_at": None})
         self.assertEqual(g["advice"], [])
         self.assertEqual(g["prefix_checks"], {"driverstore_capital": False, "driverstore_capital_shimmed": None,
                                               "hides_wine": None})
@@ -113,6 +113,21 @@ class GameInfoTest(GameBase):
         self.assertIn("XeLL refused this GPU at the last run", "\n".join(g["advice"]))
         write(os.path.join(self.pfx, "drive_c", "igdext_trace.log"), "all fine\n")
         self.assertFalse(self.info()["last_run"]["xell_unsupported"])
+
+    def test_log_at_is_the_newest_xess_log_only(self):
+        """log_at: the newest of the logs XESS_LOG writes; the driver's canary (written on every run) is not one."""
+        c = os.path.join(self.pfx, "drive_c")
+        write(os.path.join(c, "igdext_kernels", "anv_canary"), "")
+        os.utime(os.path.join(c, "igdext_kernels", "anv_canary"), (2000, 2000))
+        lr = self.info()["last_run"]
+        self.assertEqual((lr["log_at"], lr["logged_at"]), (None, 2000))
+        for i, name in enumerate(("igdext_trace.log", "igdext_xell.log", "igdext_xefg.log", "igcl_stub.log")):
+            write(os.path.join(c, name), "x\n")
+            os.utime(os.path.join(c, name), (1000 + i, 1000 + i))
+        self.assertEqual(self.info()["last_run"]["log_at"], 1003)
+        # one gone: the next newest
+        os.remove(os.path.join(c, "igcl_stub.log"))
+        self.assertEqual(self.info()["last_run"]["log_at"], 1002)
 
     def test_default_tool_unknown(self):
         g = self.info()

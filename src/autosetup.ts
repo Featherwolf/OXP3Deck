@@ -243,6 +243,36 @@ export const makeQueue = () => {
   };
 };
 
+/**
+ * One run per key at a time, for the steps after a game quits (AutoSetup.tsx exitFlow): the same exit is seen twice
+ * (the main-app watch and Steam's lifetime event), and two runs side by side would each read the launch options and
+ * write them back over the other's write. A run asked for while one is in flight runs once after it; more asks join
+ * that waiting run.
+ */
+export const makeSerial = () => {
+  const running = new Map<string, Promise<void>>();
+  const waiting = new Map<string, Promise<void>>();
+  const go = (k: string, fn: () => Promise<unknown>): Promise<void> => {
+    waiting.delete(k);
+    const p = Promise.resolve().then(fn).then(() => undefined, () => undefined);
+    running.set(k, p);
+    void p.then(() => { if (running.get(k) === p) running.delete(k); });
+    return p;
+  };
+  return {
+    busy: (k: string) => running.has(k),
+    run(k: string, fn: () => Promise<unknown>): Promise<void> {
+      const w = waiting.get(k);
+      if (w) return w;
+      const cur = running.get(k);
+      if (!cur) return go(k, fn);
+      const next = cur.then(() => go(k, fn));
+      waiting.set(k, next);
+      return next;
+    },
+  };
+};
+
 // ---- the pass (DESIGN.md "The pass") -------------------------------------------------------------------------------------
 
 export type WriteRes = { ok: boolean; error: string | null; text: string | null };
@@ -265,6 +295,8 @@ export type PassDeps = {
   optiIn: (appid: string) => Promise<boolean>;
   legacyRec: (appid: string) => Promise<AutoRecord | undefined>;
   toast: (text: string) => void;
+  /** Why auto.json cannot be saved now (AutoStateRes.read_only), else null; checked before an Undo changes anything. */
+  readOnly?: () => Promise<string | null>;
 };
 
 export type PassCause = "exit" | "open" | "scan";
@@ -286,6 +318,8 @@ export const undoChange = async (d: PassDeps, appid: string, c: AutoChange, reas
   Promise<{ ok: boolean; error: string | null; game: AutoGame | null; text: string | null }> => {
   const fail = (error: string | null) => ({ ok: false, error: error || "did not work", game: null, text: null });
   if (d.isRunning(appid)) return fail(RUNNING_ERR(name));
+  const ro = d.readOnly ? await d.readOnly() : null;
+  if (ro) return fail(ro);                                  // before Steam is touched: the backend could not mark it
   let text: string | null = null;
   if (c.kind === "launch") {
     if (!c.launch) return fail("This change has no record of what it did.");

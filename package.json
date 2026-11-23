@@ -1,6 +1,6 @@
 {
   "name": "oxp3deck",
-  "version": "0.5.0",
+  "version": "0.6.0",
   "description": "OXP3 Deck - oxp3-tool and xess-xmx-linux for the ONEXPLAYER 3 in one Quick Access panel",
   "type": "module",
   "scripts": {
@@ -8,9 +8,12 @@
     "watch": "rollup -c -w",
     "typecheck": "tsc --noEmit",
     "test": "python3 -m unittest discover -s tests -t .",
+    "test:js": "node --test tests/js",
+    "check": "pnpm test && pnpm test:js && pnpm typecheck",
     "zip": "python3 tools/build_zip.py",
     "vendor": "python3 tools/vendor_oxp3_tool.py"
   },
+  "packageManager": "pnpm@10.28.0",
   "license": "MIT",
   "devDependencies": {
     "@decky/rollup": "1.0.2",

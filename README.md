@@ -514,12 +514,13 @@ have a page for it.
 ```bash
 pnpm install
 pnpm build    # the frontend: dist/index.js
-pnpm zip      # release/OXP3Deck.zip (python3 tools/build_zip.py)
+pnpm zip      # runs the checks, then writes release/OXP3Deck.zip (python3 tools/build_zip.py)
 ```
 
 `tools/build_zip.py` packs the frontend, `main.py`, `py_modules/oxp3deck/*.py`, the docs and
 `vendor/oxp3-tool` (checked against `vendor/oxp3-tool.sha256`) into one `OXP3Deck/` folder. The same files always
-give the same zip. `--out FILE` writes it elsewhere.
+give the same zip. `--out FILE` writes it elsewhere. It first runs the same checks as `pnpm check` (about 40 s) and
+does not build when one fails; `--skip-checks` builds anyway and says so.
 
 `vendor/oxp3-tool` is a copy of `dist/oxp3-tool` from [OXP3-Tool-for-Bazzite](https://github.com/Featherwolf/OXP3-Tool-for-Bazzite). To bundle a newer one:
 
@@ -534,17 +535,19 @@ It only replaces `vendor/` when the file matches its SHA-256 and is at least the
 
 Releases: set the version in `package.json`, run `pnpm build && pnpm zip`, add the notes as
 `release-notes/v0.2.0.md`, commit, then run Actions > Release > Run workflow with the version (`0.2.0`). It checks
-that the version, `package.json` and the zip agree, creates the tag, and publishes `OXP3Deck.zip` with its SHA-256.
-Versions below 1.0.0 are marked pre-release. Pushing an annotated tag works too; its message becomes the notes.
+that the version, `package.json` and the zip agree, runs the tests and the TypeScript check, rebuilds the zip and
+stops unless it matches the committed one (`tools/compare_zips.py`), then creates the tag and publishes
+`OXP3Deck.zip` with its SHA-256. Versions below 1.0.0 are marked pre-release. Pushing an annotated tag works too;
+its message becomes the notes.
 
 Tests:
 
 ```bash
-python3 -m unittest discover -s tests -t . -v
+pnpm check    # the Python tests, pnpm test:js (node --test tests/js; Node 22.18+) and pnpm typecheck
 ruff check .
-node --experimental-strip-types --test tests/js/*.test.mjs   # launch options, xess offers (Node 22.6+, python3, sh)
-pnpm typecheck
 ```
+
+CI (`.github/workflows/ci.yml`) runs them on every push and pull request.
 
 [DESIGN.md](DESIGN.md) describes how the backend and the frontend fit together.
 

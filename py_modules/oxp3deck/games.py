@@ -264,6 +264,14 @@ def last_run(prefix: str | None) -> dict | None:
             times.append(os.lstat(p).st_mtime)
         except OSError:
             pass
+    # the logs only XESS_LOG writes (proton-hook.py logs(): IGDEXT_TRACE, IGDEXT_XELL_LOG, IGDEXT_XEFG_LOG,
+    # XESS_FG_LOG): the frontend turns XESS_LOG off after a run that wrote one (DESIGN.md "Save XeSS logs: one run")
+    log_times = []
+    for p in (trace, xell, xefg, os.path.join(c, "igcl_stub.log")):
+        try:
+            log_times.append(os.lstat(p).st_mtime)
+        except OSError:
+            pass
     return {
         "trace": has_trace,
         # the trace's "fallback: unknown Intel device id" / "fallback: self-test failed" (debugging.md:11-12)
@@ -280,6 +288,7 @@ def last_run(prefix: str | None) -> dict | None:
         # XeSS frame generation turned on by the game but refused (xefg_check); None: no log
         "xefg": xefg_check(xefg),
         "logged_at": max(times) if times else None,
+        "log_at": max(log_times) if log_times else None,
     }
 
 

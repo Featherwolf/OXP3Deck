@@ -780,6 +780,62 @@ class InstallTest(Base):
         self.assertEqual(sorted(os.listdir(cache)), [BUILD, "v9-old"])
 
 
+class RecordFileTest(Base):
+    """ROADMAP T1-5: a damaged optiscaler.json refuses every install, change and remove until Start fresh (their
+    files would go unrecorded), the cache keeps every build, a newer record is read-only, unknown keys survive."""
+
+    def path(self):
+        return os.path.join(self.ctx.settings_dir, "optiscaler.json")
+
+    def test_damaged_record_refuses_until_start_fresh(self):
+        self.assertTrue(self.install()["ok"])
+        cache = os.path.join(self.ctx.home, optiscaler.CACHE_REL)
+        builds = sorted(os.listdir(cache))
+        before = snapshot(self.game)
+        write(self.path(), '{"version": 1, "games": {"2920')
+        with self.assertLogs("oxp3deck", "WARNING"):
+            res = self.remove()
+        self.assertFalse(res["ok"])
+        self.assertIn("Start fresh", res["error"])
+        self.assertEqual(snapshot(self.game), before)                       # nothing touched in the game
+        self.assertFalse(os.path.exists(self.path()))
+        self.assertEqual(optiscaler.file_problem(self.ctx)["kind"], "damaged")
+        self.assertIn("Start fresh", optiscaler.check(self.ctx, WITCHER, installing=True)["why"])
+        self.assertFalse(optiscaler.options(self.ctx, {"overlay": True})["ok"])
+        self.assertEqual(optiscaler.prune_cache(self.ctx), [])
+        self.assertEqual(sorted(os.listdir(cache)), builds)                # a build a lost record used stays
+        self.assertFalse(os.path.exists(self.path()))
+        self.assertEqual(optiscaler.start_fresh(self.ctx), {"ok": True, "error": None})
+        self.assertIsNone(optiscaler.file_problem(self.ctx))
+        self.assertEqual(self.record()["games"], {})
+        # the files stay; OXP3 Deck now sees them as another tool's
+        self.assertEqual(optiscaler.check(self.ctx, WITCHER, installing=True)["why"], optiscaler.FOREIGN)
+
+    def test_newer_record_is_read_only(self):
+        self.assertTrue(self.install()["ok"])
+        rec = self.record()
+        rec["version"] = optiscaler.RECORD_VERSION + 1
+        write(self.path(), json.dumps(rec))
+        self.assertTrue(optiscaler.installed_for(self.ctx, WITCHER))       # still read
+        self.assertEqual(optiscaler.file_problem(self.ctx), {"kind": "newer", "version": 2,
+                                                             "file": "optiscaler.json"})
+        res = optiscaler.set_choices(self.ctx, WITCHER, self.choices(fg=0))
+        self.assertFalse(res["ok"])
+        self.assertIn("newer OXP3 Deck", res["error"])
+        self.assertEqual(self.record(), rec)
+
+    def test_unknown_keys_survive_a_save(self):
+        self.assertTrue(self.install()["ok"])
+        rec = self.record()
+        rec["future"] = [1]
+        rec["global"]["future_global"] = "x"
+        write(self.path(), json.dumps(rec))
+        self.assertTrue(optiscaler.options(self.ctx, {"overlay": True})["ok"])
+        got = self.record()
+        self.assertEqual((got["future"], got["global"]), ([1], {"overlay": True, "future_global": "x"}))
+        self.assertFalse(any(k.startswith("_") for k in got))
+
+
 class AutoTest(Base):
     """The automatic setup's install (DESIGN.md "Automatic setup"): auto=True replaces no file, origin is
     recorded, anticheat() names online games and anti-cheat files."""

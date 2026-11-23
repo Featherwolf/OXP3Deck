@@ -35,7 +35,8 @@ CALLS = {
     "power_info": (False,), "power_state": (), "power_enable": (True,), "power_options": ({"split_ac": True},),
     "power_set": ("default", "main", {"pl1_w": 15}), "power_profile": ("1091500", "Cyberpunk 2077", True),
     "power_game": ("1091500",), "power_take_control": (), "power_import_sdtdp": (),
-    "power_fix": ("ppd",), "power_unfix": ("ppd",), "power_live": (), "extras_info": (),
+    "power_fix": ("ppd",), "power_fix_all": (["ppd", "thermald"],), "power_unfix": ("ppd",), "power_live": (),
+    "extras_info": (),
     "power_selftest": (), "power_measure": ("idle",), "power_advice": ("1091500",),
     "power_advice_dismiss": ("1091500", "headroom", 25),
     "extras_set": ({"lpmd_game_off": True},), "extras_take_control": ("fan",),
@@ -48,7 +49,7 @@ CALLS = {
                              "running": False}),
     "auto_record": ("1", {"kind": "launch", "launch": {"set": {"XESS": "latest"}, "dropped": {}, "args": []}}),
     "auto_mode": ("1", "manual"), "auto_undo": ("1", "launch-1"), "auto_retry": ("1", "launch-1"),
-    "auto_session": ("1", "start"), "auto_opti_install": ("292030",),
+    "auto_session": ("1", "start"), "auto_opti_install": ("292030",), "file_fresh": ("auto.json",),
 }
 
 
@@ -107,7 +108,7 @@ class Base(unittest.TestCase):
         # nothing real runs (runuser, oxp3-tool, sysfs writes) unless a test says so (and Plugin()'s _after_restart
         # leaves the real /run alone)
         for name in ("oxp3tool", "xess", "games", "power", "readouts", "extras", "optiscaler", "autosetup",
-                     "selftest", "sampler"):
+                     "selftest", "sampler", "updates"):
             setattr(self.m, name, Raising())
         self.p = self.m.Plugin()
         self.assertIsNone(self.p._broken)
@@ -446,6 +447,57 @@ class LifecycleTest(Base):
         self.assertGreater(len(ticks), 2)
         self.assertIs(ticks[0], self.p.ctx)
 
+    def test_the_update_watch_looks_after_its_delay_and_unload_stops_it(self):
+        from oxp3deck import updates
+        self.assertEqual((self.m.UPDATE_FIRST_S, self.m.UPDATE_WAKE_S), (updates.FIRST_S, updates.WAKE_S))
+        self.assertIn(updates.SWITCH_KEY, self.m.SETTING_KEYS)
+        looks = []
+        self.fake("updates", tick=lambda ctx, settings, **kw: looks.append(kw) or "not due")
+        self.fake("power", tick=lambda ctx: None, game_now=lambda ctx: {"app": "1091500"})
+        self.fake("xess", system_protons_need_shim=lambda ctx, settings: False)
+
+        async def go():
+            with mock.patch.object(self.m, "UPDATE_FIRST_S", 0.05), mock.patch.object(self.m, "UPDATE_WAKE_S", 0.02):
+                await self.p._main()
+                task = self.p._updates
+                await asyncio.sleep(0.02)
+                early = len(looks)
+                await asyncio.sleep(0.2)
+                await self.p._unload()
+                await asyncio.sleep(0.05)
+                return task, early
+
+        task, early = asyncio.run(go())
+        self.assertEqual(early, 0)                  # not before the first delay
+        self.assertGreater(len(looks), 2)
+        self.assertTrue(task.cancelled())
+        self.assertIsNone(self.p._updates)
+        self.assertEqual(looks[0]["game"], "1091500")
+        self.assertIsNone(looks[0]["busy"])
+        self.assertEqual(sorted(looks[0]["steps"]), ["oxp3", "plugin", "xess"])
+
+    def test_the_update_tick_runs_the_real_checks(self):
+        from oxp3deck import updates
+        self.m.updates = updates
+        self.fake("power", game_now=lambda ctx: {"app": None})
+        self.fake("oxp3tool", update_check=lambda ctx, settings: {"ok": True, "error": None, "update": "online"})
+        self.fake("xess", check_update=lambda ctx, settings: {"ok": True, "error": None, "update_available": False})
+        route = self.p.ctx.sys_path("/proc/net/route")
+        os.makedirs(os.path.dirname(route), exist_ok=True)
+        with open(route, "w") as f:
+            f.write("Iface\tDestination\tGateway\tFlags\nwlan0\t00000000\t0102A8C0\t0003\n")
+        with mock.patch("oxp3deck.downloads.newest_release_tag", return_value="v0.9.0"):
+            self.assertEqual(self.p._update_tick(), "checked")
+        res = call(self.p, "get_overview")["updates"]
+        self.assertEqual(res["oxp3"]["update"], "online")
+        self.assertEqual(res["plugin"]["latest"], "0.9.0")
+        self.assertTrue(res["plugin"]["update"])         # the stub's version is 0.1.0
+        self.assertTrue(res["on"])
+        self.assertTrue(call(self.p, "set_setting", "update_auto", False)["ok"])
+        self.assertFalse(call(self.p, "set_setting", "update_auto", "no")["ok"])
+        self.assertFalse(call(self.p, "get_overview")["updates"]["on"])
+        self.assertEqual(self.p._update_tick(), "off")
+
     def test_a_raising_tick_does_not_end_the_loop(self):
         calls = []
 
@@ -620,7 +672,7 @@ class LifecycleTest(Base):
         refreshed = []
         self.fake("power", set_values=lambda ctx, key, slot, values: dict(answer), enable=lambda ctx, on: dict(answer),
                   options=lambda ctx, opts: dict(answer), profile=lambda ctx, appid, name, on: dict(answer),
-                  game=lambda ctx, appid: dict(answer), take_control=lambda ctx: dict(answer),
+                  game=lambda ctx, appid, order=None: dict(answer), take_control=lambda ctx: dict(answer),
                   active=lambda ctx: act, refresh=lambda ctx: refreshed.append(1))
         synced = []
         self.fake("extras", sync=lambda ctx, active: synced.append(active) or {"ok": True, "lpmd_changed": True})
@@ -694,7 +746,8 @@ class OverviewTest(Base):
                                "home": self.p.ctx.home, "platform": "cachyos",
                                "device": {"vendor": "ONE-NETBOOK", "product": "ONEXPLAYER 3", "supported": True},
                                "oxp3": self.inst, "xess": self.summary, "job": None, "reboot_pending": False,
-                               "do_not_reboot": "limine-mkinitcpio", "power": None})   # power: Raising
+                               "do_not_reboot": "limine-mkinitcpio", "power": None,   # power: Raising
+                               "files": [], "updates": None})   # updates: Raising
         line = {"ok": True, "error": None, "enabled": True, "line": "15 W / 25 W · Default", "overridden": False,
                 "blocked": None}
         self.fake("power", summary=lambda ctx: line)
@@ -905,6 +958,49 @@ class SettingsTest(Base):
             self.assertTrue(call(self.p, "set_setting", f"ui_k{i}", i)["ok"])
         self.assertIn("more than", call(self.p, "set_setting", "ui_one_more", 1)["error"])
         self.assertTrue(call(self.p, "set_setting", "ui_k0", "changed")["ok"])   # an existing one may change
+
+
+class FilesTest(Base):
+    """ROADMAP T1-5: the overview's damaged or newer settings files, and Start fresh / OK (file_fresh)."""
+
+    def test_rows_and_start_fresh(self):
+        from oxp3deck import context
+        bad = {"kind": "damaged", "copy": "auto.json.corrupt-20261123-101500", "moved": True}
+        fresh = []
+        self.fake("autosetup", file_problem=lambda ctx: None if fresh else dict(bad, file="auto.json"),
+                  start_fresh=lambda ctx: fresh.append("auto") or {"ok": True, "error": None})
+        self.fake("optiscaler", file_problem=lambda ctx: {"kind": "newer", "version": 2, "file": "optiscaler.json"},
+                  start_fresh=lambda ctx: {"ok": False, "error": "optiscaler.json could not be set aside, so nothing "
+                                                               "was changed."})
+        power = os.path.join(self.p.ctx.settings_dir, "power.json")
+        context.note_reset(power, "power.json.corrupt-20261123-101500")
+        self.addCleanup(context.dismiss_reset, power)
+        files = call(self.p, "get_overview")["files"]
+        self.assertEqual([(f["file"], f["kind"], f["action"]) for f in files],
+                         [("auto.json", "damaged", "fresh"), ("optiscaler.json", "newer", "fresh"),
+                          ("power.json", "reset", "dismiss")])
+        res = call(self.p, "file_fresh", "auto.json")
+        self.assertTrue(res["ok"], res)
+        self.assertEqual(fresh, ["auto"])
+        self.assertEqual([f["file"] for f in res["files"]], ["optiscaler.json", "power.json"])
+        res = call(self.p, "file_fresh", "optiscaler.json")
+        self.assertFalse(res["ok"])
+        self.assertIn("set aside", res["error"])
+        res = call(self.p, "file_fresh", "power.json")                # OK: the row goes
+        self.assertEqual([f["file"] for f in res["files"]], ["optiscaler.json"])
+        for bad_name in ("../settings.json", "x", 7, None):
+            self.assertFalse(call(self.p, "file_fresh", bad_name)["ok"], bad_name)
+
+    def test_a_module_that_did_not_load_keeps_the_other_rows(self):
+        from oxp3deck import context
+        self.m.autosetup = None
+        self.fake("optiscaler", file_problem=lambda ctx: {"kind": "newer", "version": 2, "file": "optiscaler.json"})
+        power = os.path.join(self.p.ctx.settings_dir, "power.json")
+        context.note_reset(power, "power.json.corrupt-20261123-101500")
+        self.addCleanup(context.dismiss_reset, power)
+        with self.assertLogs("oxp3deck", "ERROR"):
+            files = call(self.p, "get_overview")["files"]
+        self.assertEqual([f["file"] for f in files], ["optiscaler.json", "power.json"])
 
 
 class WiringTest(unittest.TestCase):

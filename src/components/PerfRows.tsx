@@ -11,9 +11,9 @@ import { VRR_LABEL, VRR_LINE, VRR_TIP_KEY, vrrDetails, vrrKernelKey, vrrShown } 
 import { EFFECTS } from "../effects";
 import {
   adviceTarget,
-  adviceDetails, adviceLine, adviceUsable, editSlot, LOW_SLIDER, lowLine, lowOptions, lowToggleLine, measureLine,
+  adviceDetails, adviceLine, adviceUsable, editSlot, follows, LOW_SLIDER, lowLine, lowOptions, lowToggleLine, measureLine,
   measureLines, pl1Change, PRESET_IDS, PRESET_LABEL, presetCaps, presetDetails, presetFieldsOf, presetLine, presetOf,
-  presetValues, probeLine, selftestLine, timeWindowsLine, timeWindowsLines, watts, type PresetId,
+  presetValues, presetWrite, probeLine, selftestLine, timeWindowsLine, timeWindowsLines, watts, type PresetId,
 } from "../power";
 import type { RunningApp } from "../steam";
 import { afterJob, invalidate, load, notePower, powerWriter, useCurrentJob, useResource } from "../store";
@@ -58,7 +58,7 @@ export const PresetRow: FC<{ state: PowerState; info: PowerInfo | null; profileK
     const why = state.enabled ? null : "Turn on power control first.";
     const tap = (id: PresetId) => {
       undoBy.set(k, { id, before: presetFieldsOf(stored), at: Date.now() });
-      powerWriter.write(profileKey, slot, presetValues(id, state.range, slot, opts, caps));
+      powerWriter.write(profileKey, slot, presetWrite(presetValues(id, state.range, slot, opts, caps), stored));
       powerWriter.flush();
       bump((n) => n + 1);
     };
@@ -265,7 +265,7 @@ export const PowerTipRows: FC<{ app: RunningApp; info: PowerInfo; state: PowerSt
     const stored = (slot === "ac" ? prof?.ac ?? prof?.main : prof?.main) ?? state.values;
     const pl2Shown = stored.pl2_w ?? state.applied_values.pl2_w;
     usedNow = { appid: app.appid, key, slot, w, before: { pl1_w: stored.pl1_w, pl2_w: stored.pl2_w }, created };
-    powerWriter.write(key, slot, { pl1_w: w, ...pl1Change(w, pl2Shown) });
+    powerWriter.write(key, slot, { pl1_w: w, ...pl1Change(w, pl2Shown, follows(stored)) });
     powerWriter.flush();
     bump((n) => n + 1);
     return null;
@@ -284,7 +284,7 @@ export const PowerTipRows: FC<{ app: RunningApp; info: PowerInfo; state: PowerSt
     return r.ok ? null : r.error || "refused";
   });
 
-  if (!a && !used) return act.error ? <PanelSectionRow><Problem what="Power tip" error={act.error} /></PanelSectionRow> : null;
+  if (!a && !used) return act.error ? <PanelSectionRow><Problem what="Power tip" error={act.error} onRetry={act.retry} /></PanelSectionRow> : null;
   const d = a ? det("Power tip", adviceDetails(a), [`${a.stats.samples} samples over ${Math.round(a.seconds)} s at ${watts(a.pl1_w)} (${a.ac ? "plugged in" : "on battery"})`,
     `package p90 ${a.stats.p90_package_w} W · GPU busy p90 ${Math.round(a.stats.p90_gpu_busy_pct)} % · limited ${Math.round(a.stats.limited_share * 100)} % · thermal ${Math.round(a.stats.thermal_share * 100)} %`,
     "sources: RAPL energy_uj, xe gtidle idle_residency_ms, throttle reasons (only while the GPU is busy)"]) : null;
@@ -311,7 +311,7 @@ export const PowerTipRows: FC<{ app: RunningApp; info: PowerInfo; state: PowerSt
         <Field focusable bottomSeparator="none" label={`Set to ${watts(used.w)}`} onActivate={undo} onOKActionDescription="Undo"
           description={<span style={{ whiteSpace: "normal" }}>{`Press A to undo: puts the previous limit back.${used.created ? ` The profile for ${app.name} stays.` : ""}`}</span>} />
       )}
-      <Problem what="Power tip" error={act.error} />
+      <Problem what="Power tip" error={act.error} onRetry={act.retry} />
     </PanelSectionRow>
   );
 };
@@ -375,7 +375,7 @@ export const DeviceCheckSection: FC<{ info: PowerInfo; state: PowerState; game: 
           </ButtonItem>
         </WithDetails>
         {act.job && <JobView job={act.job} lines={6} />}
-        <Problem what="Device check" error={act.error} />
+        <Problem what="Device check" error={act.error} onRetry={act.retry} />
         {testLine && <Status ok={testLine.red ? false : null} red={testLine.red} label="Last check" detail={testLine.line} details={testD} />}
         {!st?.test && <Status ok={null} label="Last check" detail="Not checked on this device yet." />}
         {last && <Status ok={null} label="Last measurement" detail={measureLine(last)} details={measD2} />}

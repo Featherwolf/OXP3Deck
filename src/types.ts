@@ -33,7 +33,33 @@ export type Overview = Res & {
   reboot_pending: boolean;
   do_not_reboot: string | null;
   power?: PowerSummary | null;               // null: the power module did not answer
+  files?: FileProblem[];                     // damaged or newer settings files (ROADMAP T1-5); older backend: absent
+  updates?: UpdatesAuto | null;              // the daily update checks (ROADMAP T1-9); null: the module did not answer
 };
+
+/**
+ * What the daily update checks found (updates.state): each step's last answer that worked, with when it was made.
+ * `on`: "Check for updates automatically" (settings.json update_auto, missing = on).
+ */
+export type UpdatesAuto = {
+  on: boolean; checked_at: number | null; install_url: string;
+  oxp3: (Oxp3UpdateCheck & { checked_at: number }) | null;
+  xess: XessUpdateCheck | null;
+  plugin: PluginCheck | null;
+};
+/** OXP3 Deck's newest release (pre-releases too) against the running version. */
+export type PluginCheck = { current: string; latest: string | null; update: boolean; checked_at: number | null };
+
+/**
+ * A settings file the Status section shows a row for (main.py _file_problems). "damaged" / "newer": auto.json or
+ * optiscaler.json, saves refused until Start fresh (action "fresh"); "reset": another file that started empty
+ * (action "dismiss").
+ */
+export type FileProblem = {
+  file: string; kind: "damaged" | "newer" | "reset"; copy?: string | null; version?: number | null;
+  action: "fresh" | "dismiss";
+};
+export type FileFreshRes = Res & { files: FileProblem[] };
 
 // ---- oxp3-tool -----------------------------------------------------------------------------------------------------
 
@@ -143,6 +169,7 @@ export type GameDll = { name: string; path: string; version: string | null; kind
 export type GameLastRun = {
   trace: boolean; fallback: string | null; compile_failed: boolean; canary: boolean;
   xell_unsupported: boolean | null; logged_at: number | null;
+  log_at?: number | null;                  // the newest log XESS_LOG writes (trace, XeLL, XeSS-FG, igcl_stub); null: none
   xell_builtin?: boolean | null;           // XeLL's log: "Using built-in context" (cross-vendor mode); null: no log
   fg_fullscreen?: boolean | null;          // XeSS-FG's log: exclusive fullscreen refused interpolation
   xefg?: GameXefg | null;                  // XeSS-FG's log: frame generation refused (games.py xefg_check); null: no log
@@ -272,6 +299,7 @@ export type PowerValues = {
   cpu_cap_p_mhz: number | null; cpu_cap_e_mhz: number | null; cpu_cap_lpe_mhz: number | null;
   epp_p: Epp | null; epp_e: Epp | null; epp_lpe: Epp | null;
   fan_mode: FanMode | null; scx_mode: ScxMode | null;  // applied by extras.py, also while TDP control is off
+  pl2_follow: boolean | null;                          // T1-1, opt-in: boost = sustained +25 % (+50 % on AC); null off
 };
 /** The profile slot: on battery (or always), plugged in, or the low-battery values (Default only). */
 export type Slot = "main" | "ac" | "low";
@@ -364,10 +392,15 @@ export type PowerSummary = { enabled: boolean; line: string | null; overridden: 
 export type PowerInfoRes = Res & { info: PowerInfo | null };
 export type PowerStateRes = Res & { state: PowerState | null };
 export type PowerChangeRes = Res & { state: PowerState | null; applied: PowerApply | null;
-                                     conflicts?: PowerConflict[] };   // conflicts: a refused enable
+                                     conflicts?: PowerConflict[];     // conflicts: a refused enable
+                                     stale?: boolean };               // power_game: an older call, ignored
 export type PowerImportRes = Res & { imported: string[]; skipped: string[]; state: PowerState | null };
 export type PowerFixRes = Res & { steps: PowerFixStep[]; notes: string[]; state: PowerState | null;
                                   conflicts: PowerConflict[]; fixed: PowerFixed[]; applied: PowerApply | null };
+/** power_fix_all: one result per conflict id, in the order sent (each keeps its own record and Undo). */
+export type PowerFixItem = { id: string; ok: boolean; error: string | null; steps: PowerFixStep[]; notes: string[] };
+export type PowerFixAllRes = Res & { results: PowerFixItem[]; state: PowerState | null; conflicts: PowerConflict[];
+                                     fixed: PowerFixed[]; applied: PowerApply | null };
 
 // ---- device check, measurement and power tips (DESIGN.md "Performance batch" B and E) ---------------------------
 
@@ -468,7 +501,8 @@ export type AutoChangeIn = {
   kind: "launch" | "proton"; label: string; why: string; short: string; accepted?: boolean;
   launch?: AutoApplied; proton?: { from: string; from_priority: number; to: string; to_display: string };
 };
-export type AutoStateRes = Res & { on: boolean; confirmed_at: number | null; games: Record<string, AutoGame> };
+/** read_only: why auto.json cannot be saved (damaged or from a newer OXP3 Deck), else null: no Undo, Try again or mode change. */
+export type AutoStateRes = Res & { on: boolean; confirmed_at: number | null; games: Record<string, AutoGame>; read_only?: string | null };
 export type AutoPlanRes = Res & { plan: AutoPlan | null };
 export type AutoGameRes = Res & { game: AutoGame | null };
 export type AutoUndoRes = Res & { game: AutoGame | null; job: Job | null };

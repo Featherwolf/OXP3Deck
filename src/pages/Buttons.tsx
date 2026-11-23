@@ -54,7 +54,7 @@ export const ButtonsTab: FC = () => {
       <PanelSection title="Buttons">
         <PanelSectionRow>
           <Status ok={null} label={running ? "Waiting for the running task" : "Reading the layout…"} />
-          <Problem what="oxp3-tool" error={(st.data && !st.data.ok ? st.data.error : null)} />
+          <Problem what="oxp3-tool" error={(st.data && !st.data.ok ? st.data.error : null)} onRetry={st.reload} />
         </PanelSectionRow>
       </PanelSection>
     );
@@ -120,7 +120,7 @@ export const ButtonsTab: FC = () => {
               {act.busy ? "Reading the plan…" : label("Apply layout", applyD)}
             </ButtonItem>
           </WithDetails>
-          <Problem what="Apply layout" error={act.error} />
+          <Problem what="Apply layout" error={act.error} onRetry={act.retry} />
         </PanelSectionRow>
         {act.job && <JobView job={act.job} lines={6} onDone={() => { setPick({}); setFps(null); }} />}
       </PanelSection>

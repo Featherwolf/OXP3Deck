@@ -195,3 +195,16 @@ test("refusedLive: a fixed conflict and power control on end the refused enable'
   assert.match(Q.powerAlert(i, state({ enabled: false }), null, Q.refusedLive([c], i)).label, /^Turn off/);
   assert.deepEqual(Q.refusedLive([c], null).map((x) => x.id), ["ppd"], "no power-info yet: the answer's copy");
 });
+
+test("gameMoreLine: names the problems left to the Games tab, short", () => {
+  assert.equal(Q.gameMoreLine(0), "Driver, DirectX 12, logs, Proton, tips and more.");
+  assert.equal(Q.gameMoreLine(1), "1 problem to check there. Driver, logs, Proton, tips.");
+  assert.equal(Q.gameMoreLine(3), "3 problems to check there. Driver, logs, Proton, tips.");
+  for (const n of [0, 1, 12]) assert.ok(Q.gameMoreLine(n).length <= 80);
+});
+
+test("This game stays open by default above Power (it is short now: T1-3)", () => {
+  assert.equal(Q.defaultOpen("game"), true);
+  const ids = Q.GROUPS.map((g) => g.id);
+  assert.ok(ids.indexOf("game") < ids.indexOf("power"));
+});

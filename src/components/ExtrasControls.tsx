@@ -48,7 +48,7 @@ const TakeControl: FC<{ what: ExtrasWhat; label: string }> = ({ what, label: tex
         description={explainWhen("Applies your setting again.", EFFECTS["extras.take_control"])}>
         {act.busy ? "Working…" : text}
       </ButtonItem>
-      <Problem what={text} error={act.error} />
+      <Problem what={text} error={act.error} onRetry={act.retry} />
     </>
   );
 };
@@ -192,7 +192,7 @@ export const ChargeRows: FC<{ x: ExtrasState | null; only?: "alerts" }> = ({ x, 
           <TakeControl what="charge_behaviour" label="Take control of Run from charger" />
         </>
       )}
-      <Problem what="Battery" error={(alerts ? null : act.error) ?? c.error ?? null} />
+      <Problem what="Battery" error={(alerts ? null : act.error) ?? c.error ?? null} onRetry={alerts ? null : act.retry} />
     </>
   );
 };
@@ -226,7 +226,7 @@ export const LpmdToggle: FC<{ x: ExtrasState | null }> = ({ x }) => {
           onChange={(on) => act.run("lpmd", async () => noteExtras(await extras_set({ lpmd_game_off: on })))}
           description={explainWhen(x.lpmd.paused ? "Paused for the running game." : "Stops it moving the game to slow cores while a game runs.", EFFECTS["extras.lpmd"])} />
       </WithDetails>
-      <Problem what="Intel low-power daemon" error={act.error ?? x.lpmd.error} />
+      <Problem what="Intel low-power daemon" error={act.error ?? x.lpmd.error} onRetry={act.retry} />
     </>
   );
 };

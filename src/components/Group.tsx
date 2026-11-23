@@ -2,11 +2,12 @@
 // and closes, its summary while closed, and the alerts that a closed group still shows. The open state is remembered
 // on this device (util.ts remember, key quickGroups), read once and synchronously so the panel never jumps.
 import { Field, PanelSection, PanelSectionRow } from "@decky/ui";
-import { createContext, FC, Fragment, ReactNode, useContext, useEffect, useReducer, useRef } from "react";
+import { createContext, FC, ReactNode, useContext, useEffect, useReducer, useRef } from "react";
 import { FaChevronDown, FaChevronRight } from "react-icons/fa";
 
 import { Alert, GroupId, GROUPS_KEY, GroupState, headerLine, isOpen, makePins, parseGroups, toggled } from "../quickgroups";
 import { remember } from "../util";
+import { Boundary } from "./Boundary";
 import { Problem, RED } from "./Hint";
 
 export type { GroupId };
@@ -68,7 +69,8 @@ const usePinnedOf = (id: GroupId): string[] => {
 
 /**
  * A group: a PanelSection without a title (its title is a plain, unfocusable string), the header as its first row,
- * then the rows while open, or only the `alerts` rows while closed (the body is not mounted then).
+ * then the rows while open, or only the `alerts` rows while closed (the body is not mounted then). Either part is
+ * inside a Boundary: a render error in it leaves the header and the other groups working.
  */
 export const Group: FC<{ id: GroupId; title: string; summary: string; alert?: Alert | null; alerts?: ReactNode; children: ReactNode }> =
   ({ id, title, summary, alert, alerts, children }) => {
@@ -92,13 +94,14 @@ export const Group: FC<{ id: GroupId; title: string; summary: string; alert?: Al
             description={!open || shownAlert
               ? <span style={{ whiteSpace: "normal", ...(line.red ? { color: RED } : {}) }}>{line.text}</span> : undefined} />
         </PanelSectionRow>
+        {/* one bad row shows a red row with Retry here, not a blank panel; opening or closing starts afresh */}
         {open ? (
-          <GroupCtx.Provider key="body" value={id}>{children}</GroupCtx.Provider>
+          <Boundary key="body" what={title}><GroupCtx.Provider value={id}>{children}</GroupCtx.Provider></Boundary>
         ) : (
-          <Fragment key="alerts">
+          <Boundary key="alerts" what={title}>
             {alerts}
             {kept.length > 0 && <PanelSectionRow>{kept.map((e, n) => <Problem key={n} what={title} error={e} />)}</PanelSectionRow>}
-          </Fragment>
+          </Boundary>
         )}
       </PanelSection>
     );

@@ -10,12 +10,13 @@ import { power_enable, power_info, power_profile, power_take_control } from "../
 import { friendlyName, lockedLine } from "../conflicts";
 import { EFFECTS } from "../effects";
 import {
-  blockers, capRows, clampW, cpuNowLine, eppOptions, GOVERNOR_PERFORMANCE, RESET, fwValues, gpuNotches,
-  limitsLine, pl1Change, pl2Floor, profileLine, reasonText, shown, Slot, suspects, watts, yieldedText,
+  blockers, capRows, clampW, cpuNowLine, eppOptions, followPl2, follows, followText, GOVERNOR_PERFORMANCE, RESET,
+  fwValues, gpuNotches, limitsLine, pl1Change, pl2Floor, profileLine, reasonText, shown, Slot, slotAc, suspects,
+  timeWindowsLine, watts, yieldedText,
 } from "../power";
 import { cpuBlockers, editedSlot, refusedLive } from "../quickgroups";
-import { RunningApp } from "../steam";
-import { invalidate, notePower, powerWriter, usePowerErrors, usePowerState, useResource } from "../store";
+import { RunningApp, runningApp } from "../steam";
+import { invalidate, notePower, powerWriter, switchGame, useGameSwitchError, usePowerErrors, usePowerState, useResource } from "../store";
 import { firstSentence } from "../text";
 import type {
   Epp, ExtrasState, PowerChangeRes, PowerConflict, PowerInfo, PowerInfoRes, PowerState, PowerValues,
@@ -46,6 +47,9 @@ export const usePower = (active: boolean) => {
   return { info: i, state, error: info.data && !info.data.ok ? info.data.error : null, reloadInfo: info.reload };
 };
 
+/** Retry for a power-info that did not load. */
+const reloadInfo = () => invalidate("power-info");
+
 /** A change call's answer into the caches; its error text (or null). */
 export const settle = (r: PowerChangeRes): string | null => notePower(r);
 
@@ -75,10 +79,14 @@ const TAKE_D: DetailsSpec = {
   body: "Writes this profile's values again and watches them as before. Turn the other program off first, or it changes them back.",
 };
 
+/** Retry for a failed per-game profile switch: the game running now. */
+const retrySwitch = () => switchGame(runningApp()?.appid ?? null);
+
 /** The status line and the red rows: blocked, overridden (with "Take control again"), what did not take. */
 export const PowerStatusRows: FC<{ info: PowerInfo | null; state: PowerState; quick?: boolean; only?: "alerts" }> = ({ info, state, quick, only }) => {
   const alerts = only === "alerts";      // a closed quick panel group: the red rows only
   const act = useAction();
+  const switchError = useGameSwitchError();
   const o = state.overridden;
   const caps = capRows(state.last, state.now.zones);
   const blocking = blockers(info?.conflicts);
@@ -95,6 +103,11 @@ export const PowerStatusRows: FC<{ info: PowerInfo | null; state: PowerState; qu
           <Status ok={!state.enabled ? null : !o && !state.blocked}
             label={limitsLine(state)} details={statusDetails(state)}
             detail={state.enabled ? `${profileLine(state)}${gpuHeld ? " · GPU held back by power limit" : ""}` : "Device defaults"} />
+        </PanelSectionRow>
+      )}
+      {switchError && (
+        <PanelSectionRow>
+          <Problem what="Game profile switch" error={switchError} onRetry={retrySwitch} />
         </PanelSectionRow>
       )}
       {state.enabled && state.blocked && (
@@ -121,7 +134,7 @@ export const PowerStatusRows: FC<{ info: PowerInfo | null; state: PowerState; qu
               {act.busy ? "Working…" : label("Take control again", TAKE_D)}
             </ButtonItem>
           </WithDetails>
-          <Problem what="Take control" error={act.error} />
+          <Problem what="Take control" error={act.error} onRetry={act.retry} />
         </PanelSectionRow>
       )}
       {state.enabled && state.now.governor === "performance" && (
@@ -237,7 +250,7 @@ export const EnableToggle: FC<{ state: PowerState; info: PowerInfo | null; quick
       )}
       {live.length > 0 && <Status ok={false} red label={`Turn off ${names(live)} first`} />}
       <ConflictRows rows={live} info={info} quick={quick} />
-      <Problem what="Power control" error={act.error} />
+      <Problem what="Power control" error={act.error} onRetry={act.retry} />
     </PanelSectionRow>
   );
 };
@@ -296,7 +309,11 @@ export const ValuesEditor: FC<{
   const pl1 = clampW(sh.pl1_w ?? r.pl1_min, r);
   const pl2Min = pl2Floor(pl1, r);
   const pl2Max = Math.max(pl2Min, Math.floor(r.pl2_max));
-  const pl2 = Math.min(pl2Max, Math.max(pl2Min, Math.round(sh.pl2_w ?? pl2Max)));
+  // "Steadier fps after loads" (pl2_follow): boost is sustained +25 % (+50 % on AC), as power.py follow_pl2
+  const fol = follows(v);
+  const folAc = slotAc(slot, state.active.ac);
+  const pl2 = fol ? Math.min(pl2Max, Math.max(pl2Min, followPl2(pl1, r.pl2_max, folAc)))
+    : Math.min(pl2Max, Math.max(pl2Min, Math.round(sh.pl2_w ?? pl2Max)));
   const gpu = r.gpu_min != null && r.gpu_max != null && r.gpu_max > r.gpu_min ? { lo: r.gpu_min, hi: r.gpu_max } : null;
   const gpuClamp = (x: number | null, dd: number) => (gpu ? Math.min(gpu.hi, Math.max(gpu.lo, x ?? dd)) : 0);
   const gmax = gpuClamp(sh.gpu_max_mhz, gpu?.hi ?? 0);
@@ -312,7 +329,16 @@ export const ValuesEditor: FC<{
   const pl1D = det("Sustained power", ["The power the CPU and GPU share for as long as a game runs. Higher is faster; the battery lasts less.", where, over,
     fwv.pl1_w != null ? `Device default: ${watts(fwv.pl1_w)}.` : null], ["PL1 (RAPL long_term), MSR and MMIO"]);
   const pl2D = det("Boost power", [`A short burst above sustained power, for a few seconds. Up to ${r.pl2_max} W; never below sustained power.`,
+    fol ? "Steadier fps after loads sets it now: turn that off to set it by hand." : null,
     fwv.pl2_w != null ? `Device default: ${watts(fwv.pl2_w)}.` : null], ["PL2 (RAPL short_term), MSR and MMIO"]);
+  const tw = timeWindowsLine(info?.hw.time_windows);
+  const folD = det("Steadier fps after loads", [
+    `Keeps the burst above sustained power small: boost follows sustained power, +25 % on battery and +50 % plugged in (at most ${r.pl2_max} W).`,
+    "After a loading screen or a menu the processor can run far above sustained power for a while, then drops back, and fps steps down with it. This makes that step smaller. Over a whole session it saves little battery: it is not a battery setting.",
+    tw ? `This device: ${tw.charAt(0).toLowerCase()}${tw.slice(1)}.` : null,
+    "Needs a sustained power value. Turning it on replaces a boost set by hand; a preset with its own boost turns it off.",
+  ], ["pl2_follow: PL2 = min(pl2_max, round(PL1 × 1.25)) on battery, × 1.5 on AC, never below PL1"]);
+  const folWhy = !fol && v.pl2_follow !== true && v.pl1_w == null ? "Set sustained power first." : null;
   const gminD = det("GPU minimum speed", ["The graphics chip never runs slower than this. Higher costs battery even when idle; useful only if one game stutters from speed dips.",
     gpu ? `Device default: ${gpu.lo} MHz.` : null], ["xe render GT min_freq"]);
   const gmaxD = det("GPU maximum speed", ["The graphics chip never runs faster than this. Lower saves battery and leaves more of the power to the CPU.",
@@ -341,17 +367,24 @@ export const ValuesEditor: FC<{
         <WithDetails details={pl1D}>
           <SliderField label={label("Sustained power", pl1D)} value={pl1} min={r.pl1_min} max={Math.max(r.pl1_min, r.pl1_max)} step={1}
             showValue valueSuffix=" W" editableValue={!quick}
-            onChange={(x) => d.write(pl1Change(clampW(x, r), pl2))}
+            onChange={(x) => d.write(pl1Change(clampW(x, r), pl2, fol))}
             description={explainWhen(`Steady power for CPU and GPU. Higher is faster, battery shorter.${dflt(v.pl1_w === null)}`, EFFECTS["power.pl1"])} />
         </WithDetails>
       </PanelSectionRow>
       <PanelSectionRow>
         <WithDetails details={pl2D}>
-          <SliderField label={label("Boost power", pl2D)} value={pl2} min={pl2Min} max={pl2Max} step={1} disabled={pl2Max <= pl2Min}
-            showValue valueSuffix=" W" editableValue={!quick}
-            onChange={(x) => d.write({ pl2_w: Math.min(pl2Max, Math.max(pl2Min, Math.round(x))) })}
-            description={explainWhen(`Short bursts above sustained power.${dflt(v.pl2_w === null)}`, EFFECTS["power.pl2"],
-              pl2Max <= pl2Min ? "Sustained power is at the maximum." : null)} />
+          <SliderField label={label(fol ? `Boost power · ${followText(folAc)}` : "Boost power", pl2D)} value={pl2} min={pl2Min} max={pl2Max}
+            step={1} disabled={fol || pl2Max <= pl2Min} showValue valueSuffix=" W" editableValue={!quick && !fol}
+            onChange={(x) => { if (!fol) d.write({ pl2_w: Math.min(pl2Max, Math.max(pl2Min, Math.round(x))) }); }}
+            description={explainWhen(`Short bursts above sustained power.${dflt(v.pl2_w === null && !fol)}`, EFFECTS["power.pl2"],
+              fol ? "Set by Steadier fps after loads." : pl2Max <= pl2Min ? "Sustained power is at the maximum." : null)} />
+        </WithDetails>
+      </PanelSectionRow>
+      <PanelSectionRow>
+        <WithDetails details={folD}>
+          <ToggleField label={label("Steadier fps after loads", folD)} checked={v.pl2_follow === true} disabled={!!folWhy}
+            onChange={(c) => d.write(c ? { pl2_follow: true, pl2_w: null } : { pl2_follow: null })}
+            description={explainWhen("Smaller power burst after loading screens.", EFFECTS["power.pl2_follow"], folWhy)} />
         </WithDetails>
       </PanelSectionRow>
       </>)}
@@ -455,7 +488,7 @@ export const GameProfileToggle: FC<{ app: RunningApp; info: PowerInfo }> = ({ ap
           })}
           description={explainWhen(has ? "Sliders edit this game's profile." : "Uses the default profile.", EFFECTS["power.game_profile"])} />
       </WithDetails>
-      <Problem what="Game profile" error={act.error} />
+      <Problem what="Game profile" error={act.error} onRetry={act.retry} />
     </PanelSectionRow>
   );
 };
@@ -468,7 +501,7 @@ export const PowerBody: FC<PowerData> = ({ info, state: s, error }) => {
     return (
       <PanelSectionRow>
         {!error && <Status ok={null} label="Reading the power limits…" />}
-        <Problem what="Power" error={error} />
+        <Problem what="Power" error={error} onRetry={reloadInfo} />
       </PanelSectionRow>
     );
   }
@@ -492,7 +525,7 @@ export const PowerAlerts: FC<PowerData> = ({ info, state: s, error }) => (
   <>
     {s && <PowerStatusRows info={info} state={s} quick only="alerts" />}
     {s && <EnableToggle state={s} info={info} quick only="alerts" />}
-    {error && <PanelSectionRow><Problem what="Power" error={error} /></PanelSectionRow>}
+    {error && <PanelSectionRow><Problem what="Power" error={error} onRetry={reloadInfo} /></PanelSectionRow>}
   </>
 );
 

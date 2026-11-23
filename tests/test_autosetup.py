@@ -457,6 +457,130 @@ class PlanTest(AutoBase):
             self.assertEqual(self.state()["games"], {})
 
 
+class StateFileTest(AutoBase):
+    """ROADMAP T1-5: a damaged auto.json is set aside and nothing is saved until Start fresh; a newer one is
+    read-only; unknown keys survive a save; the trim never drops a game with live changes."""
+
+    def path(self):
+        return os.path.join(self.ctx.settings_dir, "auto.json")
+
+    def raw(self):
+        with open(self.path()) as f:
+            return json.load(f)
+
+    def test_damaged_file_pauses_saving_until_start_fresh(self):
+        write(self.path(), '{"version": 1, "on": true, "games": {"12')       # cut off by a power loss
+        with self.assertLogs("oxp3deck", "WARNING"):
+            st = self.state()
+        self.assertTrue(st["ok"])
+        self.assertEqual((st["on"], st["games"]), (False, {}))
+        copies = [n for n in os.listdir(self.ctx.settings_dir) if n.startswith("auto.json.corrupt-")]
+        self.assertEqual(len(copies), 1)
+        self.assertFalse(os.path.exists(self.path()))
+        p = autosetup.file_problem(self.ctx)
+        self.assertEqual((p["file"], p["kind"], p["copy"]), ("auto.json", "damaged", copies[0]))
+        r = autosetup.enable(self.ctx, True, True)
+        self.assertFalse(r["ok"])
+        self.assertIn("Start fresh", r["error"])
+        self.assertFalse(os.path.exists(self.path()))                      # nothing written over it
+        self.assertEqual(autosetup.pending(self.ctx, [PLAIN])["appids"], [])
+        self.assertIn("Start fresh", autosetup.opti_precheck(self.ctx, self.settings, WITCHER, True))
+        self.assertEqual(autosetup.start_fresh(self.ctx), {"ok": True, "error": None})
+        self.assertIsNone(autosetup.file_problem(self.ctx))
+        self.on()
+        self.assertTrue(self.raw()["on"])
+        self.assertEqual(len([n for n in os.listdir(self.ctx.settings_dir) if ".corrupt-" in n]), 1)   # kept
+
+    def test_newer_file_is_read_only(self):
+        self.on()
+        self.plan(PLAIN, name="proton-cachyos", prio=100)
+        self.launch_change()
+        data = self.raw()
+        data["version"] = autosetup.VERSION + 1
+        write(self.path(), json.dumps(data))
+        st = self.state()
+        self.assertTrue(st["on"])
+        self.assertIn(PLAIN, st["games"])                                  # still shown
+        self.assertEqual(autosetup.file_problem(self.ctx)["kind"], "newer")
+        r = autosetup.enable(self.ctx, False)
+        self.assertFalse(r["ok"])
+        self.assertIn("newer OXP3 Deck", r["error"])
+        self.assertFalse(autosetup.record(self.ctx, PLAIN, {"kind": "launch", "launch": {
+            "set": {"XESS": "latest"}, "dropped": {}, "args": []}})["ok"])
+        self.assertEqual(self.raw(), data)                                 # untouched
+        self.assertIn("newer OXP3 Deck", st["read_only"])                  # the frontend offers no Undo
+        cid = st["games"][PLAIN]["changes"][-1]["id"]
+        r = autosetup.undone(self.ctx, PLAIN, cid)
+        self.assertFalse(r["ok"])
+        self.assertIn("newer OXP3 Deck", r["error"])
+        self.assertIn("newer OXP3 Deck", autosetup.opti_undo_precheck(self.ctx, PLAIN, cid))
+        self.assertEqual(self.raw(), data)
+        self.assertEqual(autosetup.start_fresh(self.ctx)["ok"], True)
+        self.assertIsNone(self.state()["read_only"])
+        self.assertEqual(self.state()["games"], {})
+        newer = [n for n in os.listdir(self.ctx.settings_dir) if n.startswith("auto.json.newer-")]
+        self.assertEqual(len(newer), 1)
+
+    def test_unknown_keys_survive_a_save(self):
+        self.on()
+        self.plan(PLAIN, name="proton-cachyos", prio=100)
+        data = self.raw()
+        data["future"] = {"x": [1, 2]}
+        data["games"][PLAIN]["future_game"] = "keep me"
+        write(self.path(), json.dumps(data))
+        self.launch_change()
+        self.assertNotIn("future_game", self.agame(PLAIN))                 # not sent to the frontend
+        self.assertNotIn("_keep", self.state())
+        got = self.raw()
+        self.assertEqual(got["future"], {"x": [1, 2]})
+        self.assertEqual(got["games"][PLAIN]["future_game"], "keep me")
+        self.assertEqual(len(got["games"][PLAIN]["changes"]), 1)
+        self.assertFalse(any(k.startswith("_") for k in got))
+
+    def test_trim_keeps_every_game_with_something_in_effect(self):
+        self.on()
+        self.plan(PLAIN, name="proton-cachyos", prio=100)
+        self.launch_change(PLAIN)                                         # live launch options
+        self.t += 1
+        self.plan(FSRGAME, name="proton-cachyos", prio=100)
+        self.proton_change(FSRGAME)                                       # a live Proton move
+        self.t += 1
+        self.plan("11")
+        self.assertTrue(autosetup.session(self.ctx, "11", "start")["ok"])   # running
+        self.t += 1
+        self.plan("12")                                                   # nothing in effect
+        self.t += 1
+        with mock.patch.object(autosetup, "MAX_GAMES", 1):
+            self.plan("13")
+            ids = set(self.state()["games"])
+        self.assertEqual(ids, {PLAIN, FSRGAME, "11"})                     # over the limit rather than lose one
+        self.assertTrue(autosetup._in_use({"changes": [], "rollback_due": "launch-1",
+                                           "session": {"started_at": None}}))
+
+    def test_a_too_big_file_drops_old_history_not_live_changes(self):
+        self.on()
+        self.plan(PLAIN, name="proton-cachyos", prio=100)
+        old = self.launch_change()
+        autosetup.undone(self.ctx, PLAIN, old["id"])
+        self.t += 1
+        live = self.launch_change()
+        self.t += 1
+        self.launch_change(XESS="xe2")
+        st = autosetup._load(self.ctx)
+        size = len(autosetup._blob(st))
+        with mock.patch.object(autosetup, "READ_MAX", size - 10):
+            autosetup._save(self.ctx, st)
+        ids = [c["id"] for c in self.agame(PLAIN)["changes"]]
+        self.assertNotIn(old["id"], ids)                                  # undone history went first
+        self.assertIn(live["id"], ids)
+        st = autosetup._load(self.ctx)
+        with mock.patch.object(autosetup, "READ_MAX", 50):
+            with self.assertRaises(autosetup.context.Refused) as e:
+                autosetup._save(self.ctx, st)
+        self.assertIn("too many games", str(e.exception))
+        self.assertIn(PLAIN, self.state()["games"])                       # nothing written
+
+
 class UndoTest(AutoBase):
     def test_user_undo_makes_the_game_manual(self):
         self.on()
@@ -486,6 +610,24 @@ class UndoTest(AutoBase):
         self.assertEqual(res["game"]["changes"][-1]["state"], "rolled_back")
         self.assertIn("installed OptiScaler", res["game"]["notice"])
         self.assertEqual(res["game"]["mode"], "auto")
+
+    def test_optiscaler_undo_refused_before_the_remove_job_while_read_only(self):
+        self.on()
+        self.plan(WITCHER)
+        rec = {"build": "v10-20261105", "origin": "auto", "choices": {"upscaler": "xess", "fg": 2,
+                                                                      "fg_input": "xefg"}}
+        with mock.patch.object(optiscaler, "game_record", return_value=rec):
+            autosetup.opti_done(self.ctx, WITCHER, {"ok": True})
+            cid = self.agame(WITCHER)["changes"][-1]["id"]
+            path = os.path.join(self.ctx.settings_dir, "auto.json")
+            with open(path) as f:
+                data = json.load(f)
+            data["version"] = autosetup.VERSION + 1
+            write(path, json.dumps(data))
+            r = autosetup.undone(self.ctx, WITCHER, cid)
+            self.assertFalse(r["ok"])
+            self.assertIsNone(r["kind"])                                   # no "opti": the job never starts
+            self.assertIn("newer OXP3 Deck", autosetup.opti_undo_precheck(self.ctx, WITCHER, cid))
 
     def test_opti_install_job(self):
         self.on()

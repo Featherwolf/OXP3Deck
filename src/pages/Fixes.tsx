@@ -14,7 +14,7 @@ import { VrrRow } from "../components/PerfRows";
 import { isVrrAdvice } from "../display";
 import { RebootRow } from "../components/Reboot";
 import { openPage } from "../nav";
-import { useCurrentJob, useResource } from "../store";
+import { invalidate, useCurrentJob, useResource } from "../store";
 import { firstSentence, fitsOneLine } from "../text";
 import type { ApplyOpts, CatalogRes, FixState, Overview, Oxp3Catalog, Oxp3CatalogFix, Oxp3Fix, StatusRes } from "../types";
 import { oxp3Usable } from "./Quick";
@@ -55,7 +55,7 @@ export const NeedsOxp3: FC<{ ov: Overview | undefined; err?: string | null }> = 
   <PanelSection title="oxp3-tool">
     <PanelSectionRow>
       {!ov ? <Status ok={null} label="Reading…" />
-        : !ov.ok ? <Problem what="Overview" error={ov.error} />
+        : !ov.ok ? <Problem what="Overview" error={ov.error} onRetry={() => invalidate("overview")} />
         : <Status ok={false} label={ov.oxp3.installed ? "Fixes tool too old" : "Fixes tool not installed"}
             detail="Install it to use this page."
             details={{ title: "Fixes tool", body: `OXP3 Deck needs oxp3-tool ${ov.oxp3.min_version} or newer for the device fixes. Install or update it in the Quick Access panel or under Updates & logs.` }} />}
@@ -136,7 +136,7 @@ const FixRow: FC<{ f: Oxp3Fix; c: Oxp3CatalogFix | undefined; cat: Oxp3Catalog |
               </ButtonItem>
             </WithDetails>
           )}
-          <Problem what={f.title} error={act.error} />
+          <Problem what={f.title} error={act.error} onRetry={act.retry} />
           <Pending ids={[`fix.${f.id}`]} />
         </PanelSectionRow>
         {act.job && <JobView job={act.job} lines={6} />}
@@ -157,7 +157,7 @@ export const FixesTab: FC = () => {
         <PanelSectionRow>
           {!status && st.loading && <Status ok={null} label="Reading the device's state…" detail="A few seconds." />}
           {!status && !st.loading && running && <Status ok={null} label="The status is read when the running task has finished." />}
-          <Problem what="oxp3-tool status" error={st.data && !st.data.ok ? st.data.error : null} />
+          <Problem what="oxp3-tool status" error={st.data && !st.data.ok ? st.data.error : null} onRetry={st.reload} />
           {status && !status.can_change && (
             <Status ok={false} label="This system can't be changed" detail="Only ONEXPLAYER 3 on Bazzite or CachyOS." />
           )}
@@ -169,7 +169,7 @@ export const FixesTab: FC = () => {
             description={explain("Changes nothing.")}>
             {st.loading ? "Reading…" : "Refresh"}
           </ButtonItem>
-          <Problem what="Refresh" error={act.error} />
+          <Problem what="Refresh" error={act.error} onRetry={act.retry} />
         </PanelSectionRow>
         <RebootRow o={ov.data?.ok ? ov.data : null} st={status} />
       </PanelSection>

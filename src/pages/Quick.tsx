@@ -9,11 +9,13 @@ import { FC, useEffect } from "react";
 import { applyFixes, blockedBy, fixesEffect, installOxp3, installXess, useAction } from "../actions";
 import { rollbackText } from "../autosetup";
 import { useAutoState } from "../autostate";
-import { get_overview, oxp3_status, xess_check_update, xess_state } from "../backend";
+import { get_overview, oxp3_status, oxp3_update_check, xess_check_update, xess_state } from "../backend";
 import { friendlyName } from "../conflicts";
+import { Boundary } from "../components/Boundary";
 import { AutoSetupRows, AutoSetupSwitch, rolledBackRows } from "../components/AutoSetup";
 import { clearRecentFixes } from "../components/ConflictRow";
 import { useExtrasState } from "../components/ExtrasControls";
+import { FileRows } from "../components/FileRows";
 import { GameControls } from "../components/GameControls";
 import { clearPinned, Group } from "../components/Group";
 import { DetailsSpec, paragraphs } from "../components/confirm";
@@ -26,6 +28,7 @@ import {
   BatteryBody, CpuAlerts, CpuBody, GameProfileToggle, PowerAlerts, PowerBody, usePower, useRefused,
 } from "../components/PowerControls";
 import { RebootRow } from "../components/Reboot";
+import { BundledNotice, PluginNotice, useAutoChecks } from "../components/UpdateRows";
 import { openPage } from "../nav";
 import { PRESET_LABEL, presetCaps, presetOf } from "../power";
 import {
@@ -33,9 +36,10 @@ import {
   liveSummary, powerAlert, powerSummary, refusedLive, summaryValues, xessLine, xessSummary,
 } from "../quickgroups";
 import { useRunningApp } from "../steam";
-import { syncJob, useCurrentJob, useLive, useResource } from "../store";
+import { invalidate, syncJob, useCurrentJob, useLive, useResource } from "../store";
 import { firstSentence, fitsOneLine } from "../text";
-import type { Overview, Oxp3Install, Oxp3Status, StatusRes, XessStateRes, XessUpdateCheck } from "../types";
+import type { Overview, Oxp3Install, Oxp3Status, Oxp3UpdateCheck, StatusRes, XessStateRes, XessUpdateCheck } from "../types";
+import { anyNotice, CHECK_KEYS, oxp3UpdateFlag } from "../updates";
 import { atLeast, cmpVersion, listText, platformName } from "../util";
 import { checkText, offerLabel, repairText, xessOffer } from "../xessoffer";
 
@@ -57,7 +61,7 @@ export const oxp3Offer = (i: Oxp3Install | null | undefined): { source: "bundled
   return null;
 };
 
-const StatusSection: FC<{ o: Overview | null; err: string | null; st: Oxp3Status | null }> = ({ o, err, st }) => {
+const StatusSection: FC<{ o: Overview | null; err: string | null; st: Oxp3Status | null; onRetry: () => unknown }> = ({ o, err, st, onRetry }) => {
   const os = st ? `${st.os.name ?? platformName(st.os.platform)}${st.os.kernel ? `, kernel ${st.os.kernel}` : ""}` : platformName(o?.platform);
   return (
     <PanelSection>
@@ -69,8 +73,10 @@ const StatusSection: FC<{ o: Overview | null; err: string | null; st: Oxp3Status
               lines: [`vendor: ${o.device.vendor ?? "?"}`, `product: ${o.device.product ?? "?"}`] }} />
         )}
         {!o && !err && <Status ok={null} label="Reading the state…" />}
-        <Problem what="Status" error={err} />
+        <Problem what="Status" error={err} onRetry={onRetry} />
       </PanelSectionRow>
+      <FileRows files={o?.files} />
+      {anyNotice(o, st) && <Boundary what="Updates"><PanelSectionRow><BundledNotice o={o} st={st} /><PluginNotice o={o} /></PanelSectionRow></Boundary>}
       <RebootRow o={o} st={st} />
       <JobView quick />
     </PanelSection>
@@ -131,8 +137,8 @@ const Oxp3Section: FC<{ o: Overview; st: StatusRes | undefined; loading: boolean
             </ButtonItem>
           </WithDetails>
         )}
-        <Problem what={offer?.update ? "Update fixes tool" : "Install fixes tool"} error={inst.busy ? null : inst.error} />
-        {usable && st && !st.ok && <Problem what="Fixes status" error={st.error} />}
+        <Problem what={offer?.update ? "Update fixes tool" : "Install fixes tool"} error={inst.busy ? null : inst.error} onRetry={inst.retry} />
+        {usable && st && !st.ok && <Problem what="Fixes status" error={st.error} onRetry={() => invalidate("status")} />}
       </PanelSectionRow>
       {usable && status && (
         <PanelSectionRow>
@@ -160,7 +166,7 @@ const Oxp3Section: FC<{ o: Overview; st: StatusRes | undefined; loading: boolean
               </ButtonItem>
             </WithDetails>
           )}
-          <Problem what="Apply" error={act.busy ? null : act.error} />
+          <Problem what="Apply" error={act.busy ? null : act.error} onRetry={act.retry} />
         </PanelSectionRow>
       )}
     </>
@@ -216,7 +222,7 @@ const XessSection: FC<{ o: Overview }> = ({ o }) => {
             {chk.loading ? "Checking…" : "Check for XeSS update"}
           </ButtonItem>
         )}
-        <Problem what="XeSS" error={act.error} />
+        <Problem what="XeSS" error={act.error} onRetry={act.retry} />
       </PanelSectionRow>
     </>
   );
@@ -231,6 +237,7 @@ export const QuickPanel: FC = () => {
   const job = useCurrentJob();
   const o = ov.data?.ok ? ov.data : null;
   useEffect(() => { if (ov.data?.ok) syncJob(ov.data.job); }, [ov.data]);
+  useAutoChecks(o);           // the daily checks' answers: "Update available" in the closed groups
   // oxp3-tool status waits for oxp3-tool's lock, which a running job holds: read it once the job has ended
   const st = useResource<StatusRes>("status", oxp3_status, { skip: !oxp3Usable(o?.oxp3) || job?.state === "running" });
   const app = useRunningApp();
@@ -251,7 +258,8 @@ export const QuickPanel: FC = () => {
   }, [app?.appid]);
   // the XeSS cache only (xess_state is read by the open group): "Update available" once it is known
   const xs = useResource<XessStateRes>("xess", xess_state, { skip: true });
-  const chk = useResource<XessUpdateCheck>("manual:xess-check", xess_check_update, { skip: true });
+  const chk = useResource<XessUpdateCheck>(CHECK_KEYS.xess, xess_check_update, { skip: true });
+  const oc = useResource<Oxp3UpdateCheck>(CHECK_KEYS.oxp3, oxp3_update_check, { skip: true });
 
   const s = p.state, info = p.info, x = ex.x;
   const pd = { info, state: s, error: p.error };
@@ -282,7 +290,7 @@ export const QuickPanel: FC = () => {
 
   return (
     <>
-      <StatusSection o={o} err={ov.data && !ov.data.ok ? ov.data.error : null} st={status} />
+      <Boundary what="Status" wrap="section"><StatusSection o={o} err={ov.data && !ov.data.ok ? ov.data.error : null} st={status} onRetry={ov.reload} /></Boundary>
       <Group id="live" title="Live" summary={liveSummary(lv.live, lv.error)}>
         <LiveRows live={lv.live} error={lv.error} />
       </Group>
@@ -323,7 +331,7 @@ export const QuickPanel: FC = () => {
       )}
       {o && (
         <Group id="fixes" title="Device fixes" alert={fAlert} alerts={fAlert && <Oxp3Section o={o} st={st.data} loading={st.loading} only="alerts" />}
-          summary={fixesSummary({ installed: o.oxp3.installed, usable: oxp3Usable(o.oxp3), update: !!fixOffer?.update,
+          summary={fixesSummary({ installed: o.oxp3.installed, usable: oxp3Usable(o.oxp3), update: oxp3UpdateFlag(o.oxp3, oc.data, !!fixOffer?.update),
             applied: status ? fixes.applied : null, recommended: fixes.recommended.length, attention: fixes.attention.length })}>
           <Oxp3Section o={o} st={st.data} loading={st.loading} />
         </Group>

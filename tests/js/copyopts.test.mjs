@@ -6,7 +6,7 @@ import { test } from "node:test";
 
 import "./tsresolve.mjs";
 
-const { copyDetails, copyLine, copyRow } = await import("../../src/copyopts.ts");
+const { copyDetails, copyLine, copyNeeded, copyRow } = await import("../../src/copyopts.ts");
 const { clipboardMethods, copyWith, execCopy, navigatorCopy } = await import("../../src/clipboard.ts");
 const { EFFECTS, effectText } = await import("../../src/effects.ts");
 
@@ -161,4 +161,14 @@ test("copyLine: the DirectX 12 argument for a known game with frame generation s
   assert.equal(copyLine({ ...base, steam: false, text: null, draft: "%command% -dx12", appid: W3 }).line, "%command% -dx12");
   assert.match(readFileSync(new URL("../../src/components/GameControls.tsx", import.meta.url), "utf8"),
     /appid: app\.appid, argsDone: autoLog\.data\?\.\[app\.appid\]\?\.argsDone \?\? \[\]/);
+});
+
+test("copyNeeded: only when OXP3 Deck cannot write the line itself (the quick panel's This game)", () => {
+  assert.equal(copyNeeded(null), false);
+  for (const reason of ["rejected", "shortcut", "unreadable"]) assert.equal(copyNeeded({ line: "x %command%", reason, adds: "" }), true, reason);
+  for (const reason of ["running", "advice", "current"]) assert.equal(copyNeeded({ line: "x %command%", reason, adds: "" }), false, reason);
+  assert.equal(copyNeeded(copyLine({ ...base, text: "XESS=latest %command%" })), false);
+  assert.equal(copyNeeded(copyLine({ ...base, text: null, draft: "XESS=latest %command%" })), true);
+  assert.equal(copyNeeded(copyLine({ ...base, steam: false, text: null, draft: "XESS=latest %command%" })), true);
+  assert.equal(copyNeeded(copyLine({ ...base, text: "a", wanted: "XESS=latest %command%" })), true);
 });

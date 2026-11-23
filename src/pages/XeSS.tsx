@@ -42,7 +42,7 @@ const OldFolder: FC<{ path: string; why: string | null }> = ({ path, why }) => {
         description={explainWhen(path.split("/").pop() ?? path, EFFECTS["xess.remove_folder"], why)}>
         {act.busy ? "Removing…" : "Remove old folder"}
       </ButtonItem>
-      <Problem what="Remove" error={act.error} />
+      <Problem what="Remove" error={act.error} onRetry={act.retry} />
     </>
   );
 };
@@ -84,7 +84,7 @@ export const XessTab: FC = () => {
       <PanelSection title="XeSS fast mode">
         <PanelSectionRow>
           {!xs.data && <Status ok={null} label="Reading…" />}
-          <Problem what="XeSS state" error={xs.data && !xs.data.ok ? xs.data.error : null} />
+          <Problem what="XeSS state" error={xs.data && !xs.data.ok ? xs.data.error : null} onRetry={xs.reload} />
           <Status ok={line.ok} label={line.label} detail={line.detail} details={{
             title: "XeSS fast mode", body: paragraphs([line.more, x && !x.installed && x.package_dir ? "The package OXP3 Deck installed last is no longer set up (uninstalled). Install sets it up again." : null,
               x?.installed ? (x.managed ? "Installed by OXP3 Deck." : "Installed by hand; Update moves it to a folder OXP3 Deck manages.") : null]),
@@ -146,7 +146,7 @@ export const XessTab: FC = () => {
               </ButtonItem>
             </WithDetails>
           )}
-          <Problem what="xess-xmx-linux" error={inst.error} />
+          <Problem what="xess-xmx-linux" error={inst.error} onRetry={inst.retry} />
         </PanelSectionRow>
         {inst.job && <JobView job={inst.job} lines={6} />}
       </PanelSection>
@@ -181,7 +181,7 @@ export const XessTab: FC = () => {
             </WithDetails>
             {drv.busy && <Status ok={null} label="Testing and switching the driver…" />}
             <Pending ids={["xess.driver"]} />
-            <Problem what="Default driver" error={drv.error} />
+            <Problem what="Default driver" error={drv.error} onRetry={drv.retry} />
           </PanelSectionRow>
         </PanelSection>
       )}
@@ -214,7 +214,7 @@ export const XessTab: FC = () => {
               <Status ok={false} label="A Proton update removed XeSS" detail="Add it again above."
                 details={{ title: "A Proton update removed XeSS", body: "A package update of a system Proton put its stock file back. Add the XeSS add-on again with the button above.", lines: ["igdext64.dll"] }} />
             )}
-            <Problem what="System Protons" error={shim.error} />
+            <Problem what="System Protons" error={shim.error} onRetry={shim.retry} />
             {shimNotes.map((n, i) => <Note key={i} details={fitsOneLine(n) ? null : { title: "Note", body: n }}>{firstSentence(n)}</Note>)}
             {(x.user_protons ?? []).length > 0 && (
               <Note label="Your Protons" details={{ title: "Your Protons", body: "Protons in your own Steam folder, as the installer set them up.",
