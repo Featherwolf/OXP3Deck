@@ -5,7 +5,10 @@ name: Release
 #   the commit it runs on, with the notes in release-notes/v0.1.0.md.
 # - Pushing an annotated tag such as v0.1.0. The tag's message becomes the notes.
 # The version must match package.json and the version inside the committed zip (run pnpm build && pnpm zip and
-# commit release/OXP3Deck.zip first). Versions below 1.0.0 are published as pre-releases.
+# commit release/OXP3Deck.zip first). Releases are published as the latest release; tick "pre-release" (or use a
+# version with a suffix such as 0.7.0-beta.1) to publish a pre-release instead. Running it again for a version that
+# is already released does not upload anything: it updates that release's notes and pre-release/latest state
+# (for example to promote a pre-release to the latest release).
 # Before publishing it runs the Python tests, the node tests and the TypeScript check, rebuilds the zip from the
 # tagged sources and stops unless the rebuilt zip holds the same files and bytes as the committed one.
 on:
@@ -16,6 +19,10 @@ on:
       version:
         description: "Version to release, without the v (it must match package.json)"
         required: true
+      prerelease:
+        description: "Publish as a pre-release (not the latest release)"
+        type: boolean
+        default: false
 
 permissions:
   contents: write
@@ -73,12 +80,19 @@ jobs:
         run: |
           cd release
           sha256sum OXP3Deck.zip > OXP3Deck.zip.sha256
-          pre=""
-          case "${TAG#v}" in 0.*) pre="--prerelease" ;; esac
+          pre="--latest"
+          case "${TAG#v}" in *-*) pre="--prerelease" ;; esac
+          if [ "${{ inputs.prerelease }}" = true ]; then pre="--prerelease"; fi
           if [ "$GITHUB_EVENT_NAME" = workflow_dispatch ]; then
             test -f "../release-notes/$TAG.md" || { echo "release-notes/$TAG.md is missing"; exit 1; }
-            gh release create "$TAG" OXP3Deck.zip OXP3Deck.zip.sha256 --target "$GITHUB_SHA" \
-              --notes-file "../release-notes/$TAG.md" --title "OXP3 Deck ${TAG#v}" $pre
+            if gh release view "$TAG" >/dev/null 2>&1; then
+              if [ "$pre" = --latest ]; then state="--prerelease=false --latest"; else state="--prerelease"; fi
+              # shellcheck disable=SC2086
+              gh release edit "$TAG" --notes-file "../release-notes/$TAG.md" --title "OXP3 Deck ${TAG#v}" $state
+            else
+              gh release create "$TAG" OXP3Deck.zip OXP3Deck.zip.sha256 --target "$GITHUB_SHA" \
+                --notes-file "../release-notes/$TAG.md" --title "OXP3 Deck ${TAG#v}" $pre
+            fi
           else
             gh release create "$TAG" OXP3Deck.zip OXP3Deck.zip.sha256 \
               --verify-tag --notes-from-tag --title "OXP3 Deck ${TAG#v}" $pre
