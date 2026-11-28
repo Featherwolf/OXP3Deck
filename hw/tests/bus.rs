@@ -655,7 +655,15 @@ async fn fan_returns_to_auto_on_temperature_sensor_sleep_and_disconnect() {
     // an unreadable sensor
     let a = env.hold(Who::Session, json!([set("max")]));
     assert!(ok(&a.results[0]), "{:?}", a.results);
-    assert_eq!(fan(&env.tree), "0");
+    // manual at full duty: oxpec shows pwm1_enable 0 only while the fan speed register is 255
+    assert_eq!(fan(&env.tree), "1");
+    assert_eq!(env.tree.get("sys/class/hwmon/hwmon5/pwm1"), "255");
+    let mode: String = env
+        .prop(PATH, &format!("{IF}.FanMode1"), "FanMode")
+        .await
+        .try_into()
+        .unwrap();
+    assert_eq!(mode, "max", "FanMode reads back what was set (hostd's read-back)");
     env.tree.remove("sys/class/hwmon/hwmon3/temp1_input");
     assert!(env.until(2 * S, |t| fan(t) == "2").await);
     assert!(env.changed("fan", "reverted-sensor", S).await);
@@ -759,7 +767,11 @@ async fn a_stopped_provider_misses_the_watchdog_and_execstoppost_restores() {
     d.signal(libc::SIGSTOP);
     let _ = pings(Duration::from_millis(150));
     assert_eq!(pings(Duration::from_millis(1000)), 0, "no ping while stopped");
-    assert_eq!(fan(&env.tree), "0", "nothing restored the fan yet");
+    assert_eq!(
+        (fan(&env.tree), env.tree.get("sys/class/hwmon/hwmon5/pwm1")),
+        ("1".into(), "255".into()),
+        "nothing restored the fan yet (max: manual at full duty)"
+    );
     d.signal(libc::SIGKILL);
     d.wait_exit(Duration::from_secs(5)).unwrap();
     // ExecStopPost: oxp3-hwd --restore-safe with the group grants only

@@ -48,7 +48,9 @@ pub struct Dmi {
 /// Fan modes and the safety rule of the oxpec hwmon `oxp_ec`.
 #[derive(Debug)]
 pub struct Fan {
-    /// pwm1_enable values: 2 = the EC's automatic curve, 1 = manual duty, 0 = full speed.
+    /// pwm1_enable values written: 2 = the EC's automatic curve, 1 = manual duty, 0 = full speed
+    /// (manual, then pwm1 255). oxpec reads 0 back only while the fan speed register is 255, so
+    /// full speed normally reads 1 with pwm1 255.
     pub enable_auto: u32,
     pub enable_manual: u32,
     pub enable_max: u32,

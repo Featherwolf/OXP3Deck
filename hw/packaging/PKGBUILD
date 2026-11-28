@@ -4,13 +4,18 @@
 # Maintainer: Featherwolf
 #
 # oxp3-hw: the ONEXPLAYER 3 hardware helper. Build in this directory with `makepkg`; it builds the
-# Rust daemon from the hw-v$pkgver tag. To build the working tree instead, see ../README.md.
+# Rust daemon from the commit in _commit. To build the working tree instead, see ../README.md.
 # There is no install scriptlet: pacman's own hooks create the user (sysusers.d) and reload udev
 # and systemd; the grants apply at the next boot (udev coldplug, then the unit's ExecStartPre).
 
 pkgname=oxp3-hw
 pkgver=0.1.0
 pkgrel=1
+# The source commit, as a full 40-character SHA (there is no signing key yet, so the commit pins
+# the source). A release sets it to the commit to ship, commits only that change and tags the new
+# commit hw-v$pkgver; .github/workflows/hw-release.yml checks the pair (../README.md, "Cutting a
+# release").
+_commit=COMMIT_PLACEHOLDER
 pkgdesc="ONEXPLAYER 3 hardware helper: an unprivileged Bathysphere Hw1 provider and steamos-manager remote"
 arch=('x86_64')
 url="https://github.com/Featherwolf/OXP3Deck"
@@ -22,15 +27,28 @@ optdepends=('steamos-manager: shows the TDP, GPU and charge-limit sliders in Ste
             'power-profiles-daemon: coarse energy modes for Bathysphere plugins')
 # both ship an ONEXPLAYER 3 steamos-manager device file and TDP remotes
 conflicts=('oxp3-support')
-# Pin to the signed tag once a key is set: "#tag=hw-v$pkgver?signed" and validpgpkeys=(...).
-source=("$pkgname::git+$url.git#tag=hw-v$pkgver")
+# Once a signing key exists, a signed tag can replace the commit pin: "#tag=hw-v$pkgver?signed"
+# and validpgpkeys=(...).
+source=("$pkgname::git+$url.git#commit=$_commit")
 sha256sums=('SKIP')
 
 _hw() {
   cd "$srcdir/$pkgname/hw"
 }
 
+# The crates' source paths (in panic messages) without the builder's cargo home, so the binary is
+# the same whoever builds it and where (with SOURCE_DATE_EPOCH, makepkg's own part)
+_rustflags() {
+  local remap="--remap-path-prefix=${CARGO_HOME:-$HOME/.cargo}=/cargo"
+  [[ " ${RUSTFLAGS-} " == *" $remap "* ]] || export RUSTFLAGS="${RUSTFLAGS:+$RUSTFLAGS }$remap"
+}
+
 prepare() {
+  # makepkg also accepts a short SHA; the pin is the full one, and it is what was checked out
+  if [[ $(git -C "$srcdir/$pkgname" rev-parse HEAD) != "$_commit" ]]; then
+    echo "_commit must be the full SHA of the commit to build, not '$_commit'" >&2
+    return 1
+  fi
   _hw
   export RUSTUP_TOOLCHAIN=stable
   cargo fetch --locked --target "$(rustc -vV | sed -n 's/host: //p')"
@@ -40,6 +58,7 @@ build() {
   _hw
   export RUSTUP_TOOLCHAIN=stable
   export CARGO_TARGET_DIR=target
+  _rustflags
   # never with --features test-sysfs: a release build refuses --sysfs-root, --bus and --time-scale
   cargo build --frozen --release --bin oxp3-hwd
 }
@@ -48,6 +67,7 @@ check() {
   _hw
   export RUSTUP_TOOLCHAIN=stable
   export CARGO_TARGET_DIR=target
+  _rustflags
   cargo test --frozen --release --lib
   python3 ci/lint_grants.py packaging
   # the release binary must not know the test options (exit 2: unknown option)

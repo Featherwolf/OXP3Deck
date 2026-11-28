@@ -126,7 +126,11 @@ async fn no_fan_mode_but_auto_while_the_system_prepares_to_sleep() {
     assert!(log_has(&env, "oxp3-hwd: resumed", 2 * S).await);
     let a = env.hold(Who::Session, json!([set_fan("max")]));
     assert!(ok(&a.results[0]), "{:?}", a.results);
-    assert_eq!(fan(&env.tree), "0");
+    // manual at full duty: oxpec shows pwm1_enable 0 only while the fan speed register is 255
+    assert_eq!(
+        (fan(&env.tree), env.tree.get("sys/class/hwmon/hwmon5/pwm1")),
+        ("1".into(), "255".into())
+    );
     drop(a);
 }
 

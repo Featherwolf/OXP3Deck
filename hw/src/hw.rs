@@ -54,6 +54,8 @@ const GPU_TOL_MHZ: u64 = 25;
 const CAP_TOL_KHZ: u64 = 100_000;
 /// oxpec scales pwm1 0..255 to the EC's 0..184 and back, so a duty reads back up to 2 lower.
 const PWM_TOL: u64 = 2;
+/// A manual duty that reads at least this is full duty (255 within PWM_TOL): fan mode "max".
+const PWM_FULL: u64 = 255 - PWM_TOL;
 const XE_TRIES: u32 = 3;
 const GRACE_REASSERTS: u8 = 3;
 
@@ -1700,17 +1702,31 @@ impl Hw {
 
     // ---- fan (leased; safety reverts) ---------------------------------------------------------
 
+    /// The fan mode as read back. oxpec (oxp_platform_read) shows pwm1_enable 2 in auto; in manual
+    /// it shows 0 only while the fan *speed* register reads 255, else 1, so "max" (written as
+    /// pwm1_enable 0: manual, then pwm1 255) normally reads 1 with pwm1 255. Whichever of 0 and 1
+    /// the driver shows, manual is "max" at full duty, "quiet" at the quiet duty (both within
+    /// PWM_TOL) and "manual" at any other duty. Only another writer leaves one of those (oxpec
+    /// takes any pwm1 0..255 in manual, 0 included), and no mode the provider holds matches it.
     pub fn fan_read_word(&self) -> Option<String> {
         let f = self.d.fan.as_ref()?;
-        Some(
-            match self.sys.read_u64(&f.enable)? {
-                2 => "auto",
-                0 => "max",
-                1 => "quiet",
-                _ => return None,
+        let fan = &self.dev.fan;
+        let en = self.sys.read_u64(&f.enable)?;
+        let word = if en == fan.enable_auto as u64 {
+            "auto"
+        } else if en == fan.enable_manual as u64 || en == fan.enable_max as u64 {
+            let pwm = self.sys.read_u64(&f.pwm)?;
+            if pwm >= PWM_FULL {
+                "max"
+            } else if close(Some(pwm), fan.quiet_pwm as u64, PWM_TOL) {
+                "quiet"
+            } else {
+                "manual"
             }
-            .to_string(),
-        )
+        } else {
+            return None;
+        };
+        Some(word.to_string())
     }
 
     pub fn fan_state(&self) -> (String, String) {
@@ -1745,16 +1761,11 @@ impl Hw {
                 return Err(self.fan_read_word().unwrap_or_else(|| "unreadable".into()));
             }
         }
-        let en = self.sys.read_u64(&f.enable);
-        let ok = match mode {
-            "auto" => en == Some(fan.enable_auto as u64),
-            "quiet" => {
-                en == Some(fan.enable_manual as u64) && close(self.sys.read_u64(&f.pwm), fan.quiet_pwm as u64, PWM_TOL)
-            }
-            // the driver reports 0 only at full duty, else 1
-            _ => en == Some(fan.enable_max as u64) || en == Some(fan.enable_manual as u64),
-        };
+        // max is manual with pwm1 at full duty; quiet is manual at its own duty (both through the
+        // EC's 0..184 steps). pwm1_enable alone cannot tell them apart: it reads 1 for both, so
+        // the word read back, which checks the duty too, must be the mode written.
         let got = self.fan_read_word().unwrap_or_else(|| "unreadable".into());
+        let ok = got == mode;
         self.audit(ctx, "fan", &f.enable, &cur, mode, &got);
         if ok {
             Ok(())
@@ -2575,7 +2586,8 @@ impl Hw {
                 let ok_b = !self.soc_active() || self.read_hex(&soc.balance) == Some(b);
                 Some(ok_o && ok_b)
             }
-            "fan" if self.fan_mode != "auto" => Some(self.fan_read_word().as_deref() != Some("auto")),
+            // a mismatch: another writer's auto or duty ("manual", or the other mode's), or unreadable
+            "fan" if self.fan_mode != "auto" => Some(self.fan_read_word().as_deref() == Some(self.fan_mode)),
             "chargeLimit" => Some(self.charge_read() == Some(self.charge_target? as i64)),
             "chargeBehaviour" if self.beh_value != "auto" => Some(self.beh_read().as_deref() == Some(self.beh_value)),
             _ => None,
@@ -2652,8 +2664,10 @@ impl Hw {
                     c.mism += 1;
                     if c.mism >= 2 {
                         self.mark_overridden(k, "");
-                        if k == "fan" {
-                            // another writer set auto: nothing to guard any more
+                        if k == "fan" && self.fan_read_word().as_deref() == Some("auto") {
+                            // another writer set auto: nothing to guard any more. A fan another
+                            // writer left manual keeps the sleep inhibitor, and the fan guard
+                            // keeps watching it (fan_mode stays the held mode)
                             self.fan_inhibitor = None;
                         }
                     }

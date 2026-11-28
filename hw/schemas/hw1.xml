@@ -51,8 +51,9 @@
     when the holder's unique name vanishes (NameOwnerChanged); the provider then restores the knob's
     default and emits Changed (released, reverted-disconnect). Steam-owned knobs (tdp, gpu,
     gpuPowerProfile, chargeLimit), which the provider serves through the remotes, have no lease.
-  - Every accepted write is read back (tolerances: RAPL 250 mW, GPU 25 MHz, CPU caps 100 MHz, all
-    others exact). A mismatch fails with Error.NotApplied; there is no rollback, because every
+  - Every accepted write is read back (tolerances: RAPL 250 mW, GPU 25 MHz, CPU caps 100 MHz, the
+    fan duty 2, because oxpec's pwm1 goes through the EC's 0..184 steps and 102 reads back as 101;
+    all others exact). A mismatch fails with Error.NotApplied; there is no rollback, because every
     accepted value is safe. One journal line is written per write: uid, knob, old value, new value
     and read-back.
 
@@ -640,13 +641,19 @@
       Knob "fan" (leased; the default is "auto"). On the ONEXPLAYER 3 (oxpec hwmon "oxp_ec",
       Linux 7.4 or later): "auto" writes pwm1_enable 2, "quiet" writes pwm1_enable 1 and then pwm1
       = the device's quiet duty (102; the hard limit is 80 to 255), "max" writes pwm1_enable 0
-      (full speed). While the fan is not "auto" the provider holds the logind delay inhibitor
-      Inhibit("sleep", PROVIDER, "fan back to auto", "delay"). It returns the fan to "auto", emits
-      Changed and sets LastRevert when: the package temperature (coretemp "Package id 0", checked
-      every 1 s) is 90 °C or more ("temperature") or cannot be read ("sensor"); logind sends
-      PrepareForSleep(true) ("sleep", then the inhibitor is released); the lease holder's name
-      vanishes ("disconnect"); the provider gets SIGTERM ("stop"). A hang ends in a watchdog kill
-      (only the safety task feeds the watchdog) and a crash in ExecStopPost, which both set "auto".
+      (manual, then pwm1 255). oxpec shows pwm1_enable 0 only while the fan speed register reads
+      255, so "max" normally reads back as pwm1_enable 1 with pwm1 255: the duty, not pwm1_enable,
+      tells "max" from "quiet". Any other manual duty reads back as "manual": oxpec takes any pwm1
+      from 0 to 255, so another writer can leave one, a stopped fan included. A held mode that
+      reads back as another word is a mismatch like any held value's (overridden after two), and
+      the fan is still guarded as below. While the fan is not "auto" the provider holds the logind
+      delay inhibitor Inhibit("sleep", PROVIDER, "fan back to auto", "delay"). It returns the fan
+      to "auto", emits Changed and sets LastRevert when: the package temperature (coretemp
+      "Package id 0", checked every 1 s) is 90 °C or more ("temperature") or cannot be read
+      ("sensor"); logind sends PrepareForSleep(true) ("sleep", then the inhibitor is released);
+      the lease holder's name vanishes ("disconnect"); the provider gets SIGTERM ("stop"). A hang
+      ends in a watchdog kill (only the safety task feeds the watchdog) and a crash in
+      ExecStopPost, which both set "auto".
   -->
   <interface name="io.github.featherwolf.Bathysphere.Hw1.FanMode1">
 
@@ -662,7 +669,8 @@
     <!--
         FanMode:
 
-        The current mode, as read back.
+        The current mode, as read back: "max" is manual at full duty, "quiet" manual at the quiet
+        duty, and "manual" any other manual duty (another writer's; never in AvailableFanModes).
     -->
     <property name="FanMode" type="s" access="read"/>
 

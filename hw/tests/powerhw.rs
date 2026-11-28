@@ -1359,7 +1359,16 @@ fn fan_modes_and_guards() {
         "{m}"
     );
     hw.set_fan(&ctx(), "max", true).unwrap();
-    assert_eq!(t.get(&format!("{fan}/pwm1_enable")), "0");
+    // oxpec shows pwm1_enable 0 only while the fan speed register is 255: max reads 1 at full duty
+    assert_eq!(
+        (t.get(&format!("{fan}/pwm1_enable")), t.get(&format!("{fan}/pwm1"))),
+        ("1".into(), "255".into())
+    );
+    assert_eq!(
+        hw.fan_state().0,
+        "max",
+        "FanMode reads back what was set (hostd's read-back)"
+    );
     // an unreadable sensor reverts too
     t.set_temp(50_000);
     t.remove("sys/class/hwmon/hwmon3/temp1_input");
@@ -1368,6 +1377,177 @@ fn fan_modes_and_guards() {
     for m in ["turbo", "Auto", ""] {
         assert_eq!(name(hw.set_fan(&ctx(), m, true)).0, INVALID);
     }
+}
+
+#[test]
+fn fan_mode_reads_back_as_oxpec_shows_it() {
+    // drivers/platform/x86/oxpec.c, oxp_platform_read: pwm1_enable is 2 in auto; in manual it is
+    // 0 only when the fan *speed* register reads 255, else 1. Manual at full duty is "max".
+    let t = tree();
+    t.oxp3(true);
+    let mut hw = make(&t);
+    let fan = "sys/class/hwmon/hwmon5";
+    let en = format!("{fan}/pwm1_enable");
+    let pwm = format!("{fan}/pwm1");
+    hw.fan_inhibitor = Some(inhibitor());
+    hw.set_fan(&ctx(), "max", true).unwrap();
+    assert_eq!((t.get(&en), t.get(&pwm)), ("1".into(), "255".into()));
+    assert_eq!(hw.fan_state().0, "max");
+    assert!(changed(&mut hw).contains(&("fan".into(), "set".into())));
+    hw.set_fan(&ctx(), "quiet", true).unwrap();
+    assert_eq!((t.get(&en), t.get(&pwm)), ("1".into(), "101".into()));
+    assert_eq!(hw.fan_state().0, "quiet");
+    // the driver's 0: the fan speed register happens to read 255
+    t.poke(&format!("{fan}/fan1_input"), 255);
+    hw.set_fan(&ctx(), "max", true).unwrap();
+    assert_eq!((t.get(&en), t.get(&pwm)), ("0".into(), "255".into()));
+    assert_eq!(hw.fan_state().0, "max");
+    hw.set_fan(&ctx(), "auto", true).unwrap();
+    assert_eq!(t.get(&en), "2");
+    assert_eq!(hw.fan_state().0, "auto");
+    // the words as read: full duty is pwm1 253 or more (255 within the EC scale's tolerance), the
+    // quiet duty is 102 within the same 2, and any other manual duty is "manual"; a 0 at a lower
+    // duty only says the fan speed read 255, so the duty decides
+    for (e, p, word) in [
+        (2, 255, Some("auto")),
+        (2, 0, Some("auto")),
+        (1, 255, Some("max")),
+        (1, 253, Some("max")),
+        (1, 252, Some("manual")),
+        (1, 105, Some("manual")),
+        (1, 104, Some("quiet")),
+        (1, 101, Some("quiet")),
+        (1, 100, Some("quiet")),
+        (1, 99, Some("manual")),
+        (1, 0, Some("manual")),
+        (0, 255, Some("max")),
+        (0, 101, Some("quiet")),
+        (0, 0, Some("manual")),
+        (3, 255, None),
+    ] {
+        t.poke(&en, e);
+        t.poke(&pwm, p);
+        assert_eq!(hw.fan_read_word().as_deref(), word, "pwm1_enable {e}, pwm1 {p}");
+    }
+}
+
+#[test]
+fn a_max_that_does_not_take_is_not_applied() {
+    // the EC keeps manual at the quiet duty and drops the pwm1_enable 0 write: pwm1_enable reads
+    // 1, as it does at full duty, so only the duty shows that max did not take
+    let t = tree();
+    t.oxp3(true);
+    let mut hw = make(&t);
+    hw.fan_inhibitor = Some(inhibitor());
+    hw.set_fan(&ctx(), "quiet", true).unwrap();
+    t.rules(serde_json::json!({"ignore": ["hwmon5/pwm1_enable"]}));
+    let (n, m) = name(hw.set_fan(&ctx(), "max", true));
+    assert_eq!((n, m.as_str()), (NOT_APPLIED, "fan=quiet"));
+    assert!(hw.fan_inhibitor.is_none() && hw.lease_of("fan").is_none());
+}
+
+/// Another writer (a tool writing sysfs), through the kernel's rules in src/emu.rs.
+fn external(t: &Tree, rel: &str, text: &str) {
+    Sys::emulated(t.root.clone()).write(&t.path(rel), text).unwrap();
+}
+
+#[test]
+fn a_manual_duty_reads_as_what_it_is() {
+    // oxpec takes any pwm1 0..255 in manual (oxp_pwm_input_write), so another writer can leave
+    // any of the EC's 0..184 duties. Only the quiet duty reads "quiet" and only full duty "max";
+    // any other, a stopped fan included, is "manual", not a mode the provider sets
+    let t = tree();
+    t.oxp3(true);
+    let hw = make(&t);
+    let fan = "sys/class/hwmon/hwmon5";
+    let pwm = format!("{fan}/pwm1");
+    external(&t, &format!("{fan}/pwm1_enable"), "1");
+    let mut quiet = Vec::new();
+    for v in 0..=255 {
+        external(&t, &pwm, &v.to_string());
+        let shown: u64 = t.get(&pwm).parse().unwrap();
+        match hw.fan_read_word().as_deref() {
+            Some("quiet") => quiet.push(shown),
+            Some("max") => assert!(shown >= 253, "pwm1 {v} (reads {shown}) is not full duty"),
+            Some("manual") => assert!(shown < 253, "pwm1 {v} (reads {shown})"),
+            w => panic!("pwm1 {v} (reads {shown}): {w:?}"),
+        }
+    }
+    quiet.dedup();
+    assert_eq!(
+        quiet,
+        [101, 102, 103],
+        "the EC duties next to 102 (written as 102, it reads 101)"
+    );
+    // a stopped fan, in FanMode and in Describe, while nobody holds the fan
+    external(&t, &pwm, "0");
+    assert_eq!(hw.fan_state().0, "manual");
+    let d = hw.describe("fan").unwrap();
+    assert_eq!(String::try_from(d["value"].try_clone().unwrap()).unwrap(), "manual");
+}
+
+#[test]
+fn another_writers_duty_overrides_a_held_fan_mode() {
+    let t = tree();
+    t.oxp3(true);
+    let mut hw = make(&t);
+    let fan = "sys/class/hwmon/hwmon5";
+    let en = format!("{fan}/pwm1_enable");
+    let pwm = format!("{fan}/pwm1");
+    let t0 = Instant::now() + Duration::from_secs(1);
+    let mut i = 0;
+    let mut ticks = |hw: &mut Hw, n: u32| {
+        for _ in 0..n {
+            hw.tick(t0 + Duration::from_millis(30 * i));
+            i += 1;
+        }
+    };
+    // held quiet, then full duty (another writer, or the EC when hot): two mismatches mark the
+    // fan overridden, and it is not fought
+    hw.fan_inhibitor = Some(inhibitor());
+    hw.set_fan(&ctx(), "quiet", true).unwrap();
+    changed(&mut hw);
+    ticks(&mut hw, 3);
+    assert!(changed(&mut hw).is_empty(), "the held quiet reads back as quiet (101)");
+    external(&t, &pwm, "255");
+    assert_eq!(hw.fan_state().0, "max");
+    ticks(&mut hw, 2);
+    assert!(changed(&mut hw).contains(&("fan".into(), "overridden".into())));
+    assert!(bool::try_from(hw.describe("fan").unwrap()["overridden"].try_clone().unwrap()).unwrap());
+    assert_eq!(t.get(&pwm), "255");
+    assert!(hw.fan_inhibitor.is_some(), "a manual fan keeps the sleep inhibitor");
+    // TakeControl writes the held quiet once; then another writer sets auto: nothing is left to
+    // guard, so the inhibitor goes
+    hw.take_control(&ctx(), &["fan".into()]).unwrap();
+    assert_eq!(hw.fan_state().0, "quiet");
+    changed(&mut hw);
+    external(&t, &en, "2");
+    ticks(&mut hw, 2);
+    assert!(changed(&mut hw).contains(&("fan".into(), "overridden".into())));
+    assert!(hw.fan_inhibitor.is_none());
+    // held max, then another tool stops the fan in manual: overridden and not fought, and still
+    // guarded (sleep inhibitor, 90 °C) because it is still manual
+    hw.fan_inhibitor = Some(inhibitor());
+    hw.set_fan(&ctx(), "max", true).unwrap();
+    changed(&mut hw);
+    ticks(&mut hw, 3);
+    assert!(changed(&mut hw).is_empty(), "the held max reads back as max");
+    external(&t, &pwm, "0");
+    assert_eq!(hw.fan_state().0, "manual");
+    ticks(&mut hw, 2);
+    assert!(changed(&mut hw).contains(&("fan".into(), "overridden".into())));
+    t.clear_writes();
+    ticks(&mut hw, 10);
+    assert!(t.writes().is_empty(), "never fights: {:?}", t.writes());
+    assert_eq!((hw.fan_mode(), hw.lease_of("fan").as_deref()), ("max", Some(":1.42")));
+    assert!(
+        hw.fan_inhibitor.is_some(),
+        "a stopped manual fan keeps the sleep inhibitor"
+    );
+    t.set_temp(90_000);
+    assert!(hw.fan_guard());
+    assert_eq!(t.get(&en), "2");
+    assert!(hw.fan_inhibitor.is_none());
 }
 
 #[test]
