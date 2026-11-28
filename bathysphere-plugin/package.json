@@ -1,0 +1,17 @@
+{
+  "name": "oxp3deck-bathysphere",
+  "version": "0.7.0",
+  "private": true,
+  "description": "OXP3 Deck for Bathysphere: ONEXPLAYER 3 power, fan, charging, XeSS and oxp3-tool helpers",
+  "license": "MIT",
+  "author": "Featherwolf",
+  "type": "module",
+  "scripts": {
+    "build": "node scripts/build.mjs",
+    "link": "node scripts/link.mjs",
+    "pack": "node scripts/build.mjs --pack",
+    "typecheck": "node scripts/link.mjs && .bathysphere/node_modules/.bin/tsc -p tsconfig.json --noEmit",
+    "test": "node scripts/build.mjs --tests && node --test --test-reporter=spec --test-timeout=180000 \"test/*.test.mjs\"",
+    "clean": "node scripts/build.mjs --clean"
+  }
+}
