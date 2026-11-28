@@ -509,6 +509,14 @@ have a page for it.
   into each game in `optiscaler.json` next to it) and task logs in `~/homebrew/data/OXP3Deck/jobs/`. The downloaded
   OptiScaler stays in `~/.local/share/oxp3deck/optiscaler/` for the next install.
 
+## Hardware helper (oxp3-hw)
+
+**[oxp3-hw](hw/README.md)** is a separate pacman package for CachyOS that lets Steam's Performance sliders and
+[Bathysphere](https://github.com/Featherwolf/Bathysphere) plugins set the OXP3's power limits, GPU clocks, CPU
+limits, fan mode and charge limit, without Decky. Its daemon runs as its own system user, never as root, and can only
+write the kernel files its package grants it, on the ONEXPLAYER 3 only. It is separate from this Decky plugin and
+also untested on a real device. See [hw/README.md](hw/README.md).
+
 ## Building from source
 
 ```bash
