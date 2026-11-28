@@ -60,3 +60,71 @@ jobs:
           rustup default stable
       - name: oxp3-hw checks
         run: ci/run.sh
+
+  hw-conformance:
+    # oxp3-hwd's test build against Bathysphere's Hw1 provider conformance suite (tools/hw-conformance) at a pinned
+    # commit, in both kernel modes; then hw/ci/run.sh as root, which adds the bus tests under several uids (setpriv)
+    # and grants.conf applied by systemd-tmpfiles to a scratch root. The suite itself refuses to run as root.
+    runs-on: ubuntu-24.04
+    timeout-minutes: 60
+    env:
+      # The Bathysphere commit whose suite and schemas/hw1.xml this job checks against: the full 40-character SHA of a
+      # Featherwolf/Bathysphere commit whose tools/hw-conformance has --provider-flag and whose schemas/hw1.xml is
+      # hw/schemas/hw1.xml byte for byte. Anything else, the placeholder included, fails the job at its first steps.
+      # Move it, in the same change, when Bathysphere's Hw1 contract or suite changes (hw/README.md).
+      BATHYSPHERE_REF: e2f74039fbd8776c0e8521e5e6ba5c93af9b0d83
+      BATHYSPHERE_DIR: ${{ github.workspace }}/.bathysphere-checkout
+    steps:
+      - name: Check the Bathysphere pin
+        run: |
+          if ! [[ $BATHYSPHERE_REF =~ ^[0-9a-f]{40}$ ]]; then
+            echo "::error::BATHYSPHERE_REF must be the full SHA of the Featherwolf/Bathysphere commit with this suite and hw1.xml, not '$BATHYSPHERE_REF' (hw/README.md, The Bathysphere conformance suite)"
+            exit 1
+          fi
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
+        with:
+          persist-credentials: false
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
+        with:
+          repository: Featherwolf/Bathysphere
+          ref: ${{ env.BATHYSPHERE_REF }}
+          path: .bathysphere-checkout
+          persist-credentials: false
+      - name: Check that the pinned commit has this hw1.xml
+        # tests/bus.rs checks it too, at the end; this fails before the builds
+        run: |
+          if ! cmp -s hw/schemas/hw1.xml "$BATHYSPHERE_DIR/schemas/hw1.xml"; then
+            echo "::error::hw/schemas/hw1.xml differs from schemas/hw1.xml at Bathysphere $BATHYSPHERE_REF: pin the commit with this copy"
+            diff -u "$BATHYSPHERE_DIR/schemas/hw1.xml" hw/schemas/hw1.xml || true
+            exit 1
+          fi
+      - name: Install test tools
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y --no-install-recommends dbus-daemon shellcheck udev
+      - name: Allow unprivileged user namespaces
+        # Ubuntu 24.04 restricts them through AppArmor; the suite's auth.uid0 runs a scenario as uid 0 in one
+        run: sudo sysctl -w kernel.apparmor_restrict_unprivileged_userns=0
+      - name: Rust toolchain
+        run: |
+          rustup toolchain install stable --profile minimal --component clippy,rustfmt
+          rustup default stable
+      - name: Build the conformance suite
+        working-directory: .bathysphere-checkout/tools/hw-conformance
+        run: cargo build --locked --release
+      - name: Build oxp3-hwd's test build
+        working-directory: hw
+        run: cargo build --locked --features test-sysfs --bin oxp3-hwd
+      - name: Conformance, oxp3-hwd emulating the kernel (src/emu.rs)
+        run: |
+          "$BATHYSPHERE_DIR/tools/hw-conformance/target/release/hw-conformance" \
+            --provider hw/target/debug/oxp3-hwd --kernel provider
+      - name: Conformance, the suite's kernel model answering every write
+        run: |
+          "$BATHYSPHERE_DIR/tools/hw-conformance/target/release/hw-conformance" \
+            --provider hw/target/debug/oxp3-hwd --kernel suite --provider-flag --no-emulation
+      - name: oxp3-hw checks as root (bus tests under several uids, tmpfiles grants)
+        env:
+          # tests/bus.rs then also checks that hw/schemas/hw1.xml is byte-identical to Bathysphere's
+          BATHYSPHERE_HW1_XML: ${{ github.workspace }}/.bathysphere-checkout/schemas/hw1.xml
+        run: sudo -E env PATH="$PATH" hw/ci/run.sh

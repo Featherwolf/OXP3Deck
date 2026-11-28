@@ -7,8 +7,9 @@
 //! write. This module sits where the real `write(2)` would and does what the kernel source does
 //! for each attribute the provider writes (Linux 7.2 to 7.4: powercap, xe, intel_pstate, cpufreq,
 //! processor_thermal_soc_slider, platform_profile, power_supply with the oxpec extension, and the
-//! oxpec hwmon). The open itself is the real one (`O_WRONLY | O_NOFOLLOW`), so file permissions,
-//! missing files and symlinks behave as on the device.
+//! oxpec hwmon, whose pwm1_enable reads 1, not 0, after a write of 0). The open itself is the real
+//! one (`O_WRONLY | O_NOFOLLOW`), so file permissions, missing files and symlinks behave as on the
+//! device.
 //!
 //! The test controls two files under `<root>/.kernel/`:
 //! - `rules.json`: `{"fail": {"<path suffix>": "EACCES" | ["EAGAIN", "EAGAIN"]}, "ignore": ["<suffix>"],
@@ -312,8 +313,17 @@ fn semantics(root: &Path, path: &Path, text: &str, min_perf_min: u64) -> io::Res
             .collect();
         return Ok(vec![(path.to_path_buf(), shown.join(" "))]);
     }
-    // oxpec hwmon: pwm1_enable 1 manual, 2 auto, 0 manual at full duty; pwm1 0..255 scaled to
-    // the EC's 0..184 and back; pwm1_enable reads 2 (auto), else 0 at full duty, else 1
+    // oxpec hwmon on the ONEXPLAYER 3 (board oxp_g1_i), drivers/platform/x86/oxpec.c (v7.4-rc4):
+    // - pwm1_enable store (oxp_platform_write): 1 sets the EC's PWM-enable register to manual and
+    //   leaves the duty, 2 sets it to auto, 0 sets manual and then writes pwm1 255, anything else
+    //   is EINVAL;
+    // - pwm1 store (oxp_pwm_input_write): 0..255 (else EINVAL), stored as val * 184 / 255;
+    // - pwm1 show (oxp_pwm_input_read): the EC duty * 255 / 184 (102 reads back as 101, 255 as 255);
+    // - pwm1_enable show (oxp_platform_read): 2 while the EC register is auto; in manual it reads
+    //   the fan *speed* register (fan1_input, RPM) and shows 0 only when that is exactly 255, else
+    //   1. So after a write of 0 it reads 1, with pwm1 255.
+    // The kernel computes both shows on every read; here they are computed at the write, from
+    // fan1_input as it is then (the fake tree's fan speed does not change on its own).
     if name == "pwm1_enable" || name == "pwm1" {
         let ec_en = dir.join(".ec_enable");
         let ec_pwm = dir.join(".ec_pwm");
@@ -337,9 +347,10 @@ fn semantics(root: &Path, path: &Path, text: &str, min_perf_min: u64) -> io::Res
             duty = v as u64 * 184 / 255;
         }
         let shown_pwm = duty * 255 / 184;
+        let fan_speed = read_u64(&dir.join("fan1_input"));
         let shown_en = if enable == 0 {
             2
-        } else if shown_pwm == 255 {
+        } else if fan_speed == Some(255) {
             0
         } else {
             1

@@ -1,0 +1,209 @@
+name: oxp3-hw release
+
+# Builds the oxp3-hw pacman package (hw/packaging/PKGBUILD) when a tag hw-v<pkgver> is pushed (hw-v<pkgver>-<pkgrel>
+# for a pkgrel above 1), and publishes it with a SHA256SUMS file as a GitHub pre-release named for the tag. It never
+# runs for the Decky plugin's v* tags (release.yml), and release.yml never runs for hw-v* tags.
+#
+# The tag goes on the commit that sets the PKGBUILD's _commit and changes nothing else (hw/README.md, "Cutting a
+# release"). Before building, the build job stops unless:
+# - the tag names the PKGBUILD's pkgver (and pkgrel), and its only source is this repository pinned with #commit=;
+# - _commit is the full SHA of the tagged commit or of one of its ancestors, and hw/ and LICENSE there are byte for
+#   byte the tagged ones apart from the _commit line, so the package holds exactly what the tag shows.
+# makepkg runs as an unprivileged user in an archlinux:base-devel container, with the PKGBUILD's check(), from the
+# objects this workflow checked out (no second clone), with SOURCE_DATE_EPOCH set to the pinned commit's time and
+# Arch's devtools paths (/build, /startdir, /srcdest, /pkgdest), so a clean-chroot rebuild can be compared with it.
+# namcap's findings are printed, not enforced. Only the release job can write to the repository, and it stops if a
+# release for the tag already exists.
+on:
+  push:
+    tags: ["hw-v*"]
+
+permissions: {}
+
+concurrency:
+  group: hw-release-${{ github.ref }}
+  cancel-in-progress: false
+
+jobs:
+  build:
+    name: Build the package
+    runs-on: ubuntu-24.04
+    timeout-minutes: 60
+    permissions:
+      contents: read   # check out the repository; this job runs the build and can write nothing
+    container:
+      # pinned by digest (Docker Hub, 2026-11-23); the first step upgrades it to the current Arch packages. To move
+      # it: docker pull archlinux:base-devel && docker image inspect --format '{{index .RepoDigests 0}}' archlinux:base-devel
+      image: archlinux:base-devel@sha256:949ecb1661609ab7e8f6854ba03efd62792e7a796313738e94b040c095c20d91
+    defaults:
+      run:
+        shell: bash
+    env:
+      TAG: ${{ github.ref_name }}
+    outputs:
+      file: ${{ steps.pin.outputs.file }}
+      pin: ${{ steps.pin.outputs.pin }}
+    steps:
+      - name: Install git
+        # actions/checkout needs git in the container for a real clone (without it, it downloads a tarball with no
+        # history)
+        run: |
+          pacman -Sy --noconfirm --needed archlinux-keyring
+          pacman -Su --noconfirm --needed git
+
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          fetch-depth: 0   # the pinned commit and its history up to the tag
+          persist-credentials: false
+
+      - name: Trust the checkout
+        # The workspace is a host directory owned by the runner user, and this job runs as the image's root, so git
+        # refuses it ("detected dubious ownership"). actions/checkout adds safe.directory only to a temporary HOME
+        # that it deletes when it is done; this entry goes to HOME (/github/home), which the later steps keep.
+        run: git config --global --add safe.directory "$GITHUB_WORKSPACE"
+
+      - name: Set up the build user and directories
+        run: |
+          useradd --home-dir /build --no-create-home --user-group builder
+          install -d -o builder -g builder /build /startdir /srcdest /pkgdest
+          install -m644 -o builder -g builder hw/packaging/PKGBUILD /startdir/PKGBUILD
+
+      - name: Check the tag and the source pin
+        id: pin
+        run: |
+          fail() { echo "::error::$*"; exit 1; }
+          [[ $TAG =~ ^hw-v[0-9]+\.[0-9]+\.[0-9]+(-[1-9][0-9]*)?$ ]] || fail "not an oxp3-hw release tag: $TAG"
+          tagged="$(git rev-parse --verify "refs/tags/$TAG^{commit}")"
+          [ "$tagged" = "$GITHUB_SHA" ] || fail "the tag $TAG now points at $tagged, not at $GITHUB_SHA"
+          srcinfo="$(cd /startdir && runuser -u builder -- makepkg --printsrcinfo)"
+          field() { sed -n "s/^\t$1 = //p" <<<"$srcinfo"; }
+          pkgver="$(field pkgver)" pkgrel="$(field pkgrel)" source="$(field source)"
+          want="hw-v$pkgver"
+          [ "$pkgrel" = 1 ] || want="$want-$pkgrel"
+          [ "$TAG" = "$want" ] || fail "the PKGBUILD at $TAG builds $pkgver-$pkgrel, so its tag is $want"
+          [[ $source =~ ^oxp3-hw::git\+(https://[^#]+)#commit=(.*)$ ]] \
+            || fail "the PKGBUILD's source must be one oxp3-hw::git+<url>#commit=<sha>, not: $source"
+          url="${BASH_REMATCH[1]}" pin="${BASH_REMATCH[2]}"
+          repo="$GITHUB_SERVER_URL/$GITHUB_REPOSITORY.git"
+          [ "${url,,}" = "${repo,,}" ] || fail "the PKGBUILD's source is $url, not this repository ($repo)"
+          [[ $pin =~ ^[0-9a-f]{40}$ ]] \
+            || fail "_commit is '$pin': set it to the full SHA of the commit to ship (hw/README.md, Cutting a release)"
+          git cat-file -e "$pin^{commit}" 2>/dev/null || fail "_commit $pin is not a commit of this repository"
+          git merge-base --is-ancestor "$pin" "$tagged" || fail "_commit $pin is not $TAG's commit or an ancestor of it"
+          if ! git diff --quiet "$pin" "$tagged" -- hw LICENSE ':(exclude)hw/packaging/PKGBUILD'; then
+            git diff --stat "$pin" "$tagged" -- hw LICENSE ':(exclude)hw/packaging/PKGBUILD'
+            fail "hw/ or LICENSE changed after _commit ($pin): set _commit to the last commit before the tag"
+          fi
+          pkgbuild() { git show "$1:hw/packaging/PKGBUILD" | sed 's/^_commit=.*/_commit=/'; }
+          diff -u <(pkgbuild "$pin") <(pkgbuild "$tagged") \
+            || fail "the PKGBUILD changed after _commit ($pin) in more than its _commit line"
+          echo "$TAG ($tagged) builds oxp3-hw $pkgver-$pkgrel from $pin, the same hw/ and LICENSE"
+          file="oxp3-hw-$pkgver-$pkgrel-x86_64.pkg.tar.zst"
+          printf 'file=%s\npin=%s\n' "$file" "$pin" >>"$GITHUB_OUTPUT"
+          printf 'PKGFILE=%s\nPKGVER=%s\nSOURCE_DATE_EPOCH=%s\n' "$file" "$pkgver" "$(git log -1 --format=%ct "$pin")" >>"$GITHUB_ENV"
+
+      - name: Install the build dependencies
+        run: |
+          mapfile -t deps < <(cd /startdir && runuser -u builder -- makepkg --printsrcinfo \
+            | sed -n 's/^\t\(make\|check\)\{0,1\}depends = //p')
+          # cargo from the rust package, not rustup (which would need a toolchain download of its own)
+          pacman -S --noconfirm --needed --asdeps rust
+          mapfile -t missing < <(pacman -T "${deps[@]}" || true)
+          if [ "${#missing[@]}" -gt 0 ]; then pacman -S --noconfirm --needed --asdeps "${missing[@]}"; fi
+          pacman -S --noconfirm --needed namcap || echo "::warning::namcap is not available: the package is not linted"
+
+      - name: Seed makepkg's source cache from this checkout
+        run: |
+          # the pinned commit is verified above; makepkg --holdver uses this mirror as it is
+          git clone --quiet --mirror --no-hardlinks "$GITHUB_WORKSPACE" /srcdest/oxp3-hw
+          git -C /srcdest/oxp3-hw remote set-url origin "$GITHUB_SERVER_URL/$GITHUB_REPOSITORY.git"
+          chown -R builder:builder /srcdest/oxp3-hw
+
+      - name: Build the package (makepkg as the build user)
+        working-directory: /startdir
+        run: |
+          runuser -u builder -- env -i PATH=/usr/bin HOME=/build LANG=C.UTF-8 TERM=dumb \
+            SOURCE_DATE_EPOCH="$SOURCE_DATE_EPOCH" BUILDDIR=/build SRCDEST=/srcdest PKGDEST=/pkgdest \
+            PKGEXT=.pkg.tar.zst makepkg --holdver --check --nosign --noconfirm
+
+      - name: Check the package
+        run: |
+          cd /pkgdest
+          ls -l
+          test -f "$PKGFILE" || { echo "::error::makepkg did not write $PKGFILE"; exit 1; }
+          bsdtar -xOf "$PKGFILE" .PKGINFO
+          bsdtar -tvf "$PKGFILE"
+          mkdir /tmp/unpacked
+          bsdtar -xf "$PKGFILE" -C /tmp/unpacked
+          got="$(/tmp/unpacked/usr/lib/oxp3-hw/oxp3-hwd --version)"
+          [ "$got" = "oxp3-hwd $PKGVER" ] || { echo "::error::the packaged daemon says '$got', not oxp3-hwd $PKGVER"; exit 1; }
+          if command -v namcap >/dev/null; then
+            namcap /startdir/PKGBUILD
+            namcap -i "$PKGFILE"
+          fi
+
+      - name: SHA-256
+        run: |
+          mkdir hw-release
+          cp "/pkgdest/$PKGFILE" hw-release/
+          cd hw-release
+          sha256sum "$PKGFILE" >SHA256SUMS
+          cat SHA256SUMS
+          { echo '```'; cat SHA256SUMS; echo '```'; } >>"$GITHUB_STEP_SUMMARY"
+
+      # a relative path: in a container job, ${{ runner.temp }} and ${{ github.workspace }} name host paths
+      - uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
+        with:
+          name: oxp3-hw-package
+          path: hw-release/
+          if-no-files-found: error
+          retention-days: 7
+
+  release:
+    name: Publish the pre-release
+    needs: build
+    runs-on: ubuntu-24.04
+    timeout-minutes: 15
+    permissions:
+      contents: write   # create the release and upload its two files; nothing else runs in this job
+    env:
+      TAG: ${{ github.ref_name }}
+      FILE: ${{ needs.build.outputs.file }}
+      PIN: ${{ needs.build.outputs.pin }}
+      GH_REPO: ${{ github.repository }}
+    steps:
+      - uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333 # v8.0.2
+        with:
+          name: oxp3-hw-package
+          path: hw-release
+
+      - name: Check the files
+        working-directory: hw-release
+        run: |
+          ls -l
+          [ "$(find . -mindepth 1 -printf '%P\n' | LC_ALL=C sort)" = "$(printf '%s\n' "$FILE" SHA256SUMS | LC_ALL=C sort)" ] \
+            || { echo "::error::the artifact does not hold exactly $FILE and SHA256SUMS"; exit 1; }
+          sha256sum --check --strict SHA256SUMS
+
+      - name: Publish the pre-release
+        working-directory: hw-release
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          if gh release view "$TAG" >/dev/null 2>&1; then
+            echo "::error::a release $TAG already exists; nothing was uploaded (delete it to publish again)"
+            exit 1
+          fi
+          read -r sum _ <SHA256SUMS
+          repo="$GITHUB_SERVER_URL/$GITHUB_REPOSITORY"
+          cat >"$RUNNER_TEMP/notes.md" <<EOF
+          Pre-release of oxp3-hw ${TAG#hw-v}, the ONEXPLAYER 3 hardware helper ([hw/]($repo/tree/$TAG/hw)). Untested on real hardware.
+
+          - Package: \`$FILE\`
+          - SHA-256: \`$sum\` (also in SHA256SUMS)
+          - Built by [this workflow run]($repo/actions/runs/$GITHUB_RUN_ID) from \`$TAG\` (\`$GITHUB_SHA\`), with the sources of \`$PIN\` (the PKGBUILD's \`_commit\`).
+
+          Before installing, compare the SHA-256 of your download with the value you were sent separately. Install, check and removal: [hw/README.md]($repo/blob/$TAG/hw/README.md).
+          EOF
+          gh release create "$TAG" "$FILE" SHA256SUMS --verify-tag --prerelease --latest=false \
+            --title "$TAG" --notes-file "$RUNNER_TEMP/notes.md"

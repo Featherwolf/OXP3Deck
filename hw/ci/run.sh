@@ -62,7 +62,7 @@ fi
 
 step "PKGBUILD: package() into a scratch pkgdir"
 if command -v makepkg >/dev/null; then
-  (cd packaging && makepkg --verifysource --nodeps) || echo "makepkg --verifysource failed (no network or no hw-v tag yet)"
+  (cd packaging && makepkg --verifysource --nodeps) || echo "makepkg --verifysource failed (no network, or the repository is unreachable)"
 fi
 # without makepkg: run the PKGBUILD's package() as makepkg would, against this checkout
 mkdir -p "$scratch/src" "$scratch/pkg"
