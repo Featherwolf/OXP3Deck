@@ -23,9 +23,9 @@
         "admin": true,
         "steps": [
           { "text": "In Desktop Mode, open Konsole and install Steam's hardware service, InputPlumber and the power-button daemon:", "command": "sudo pacman -S --needed steamos-manager inputplumber steamos-powerbuttond power-profiles-daemon" },
-          { "text": "Download the newest oxp3-hw package (oxp3-hw-<version>-1-x86_64.pkg.tar.zst) from a hw-v release, and note its SHA-256 there:", "url": "https://github.com/Featherwolf/OXP3Deck/releases" },
-          { "text": "Print the download's SHA-256 and compare it with the release page. Stop if they differ:", "command": "sha256sum oxp3-hw-*-x86_64.pkg.tar.zst" },
-          { "text": "Install it:", "command": "sudo pacman -U ./oxp3-hw-*-x86_64.pkg.tar.zst" },
+          { "text": "Download oxp3-hw-0.1.0-1-x86_64.pkg.tar.zst from the hw-v0.1.0 pre-release into Downloads:", "url": "https://github.com/Featherwolf/OXP3Deck/releases/tag/hw-v0.1.0" },
+          { "text": "Print its SHA-256 and compare it with the SHA-256 you were given for oxp3-hw 0.1.0 (testers get it separately; the release's SHA256SUMS file lists the same value). Do not install it if they differ:", "command": "sha256sum ~/Downloads/oxp3-hw-0.1.0-1-x86_64.pkg.tar.zst" },
+          { "text": "Install it:", "command": "sudo pacman -U ~/Downloads/oxp3-hw-0.1.0-1-x86_64.pkg.tar.zst" },
           { "text": "Reboot: the helper's file grants apply at boot, and steamos-manager and Steam read their setup only when they start.", "command": "systemctl reboot" }
         ]
       },
@@ -46,7 +46,7 @@
         "steps": [
           { "text": "Turn it off (the fan and charging go back to Auto, the firmware's limits apply):", "command": "sudo touch /etc/oxp3-hw/disabled && sudo systemctl stop oxp3-hw" },
           { "text": "Turn it on again:", "command": "sudo rm /etc/oxp3-hw/disabled && sudo systemctl start oxp3-hw" },
-          { "text": "Remove it, then reboot:", "command": "sudo pacman -R oxp3-hw" }
+          { "text": "Remove it (stopping it first puts the fan and charging back to Auto), then reboot:", "command": "sudo systemctl stop oxp3-hw && sudo pacman -R oxp3-hw" }
         ]
       },
       {

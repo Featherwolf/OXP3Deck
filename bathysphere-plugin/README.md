@@ -190,9 +190,10 @@ reports 0 errors and 38 warnings, all of medium severity:
 - 15 `review.manifest.instruction-admin-command`: the admin cards are the root steps the user runs
   (Bathysphere never does root work, so these are cards by design).
 - 3 `review.manifest.instruction-unpinned`: xess-xmx-linux publishes no checksum (its cards say
-  so), and no oxp3-hw release with a published checksum exists yet, so `hw-install` links the
-  release page. Pin the asset URL and its `sha256` in that card once one is published (a changed
-  card is a consent change).
+  so), and the oxp3-hw 0.1.0 package's SHA-256 is not known until its release is built, so
+  `hw-install` links the hw-v0.1.0 release page and has the user compare the download's SHA-256
+  with the one testers are sent. Pin the asset URL and its `sha256` in that card once the release
+  is published (a changed card is a consent change).
 - `review.manifest.network-when-default`: update checks are on by default, as in the original
   (see Network hosts).
 
