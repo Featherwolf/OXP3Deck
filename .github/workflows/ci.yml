@@ -60,3 +60,31 @@ jobs:
           rustup default stable
       - name: oxp3-hw checks
         run: ci/run.sh
+
+  bathysphere-plugin:
+    # OXP3 Deck for Bathysphere (bathysphere-plugin/): typecheck, build and the fake-host tests (vm
+    # mode), against a pinned Bathysphere commit. Move the pin when the plugin needs a newer SDK.
+    runs-on: ubuntu-24.04
+    env:
+      BATHYSPHERE_DIR: ${{ github.workspace }}/.bathysphere-checkout
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/checkout@v4
+        with:
+          repository: Featherwolf/Bathysphere
+          ref: 08850d19f6a48fac6623395cef21fec5e525ec01
+          path: .bathysphere-checkout
+          persist-credentials: false
+      - uses: actions/setup-node@v4
+        with:
+          node-version: "22"
+      - name: Build the Bathysphere SDK and fake host
+        working-directory: .bathysphere-checkout
+        run: |
+          npm ci --no-audit --no-fund
+          npm run build -w @bathysphere/sdk -w @bathysphere/fake-host
+      - name: Typecheck, build and test the plugin
+        working-directory: bathysphere-plugin
+        run: |
+          npm run typecheck
+          npm test

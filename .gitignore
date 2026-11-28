@@ -7,3 +7,4 @@ out/
 # build_zip.py's temporary file, left behind only if it was killed
 .*.zip.*.tmp
 __pycache__/
+.bathysphere-checkout/

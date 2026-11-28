@@ -517,6 +517,16 @@ limits, fan mode and charge limit, without Decky. Its daemon runs as its own sys
 write the kernel files its package grants it, on the ONEXPLAYER 3 only. It is separate from this Decky plugin and
 also untested on a real device. See [hw/README.md](hw/README.md).
 
+## Bathysphere plugin
+
+**[bathysphere-plugin/](bathysphere-plugin/README.md)** is OXP3 Deck ported to
+[Bathysphere](https://github.com/Featherwolf/Bathysphere), the sandboxed Decky Loader alternative. It
+covers power profiles, fan and charging through the `oxp3-hw` helper, power-program conflicts,
+XeSS fast mode, per-game launch options and oxp3-tool's fixes. Anything that needs root is shown as
+a "Run this yourself" card instead of being run. It is built and installed separately from this
+Decky plugin, and it is also untested on a real device. See
+[bathysphere-plugin/README.md](bathysphere-plugin/README.md).
+
 ## Building from source
 
 ```bash

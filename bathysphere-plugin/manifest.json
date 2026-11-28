@@ -1,0 +1,307 @@
+{
+  "manifestVersion": 1,
+  "id": "io.github.featherwolf.oxp3deck",
+  "name": "OXP3 Deck",
+  "version": "0.7.0",
+  "description": "Power limits, GPU and CPU controls, fan and charging for the ONEXPLAYER 3 through its hardware helper, per-game XeSS launch options, and guided oxp3-tool and xess-xmx-linux setup.",
+  "authors": ["Featherwolf"],
+  "license": "MIT",
+  "source": "https://github.com/Featherwolf/bathysphere",
+  "api": "^1.1",
+  "main": "main.js",
+  "icon": "assets/icon.png",
+  "categories": ["hardware", "performance", "games"],
+  "contributes": {
+    "panels": [{ "id": "main", "title": "OXP3 Deck", "icon": "assets/icon.png" }],
+    "quickAccessTabs": [{ "id": "qam", "title": "OXP3 Deck", "icon": "assets/icon.png" }],
+    "gamePageSections": [{ "id": "game", "title": "OXP3 Deck" }],
+    "background": true,
+    "instructions": [
+      {
+        "id": "hw-install",
+        "title": "Install the ONEXPLAYER 3 hardware helper",
+        "admin": true,
+        "steps": [
+          { "text": "In Desktop Mode, open Konsole and install Steam's hardware service, InputPlumber and the power-button daemon:", "command": "sudo pacman -S --needed steamos-manager inputplumber steamos-powerbuttond power-profiles-daemon" },
+          { "text": "Download oxp3-hw-0.1.0-1-x86_64.pkg.tar.zst from the hw-v0.1.0 pre-release into Downloads:", "url": "https://github.com/Featherwolf/OXP3Deck/releases/tag/hw-v0.1.0" },
+          { "text": "Print its SHA-256 and compare it with the SHA-256 you were given for oxp3-hw 0.1.0 (testers get it separately; the release's SHA256SUMS file lists the same value). Do not install it if they differ:", "command": "sha256sum ~/Downloads/oxp3-hw-0.1.0-1-x86_64.pkg.tar.zst" },
+          { "text": "Install it:", "command": "sudo pacman -U ~/Downloads/oxp3-hw-0.1.0-1-x86_64.pkg.tar.zst" },
+          { "text": "Reboot: the helper's file grants apply at boot, and steamos-manager and Steam read their setup only when they start.", "command": "systemctl reboot" }
+        ]
+      },
+      {
+        "id": "hw-ac-limit",
+        "title": "Allow more sustained power on the charger",
+        "admin": true,
+        "steps": [
+          { "text": "Copy the helper's example limits file:", "command": "sudo install -Dm644 /usr/share/doc/oxp3-hw/limits.toml.example /etc/oxp3-hw/limits.toml" },
+          { "text": "Remove the # before sustained_ac_max_w = 40. Up to 52 is allowed; above 40 use a charger of 65 W or more:", "command": "sudoedit /etc/oxp3-hw/limits.toml" },
+          { "text": "Restart the helper. On battery it keeps 35 W until the charger is back:", "command": "sudo systemctl restart oxp3-hw" }
+        ]
+      },
+      {
+        "id": "hw-stop",
+        "title": "Turn the hardware helper off or remove it",
+        "admin": true,
+        "steps": [
+          { "text": "Turn it off (the fan and charging go back to Auto, the firmware's limits apply):", "command": "sudo touch /etc/oxp3-hw/disabled && sudo systemctl stop oxp3-hw" },
+          { "text": "Turn it on again:", "command": "sudo rm /etc/oxp3-hw/disabled && sudo systemctl start oxp3-hw" },
+          { "text": "Remove it (stopping it first puts the fan and charging back to Auto), then reboot:", "command": "sudo systemctl stop oxp3-hw && sudo pacman -R oxp3-hw" }
+        ]
+      },
+      {
+        "id": "power-off",
+        "title": "Turn off another power program",
+        "admin": true,
+        "steps": [
+          { "text": "Thermal daemon (on this CPU it rewrites the sustained limit within seconds; the CPU's own heat limit and the fan still protect the device):", "command": "sudo systemctl disable --now thermald.service" },
+          { "text": "Power Profiles daemon (then Desktop Mode's power mode switch stops working):", "command": "sudo systemctl disable --now power-profiles-daemon.service" },
+          { "text": "TuneD (both parts; Desktop Mode's power mode switch stops working):", "command": "sudo systemctl disable --now tuned-ppd.service tuned.service" },
+          { "text": "Intel low-power daemon (light tasks use a little more battery; games are fine):", "command": "sudo systemctl disable --now intel_lpmd.service" },
+          { "text": "PowerStation (a Bazzite update may turn it back on):", "command": "sudo systemctl disable --now powerstation.service" },
+          { "text": "TDP sync script (the hardware helper already writes both power-limit interfaces):", "command": "sudo systemctl disable --now oxp3-tdp-sync.service" },
+          { "text": "onex3-tdp script:", "command": "sudo systemctl disable --now onex3-tdp.service" },
+          { "text": "The oxp3-support package (its TDP remote competes with the hardware helper's):", "command": "sudo pacman -R oxp3-support" }
+        ]
+      },
+      {
+        "id": "power-on",
+        "title": "Turn a power program back on",
+        "admin": true,
+        "steps": [
+          { "text": "Thermal daemon:", "command": "sudo systemctl enable --now thermald.service" },
+          { "text": "Power Profiles daemon:", "command": "sudo systemctl enable --now power-profiles-daemon.service" },
+          { "text": "TuneD:", "command": "sudo systemctl enable --now tuned.service tuned-ppd.service" },
+          { "text": "Intel low-power daemon:", "command": "sudo systemctl enable --now intel_lpmd.service" },
+          { "text": "PowerStation:", "command": "sudo systemctl enable --now powerstation.service" },
+          { "text": "TDP sync script:", "command": "sudo systemctl enable --now oxp3-tdp-sync.service" },
+          { "text": "onex3-tdp script:", "command": "sudo systemctl enable --now onex3-tdp.service" }
+        ]
+      },
+      {
+        "id": "hhd-tdp",
+        "title": "Turn off Handheld Daemon's power control",
+        "admin": false,
+        "steps": [
+          { "text": "Open Handheld Daemon's settings (its Quick Access entry, or hhd-ui in Desktop Mode) and turn its TDP controls and fan control off. Keep Handheld Daemon itself running if it drives the controller." },
+          { "text": "Back in OXP3 Deck, choose I've handled it on its row." }
+        ]
+      },
+      {
+        "id": "decky-leftovers",
+        "title": "Remove leftover Decky power plugins",
+        "admin": true,
+        "steps": [
+          { "text": "Decky Loader's plugins folder belongs to root. List what is left in it:", "command": "sudo ls ~/homebrew/plugins" },
+          { "text": "Remove SimpleDeckyTDP's folder (use the name the list shows):", "command": "sudo rm -rf ~/homebrew/plugins/SimpleDeckyTDP" },
+          { "text": "Remove PowerControl's folder:", "command": "sudo rm -rf ~/homebrew/plugins/PowerControl" },
+          { "text": "Remove PowerTools' folder:", "command": "sudo rm -rf ~/homebrew/plugins/PowerTools" }
+        ]
+      },
+      {
+        "id": "oxp3-tool-install",
+        "title": "Install or update oxp3-tool 0.4.4",
+        "admin": true,
+        "steps": [
+          { "text": "In Desktop Mode, open Konsole and download oxp3-tool 0.4.4:", "command": "curl -fLo oxp3-tool https://raw.githubusercontent.com/Featherwolf/OXP3-Tool-for-Bazzite/8559988d4ad4ac4a35c5e536299d6602ac87ac4b/dist/oxp3-tool", "url": "https://raw.githubusercontent.com/Featherwolf/OXP3-Tool-for-Bazzite/8559988d4ad4ac4a35c5e536299d6602ac87ac4b/dist/oxp3-tool", "sha256": "ecca6a7c8b0d5c131953cabcdd21141ae690eb664dfea2ff5f6fc9af6673e1aa" },
+          { "text": "Check it. This must print oxp3-tool: OK:", "command": "echo 'ecca6a7c8b0d5c131953cabcdd21141ae690eb664dfea2ff5f6fc9af6673e1aa  oxp3-tool' | sha256sum --check" },
+          { "text": "Install it where its own installer puts it:", "command": "sudo install -Dm755 oxp3-tool /usr/local/bin/oxp3-tool" },
+          { "text": "Check that it runs:", "command": "oxp3-tool --version" }
+        ]
+      },
+      {
+        "id": "oxp3-tool-apply",
+        "title": "Apply oxp3-tool's recommended fixes",
+        "admin": true,
+        "steps": [
+          { "text": "See what oxp3-tool found on this unit and what each fix would do:", "command": "sudo oxp3-tool status" },
+          { "text": "Apply the fixes it recommends for this unit. It shows the plan and asks first:", "command": "sudo oxp3-tool apply" },
+          { "text": "If it says a reboot is needed, reboot once it has ended without errors:", "command": "systemctl reboot" }
+        ]
+      },
+      {
+        "id": "oxp3-tool-fix",
+        "title": "Apply or undo one oxp3-tool fix",
+        "admin": true,
+        "steps": [
+          { "text": "Apply one fix. Replace FIX with its name; OXP3 Deck shows the exact line for each fix:", "command": "sudo oxp3-tool apply FIX" },
+          { "text": "Undo one fix:", "command": "sudo oxp3-tool revert FIX" },
+          { "text": "Undo every fix, then reboot if it removed kernel arguments:", "command": "sudo oxp3-tool revert --all" }
+        ]
+      },
+      {
+        "id": "oxp3-tool-buttons",
+        "title": "Apply a button layout",
+        "admin": true,
+        "steps": [
+          { "text": "Apply the default layout. OXP3 Deck shows the exact line for the keys you picked:", "command": "sudo oxp3-tool apply buttons" },
+          { "text": "On a unit whose Xbox key needs its helper, apply both:", "command": "sudo oxp3-tool apply buttons xbox-key" },
+          { "text": "Test the keys, then press q to quit (closing the window leaves InputPlumber in test mode):", "command": "sudo inputplumber device 0 test" }
+        ]
+      },
+      {
+        "id": "oxp3-tool-kernel",
+        "title": "Try another kernel once (CachyOS with Limine)",
+        "admin": true,
+        "steps": [
+          { "text": "List the installed kernels and what boots next:", "command": "sudo oxp3-tool kernel" },
+          { "text": "Boot another kernel once. Replace PACKAGE, for example linux-cachyos-rc:", "command": "sudo oxp3-tool kernel try PACKAGE" },
+          { "text": "Reboot. If it does not come up, hold the power button to switch off, then on: the kernel you have now starts again.", "command": "systemctl reboot" },
+          { "text": "On the kernel you want, make it the one every power-on boots:", "command": "sudo oxp3-tool kernel keep" }
+        ]
+      },
+      {
+        "id": "oxp3-tool-diagnose",
+        "title": "Save a problem report",
+        "admin": true,
+        "steps": [
+          { "text": "Write oxp3-diagnose-<time>.tar.gz with the device's state and logs. Serial numbers and addresses are replaced; look through it before posting it:", "command": "sudo oxp3-tool diagnose" }
+        ]
+      },
+      {
+        "id": "boot-entries",
+        "title": "Finish the boot entry update",
+        "admin": true,
+        "steps": [
+          { "text": "oxp3-tool's last boot entry update did not finish, so the device may not start. Do not reboot until this ends without errors:", "command": "sudo limine-update" },
+          { "text": "If oxp3-tool named another command (OXP3 Deck shows it), run that one instead. Then run status again:", "command": "sudo oxp3-tool status" }
+        ]
+      },
+      {
+        "id": "xess-tools",
+        "title": "Install the programs XeSS fast mode needs",
+        "admin": true,
+        "steps": [
+          { "text": "The installer downloads Intel's shader compiler and XeSS SDK and checks the driver with these:", "command": "sudo pacman -S --needed curl binutils tar zstd coreutils diffutils python unzip vulkan-tools" }
+        ]
+      },
+      {
+        "id": "xess-tools-bazzite",
+        "title": "Install the programs XeSS fast mode needs (Bazzite)",
+        "admin": true,
+        "steps": [
+          { "text": "The installer downloads Intel's shader compiler and XeSS SDK and checks the driver with these. Bazzite has most of them; this adds what is missing to the next boot:", "command": "sudo rpm-ostree install --idempotent curl binutils tar zstd coreutils diffutils python3 unzip vulkan-tools" },
+          { "text": "Reboot so the new deployment starts:", "command": "systemctl reboot" }
+        ]
+      },
+      {
+        "id": "xess-install",
+        "title": "Install XeSS fast mode (xess-xmx-linux)",
+        "admin": false,
+        "steps": [
+          { "text": "Quit any game. Download the newest release, xess-xmx-linux-<version>.zip. Its project publishes no checksum:", "url": "https://github.com/HHHHanasak1/xess-xmx-linux/releases/latest" },
+          { "text": "Unpack it into a folder of its own:", "command": "mkdir -p ~/.local/share/oxp3deck/xess && cd ~/.local/share/oxp3deck/xess && unzip ~/Downloads/xess-xmx-linux-*.zip" },
+          { "text": "Run its installer as yourself. Replace VERSION with the release's; OXP3 Deck shows the exact line. It downloads a few hundred MB:", "command": "cd ~/.local/share/oxp3deck/xess/xess-xmx-linux-VERSION && bash install.sh" },
+          { "text": "Log out of Game Mode and back in, or reboot, so Steam starts with the new driver." }
+        ]
+      },
+      {
+        "id": "xess-update",
+        "title": "Update XeSS fast mode",
+        "admin": false,
+        "steps": [
+          { "text": "Quit any game. Download the new release and unpack it next to the old one (never over it: the running session uses its driver):", "url": "https://github.com/HHHHanasak1/xess-xmx-linux/releases/latest" },
+          { "text": "Run the old release's uninstaller. Replace OLD with its folder; OXP3 Deck shows the exact line:", "command": "bash OLD/uninstall.sh" },
+          { "text": "Run the new release's installer. Replace NEW with its folder:", "command": "cd NEW && bash install.sh" },
+          { "text": "Log out of Game Mode and back in. Remove the old folder only after that." }
+        ]
+      },
+      {
+        "id": "xess-manage",
+        "title": "Repair, switch driver or uninstall XeSS fast mode",
+        "admin": false,
+        "steps": [
+          { "text": "Repair: run the installed release's installer again in its folder. Replace PACKAGE with it; OXP3 Deck shows the exact line:", "command": "cd PACKAGE && bash install.sh" },
+          { "text": "Make another patched Mesa driver the default for every game. Replace MESA with its version, for example 26.3:", "command": "cd PACKAGE && bash tools/switch-driver.sh MESA" },
+          { "text": "Uninstall: run its uninstaller as yourself. The folder stays:", "command": "cd PACKAGE && bash uninstall.sh" },
+          { "text": "Remove an old release folder that nothing uses any more, after you logged out and back in:", "command": "rm -rf OLD" },
+          { "text": "After an install, update, repair or uninstall: log out of Game Mode and back in, or reboot." }
+        ]
+      },
+      {
+        "id": "ge-proton",
+        "title": "Get GE-Proton for XeSS fast mode",
+        "admin": false,
+        "steps": [
+          { "text": "System Protons such as proton-cachyos cannot carry the XeSS add-on. Install ProtonUp-Qt:", "command": "flatpak install --user -y flathub net.davidotek.pupgui2" },
+          { "text": "Open ProtonUp-Qt, add the newest GE-Proton for Steam, and restart Steam." },
+          { "text": "Run the XeSS installer again so it adds its shim and hook to the new Proton (the Repair step of the XeSS card)." },
+          { "text": "In the game's Properties, Compatibility, pick that GE-Proton." }
+        ]
+      },
+      {
+        "id": "scx-mode",
+        "title": "Change CachyOS's CPU scheduler mode",
+        "admin": false,
+        "steps": [
+          { "text": "In Desktop Mode, open CachyOS Kernel Manager, sched-ext, and pick scx_lavd's mode (Auto, Gaming or Power save)." },
+          { "text": "Change it before you start a game: switching while a game runs can freeze it." }
+        ]
+      },
+      {
+        "id": "launch-typo",
+        "title": "Fix a launch options typo",
+        "admin": false,
+        "steps": [
+          { "text": "In Steam, open the game's Properties, General, Launch options." },
+          { "text": "Change %command to %command% (with the closing %). Until then Steam passes everything as game arguments and no XeSS setting reaches the game." }
+        ]
+      }
+    ]
+  },
+  "permissions": [
+    "storage",
+    "notifications",
+    "network",
+    "steam.apps.read",
+    "steam.apps.launchOptions",
+    "steam.gamefiles.read",
+    "system.info",
+    "system.performance",
+    "system.battery",
+    "system.sensors",
+    "system.power.advanced",
+    "system.fan",
+    "system.profiles",
+    "fs.home.read",
+    "session.env.read",
+    "systemd.user.read",
+    "fs.system.read"
+  ],
+  "network": [
+    { "host": "github.com", "reason": "Find the newest xess-xmx-linux release", "when": "checkUpdates" },
+    { "host": "api.github.com", "reason": "Read the newest oxp3-tool version number, and the newest xess-xmx-linux release when github.com does not say", "when": "checkUpdates" }
+  ],
+  "launchOptions": {
+    "vars": [
+      { "name": "XESS", "values": "^(latest|dp4a)$" },
+      { "name": "XESS_FG", "values": "^[2-8]$" },
+      { "name": "XESS_LOG", "values": "^1$" },
+      { "name": "MESA", "values": "^[0-9]{1,4}(\\.[0-9A-Za-z-]{1,16}){0,4}$" },
+      { "name": "force_vk_vendor", "values": "^-1$" },
+      { "name": "FSR", "values": "^xess$" },
+      { "name": "FSR_FG", "values": "^(xess|inject)$" }
+    ],
+    "args": [{ "value": "-dx12" }]
+  },
+  "homeRead": [
+    ".config/environment.d/50-xess-xmx.conf",
+    ".cache/xess-xmx/driver-status",
+    ".cache/xess-xmx/compile.log",
+    ".config/systemd/user/xess-xmx-check.service"
+  ],
+  "envRead": ["VK_DRIVER_FILES"],
+  "userUnits": ["xess-xmx-check.service", "xess-xmx-shim.path"],
+  "systemRead": [
+    "/var/lib/oxp3-tool/state.json",
+    "/run/oxp3-tool-boot-entries-unfinished",
+    "/proc/cmdline",
+    "/etc/oxp3-hw/limits.toml",
+    "/usr/share/steamos-manager/remotes.d/50-oxp3-hw.toml"
+  ],
+  "settings": [
+    { "key": "checkUpdates", "type": "toggle", "label": "Check daily for oxp3-tool and XeSS updates", "default": true },
+    { "key": "powerTips", "type": "toggle", "label": "Power tips while playing", "default": true },
+    { "key": "fgExperimental", "type": "toggle", "label": "Offer 5x to 8x frame generation", "default": false }
+  ]
+}
